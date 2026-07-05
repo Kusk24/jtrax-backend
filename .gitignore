@@ -1,5 +1,5 @@
-node_modules/
-dist/
+bin/
+*.exe
 .env
 .env.local
 *.log
