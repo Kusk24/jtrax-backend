@@ -1,25 +1,41 @@
-// jtrax-backend — Go scaffold only. No framework or architecture is chosen
-// yet; everything beyond /health waits for the system design to be finished.
+// jtrax-backend — REST API for the JTrax portals: SQLite storage, session
+// auth, and role-scoped CRUD over every ER-model entity under /api/v1.
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"strings"
+
+	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/db"
+	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	dbPath := os.Getenv("JTRAX_DB")
+	if dbPath == "" {
+		dbPath = "jtrax.db"
+	}
+	d, err := db.Open(dbPath)
+	if err != nil {
+		log.Fatalf("open database: %v", err)
+	}
+	if err := db.Seed(d); err != nil {
+		log.Fatalf("seed database: %v", err)
+	}
+
+	origins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
+	if origins[0] == "" {
+		origins = []string{"http://localhost:3000", "http://localhost:3001"}
+	}
+	handler := httpx.CORS(origins, api.NewHandler(d))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = "8080"
 	}
-	log.Printf("jtrax-backend listening on http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Printf("jtrax-backend listening on http://localhost:%s (db %s)", port, dbPath)
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
