@@ -47,9 +47,10 @@ type RosterStudent struct {
 	// Expiry is an offset, not a date: the console's literal dates have all
 	// gone past, and a roster that imports as "everyone expired" demonstrates
 	// nothing. The offsets reproduce the status each student was written with.
-	ExpiresInDays       int `json:"expires_in_days"`
-	LastAttendedDaysAgo int `json:"last_attended_days_ago"`
-	Streak              int `json:"streak"`
+	ExpiresInDays       int           `json:"expires_in_days"`
+	LastAttendedDaysAgo int           `json:"last_attended_days_ago"`
+	Streak              int           `json:"streak"`
+	Payment             RosterPayment `json:"payment"`
 }
 
 type RosterFamily struct {
@@ -58,8 +59,10 @@ type RosterFamily struct {
 }
 
 type Roster struct {
-	Classes  []RosterClass  `json:"classes"`
-	Families []RosterFamily `json:"families"`
+	Classes       []RosterClass  `json:"classes"`
+	Families      []RosterFamily `json:"families"`
+	Schedule      []RosterSlot   `json:"schedule"`
+	ScheduleWeeks int            `json:"schedule_weeks"`
 }
 
 // LoadRoster parses the embedded fixture.
@@ -120,7 +123,35 @@ func ImportRoster(d *sql.DB, r *Roster, password string, today time.Time) ([]str
 			written = append(written, st.Email)
 		}
 	}
+
+	/* After every student exists and is enrolled: the timetable checks in
+	   whoever is on a class, and a payment needs an enrolment to point at. */
+	if err := importSchedule(d, r, today); err != nil {
+		return nil, err
+	}
+	for _, f := range r.Families {
+		for _, st := range f.Students {
+			studentID, err := studentIDByEmail(d, st.Email)
+			if err != nil {
+				return nil, err
+			}
+			if err := importPayment(d, studentID, st.Payment, today); err != nil {
+				return nil, fmt.Errorf("payment for %s: %w", st.Name, err)
+			}
+			if err := importPractice(d, studentID, st.Streak, today); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return written, nil
+}
+
+func studentIDByEmail(d *sql.DB, email string) (string, error) {
+	var id string
+	err := d.QueryRow(`SELECT s.student_id FROM student s
+		JOIN user_account u ON u.user_account_id = s.user_account_id
+		WHERE u.email = ?`, strings.ToLower(strings.TrimSpace(email))).Scan(&id)
+	return id, err
 }
 
 // slugID builds a stable id from an email local part or a name, so re-running
@@ -317,6 +348,188 @@ func ensureStudent(d *sql.DB, st RosterStudent, parentID, classID, hash string, 
 			VALUES (?,?,'purchase',?,?,?,'Opening balance imported with the roster')`,
 			txID, enrollmentID, st.Credits, expiry, st.EnrolledDate); err != nil {
 			return fmt.Errorf("credit %s: %w", st.Name, err)
+		}
+	}
+	return nil
+}
+
+/* ---- the timetable, attendance, payments and practice ----
+
+   These used to be constants in the console: the dashboard drew the same four
+   classes and the same check-in list whatever the database held. Generating
+   them here makes them rows the console reads like any other. */
+
+// RosterPayment is the one payment a family made, placed relative to the import.
+type RosterPayment struct {
+	Amount    float64 `json:"amount"`
+	Discount  float64 `json:"discount"`
+	Method    string  `json:"method"`
+	MonthsAgo int     `json:"months_ago"`
+	Day       int     `json:"day"`
+}
+
+// RosterSlot is one weekly timetable entry. Weekday is Go's time.Weekday.
+type RosterSlot struct {
+	Class   string `json:"class"`
+	Weekday int    `json:"weekday"`
+	Start   string `json:"start"`
+	End     string `json:"end"`
+}
+
+// importSchedule writes the last ScheduleWeeks of sessions for every slot, and
+// checks in the students enrolled in that class. The most recent occurrence is
+// left Ongoing with nobody checked out, so the dashboard has a live class.
+func importSchedule(d *sql.DB, r *Roster, today time.Time) error {
+	if len(r.Schedule) == 0 {
+		return nil
+	}
+	weeks := r.ScheduleWeeks
+	if weeks < 1 {
+		weeks = 1
+	}
+
+	for _, slot := range r.Schedule {
+		var classID string
+		if err := d.QueryRow(`SELECT class_id FROM class WHERE name = ?`, slot.Class).Scan(&classID); err != nil {
+			return fmt.Errorf("schedule %s: %w", slot.Class, err)
+		}
+		// The most recent occurrence of this weekday, today included.
+		back := (int(today.Weekday()) - slot.Weekday + 7) % 7
+		latest := today.AddDate(0, 0, -back)
+
+		enrolled, err := studentsInClass(d, classID)
+		if err != nil {
+			return err
+		}
+
+		for week := 0; week < weeks; week++ {
+			date := latest.AddDate(0, 0, -7*week)
+			day := date.Format("2006-01-02")
+			id := slugID("ses", fmt.Sprintf("%s_%s", slot.Class, day))
+			/* A session dated today is the one the dashboard shows as running;
+			   compare the day, not the timestamp, since `today` carries a clock. */
+			status := "Completed"
+			if day == today.Format("2006-01-02") {
+				status = "Ongoing"
+			}
+			if _, err := d.Exec(`INSERT INTO class_session (session_id, class_id, session_date,
+				start_time, end_time, duration_hours, session_status) VALUES (?,?,?,?,?,?,?)
+				ON CONFLICT (session_id) DO UPDATE SET session_status = excluded.session_status`,
+				id, classID, day, slot.Start, slot.End, hoursBetween(slot.Start, slot.End), status); err != nil {
+				return fmt.Errorf("session %s: %w", id, err)
+			}
+
+			for i, studentID := range enrolled {
+				// A couple of absences per session, so attendance is not a
+				// column of identical rows.
+				if (week+i)%7 == 3 {
+					continue
+				}
+				checkIn := date.Format("2006-01-02") + "T" + slot.Start + ":00"
+				var checkOut any
+				if status == "Completed" {
+					checkOut = date.Format("2006-01-02") + "T" + slot.End + ":00"
+				}
+				attID := slugID("att", fmt.Sprintf("%s_%s", id, studentID))
+				if _, err := d.Exec(`INSERT INTO attendance (attendance_id, student_id, session_id,
+					check_in_time, check_out_time) VALUES (?,?,?,?,?)
+					ON CONFLICT (student_id, session_id) DO UPDATE SET
+						check_in_time = excluded.check_in_time,
+						check_out_time = excluded.check_out_time`,
+					attID, studentID, id, checkIn, checkOut); err != nil {
+					return fmt.Errorf("attendance %s: %w", attID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func studentsInClass(d *sql.DB, classID string) ([]string, error) {
+	rows, err := d.Query(`SELECT student_id FROM student_enrollment
+		WHERE class_id = ? AND status = 'Active' ORDER BY student_id`, classID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// hoursBetween turns "10:00"/"12:00" into 2. Zero if either fails to parse,
+// which only costs the display a duration.
+func hoursBetween(start, end string) float64 {
+	s, err1 := time.Parse("15:04", start)
+	e, err2 := time.Parse("15:04", end)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	return e.Sub(s).Hours()
+}
+
+// importPayment records what the family paid, against their enrolment.
+func importPayment(d *sql.DB, studentID string, p RosterPayment, today time.Time) error {
+	if p.Amount == 0 {
+		return nil
+	}
+	var enrollmentID string
+	err := d.QueryRow(`SELECT enrollment_id FROM student_enrollment WHERE student_id = ?`, studentID).Scan(&enrollmentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	month := time.Date(today.Year(), today.Month()-time.Month(p.MonthsAgo), 1, 0, 0, 0, 0, time.UTC)
+	day := p.Day
+	if day < 1 {
+		day = 1
+	}
+	date := month.AddDate(0, 0, day-1)
+	// A payment dated in the future reads as a mistake on the revenue chart.
+	if date.After(today) {
+		date = today
+	}
+
+	id := slugID("pay", studentID)
+	method := p.Method
+	if method == "" {
+		method = "Cash"
+	}
+	_, err = d.Exec(`INSERT INTO payment (payment_id, student_id, enrollment_id, amount,
+		discount_amount, final_amount, payment_method, status, payment_date, reference_number)
+		VALUES (?,?,?,?,?,?,?, 'Paid', ?, ?)
+		ON CONFLICT (payment_id) DO UPDATE SET
+			amount = excluded.amount,
+			discount_amount = excluded.discount_amount,
+			final_amount = excluded.final_amount,
+			payment_method = excluded.payment_method,
+			payment_date = excluded.payment_date`,
+		id, studentID, enrollmentID, p.Amount, p.Discount, p.Amount-p.Discount,
+		method, date.Format("2006-01-02"), strings.ToUpper(method[:2])+"-"+date.Format("20060102"))
+	return err
+}
+
+// importPractice writes one practice_activity row per day of the student's
+// streak, ending today — the console draws its heat strip from these.
+func importPractice(d *sql.DB, studentID string, streak int, today time.Time) error {
+	for back := 0; back < streak; back++ {
+		date := today.AddDate(0, 0, -back).Format("2006-01-02")
+		id := slugID("act", studentID+"_"+date)
+		minutes := 20 + (back*7)%25
+		if _, err := d.Exec(`INSERT INTO practice_activity (activity_id, student_id, activity_date,
+			minutes_practiced, puzzles_completed, points_earned, streak_count) VALUES (?,?,?,?,?,?,?)
+			ON CONFLICT (student_id, activity_date) DO UPDATE SET
+				minutes_practiced = excluded.minutes_practiced`,
+			id, studentID, date, minutes, 2+back%4, minutes/2, streak-back); err != nil {
+			return fmt.Errorf("practice %s: %w", id, err)
 		}
 	}
 	return nil

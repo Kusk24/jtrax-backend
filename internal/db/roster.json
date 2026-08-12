@@ -41,7 +41,14 @@
           "credits": 8,
           "expires_in_days": 320,
           "last_attended_days_ago": 3,
-          "streak": 9
+          "streak": 9,
+          "payment": {
+            "amount": 14000,
+            "discount": 0,
+            "method": "PromptPay",
+            "months_ago": 5,
+            "day": 8
+          }
         }
       ]
     },
@@ -64,7 +71,14 @@
           "credits": 12,
           "expires_in_days": 335,
           "last_attended_days_ago": 2,
-          "streak": 14
+          "streak": 14,
+          "payment": {
+            "amount": 14000,
+            "discount": 1000,
+            "method": "BankTransfer",
+            "months_ago": 5,
+            "day": 19
+          }
         }
       ]
     },
@@ -87,7 +101,14 @@
           "credits": 3,
           "expires_in_days": 354,
           "last_attended_days_ago": 6,
-          "streak": 4
+          "streak": 4,
+          "payment": {
+            "amount": 12000,
+            "discount": 0,
+            "method": "CreditCard",
+            "months_ago": 4,
+            "day": 3
+          }
         }
       ]
     },
@@ -110,7 +131,14 @@
           "credits": 6,
           "expires_in_days": 5,
           "last_attended_days_ago": 4,
-          "streak": 6
+          "streak": 6,
+          "payment": {
+            "amount": 9000,
+            "discount": 0,
+            "method": "Cash",
+            "months_ago": 4,
+            "day": 21
+          }
         }
       ]
     },
@@ -133,7 +161,14 @@
           "credits": 1,
           "expires_in_days": 285,
           "last_attended_days_ago": 9,
-          "streak": 2
+          "streak": 2,
+          "payment": {
+            "amount": 9000,
+            "discount": 500,
+            "method": "PromptPay",
+            "months_ago": 3,
+            "day": 6
+          }
         }
       ]
     },
@@ -156,7 +191,14 @@
           "credits": 9,
           "expires_in_days": 392,
           "last_attended_days_ago": 2,
-          "streak": 11
+          "streak": 11,
+          "payment": {
+            "amount": 12000,
+            "discount": 0,
+            "method": "BankTransfer",
+            "months_ago": 3,
+            "day": 17
+          }
         }
       ]
     },
@@ -179,7 +221,14 @@
           "credits": 4,
           "expires_in_days": 311,
           "last_attended_days_ago": 7,
-          "streak": 5
+          "streak": 5,
+          "payment": {
+            "amount": 10500,
+            "discount": 0,
+            "method": "PromptPay",
+            "months_ago": 2,
+            "day": 11
+          }
         }
       ]
     },
@@ -202,7 +251,14 @@
           "credits": 0,
           "expires_in_days": -102,
           "last_attended_days_ago": 21,
-          "streak": 0
+          "streak": 0,
+          "payment": {
+            "amount": 10500,
+            "discount": 0,
+            "method": "CreditCard",
+            "months_ago": 2,
+            "day": 27
+          }
         }
       ]
     },
@@ -225,7 +281,14 @@
           "credits": 4,
           "expires_in_days": 332,
           "last_attended_days_ago": 5,
-          "streak": 3
+          "streak": 3,
+          "payment": {
+            "amount": 9000,
+            "discount": 0,
+            "method": "Cash",
+            "months_ago": 1,
+            "day": 9
+          }
         }
       ]
     },
@@ -248,9 +311,67 @@
           "credits": 2,
           "expires_in_days": 347,
           "last_attended_days_ago": 45,
-          "streak": 0
+          "streak": 0,
+          "payment": {
+            "amount": 9000,
+            "discount": 1000,
+            "method": "PromptPay",
+            "months_ago": 0,
+            "day": 4
+          }
         }
       ]
     }
-  ]
+  ],
+  "schedule": [
+    {
+      "class": "Master Class",
+      "weekday": 1,
+      "start": "10:00",
+      "end": "12:00"
+    },
+    {
+      "class": "Beginner Class",
+      "weekday": 1,
+      "start": "16:00",
+      "end": "17:30"
+    },
+    {
+      "class": "Intermediate Class",
+      "weekday": 2,
+      "start": "13:00",
+      "end": "15:00"
+    },
+    {
+      "class": "Beginner Class",
+      "weekday": 3,
+      "start": "16:00",
+      "end": "17:30"
+    },
+    {
+      "class": "Master Class",
+      "weekday": 4,
+      "start": "10:00",
+      "end": "12:00"
+    },
+    {
+      "class": "Intermediate Class",
+      "weekday": 4,
+      "start": "13:00",
+      "end": "15:00"
+    },
+    {
+      "class": "Beginner Class",
+      "weekday": 5,
+      "start": "16:00",
+      "end": "17:30"
+    },
+    {
+      "class": "Weekend Class",
+      "weekday": 6,
+      "start": "09:00",
+      "end": "11:00"
+    }
+  ],
+  "schedule_weeks": 6
 }

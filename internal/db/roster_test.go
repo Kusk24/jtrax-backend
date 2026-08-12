@@ -237,3 +237,77 @@ func TestImportRosterRequiresAPassword(t *testing.T) {
 		t.Error("importing with an empty password was allowed")
 	}
 }
+
+func TestImportRosterWritesTheTimetable(t *testing.T) {
+	d := open(t)
+	r, _ := db.LoadRoster()
+	if _, err := db.ImportRoster(d, r, "roster-password", importDay); err != nil {
+		t.Fatal(err)
+	}
+
+	var sessions, attendance, payments, practice int
+	d.QueryRow(`SELECT COUNT(*) FROM class_session`).Scan(&sessions)
+	d.QueryRow(`SELECT COUNT(*) FROM attendance`).Scan(&attendance)
+	d.QueryRow(`SELECT COUNT(*) FROM payment`).Scan(&payments)
+	d.QueryRow(`SELECT COUNT(*) FROM practice_activity`).Scan(&practice)
+
+	// 8 slots x 6 weeks.
+	if sessions != 48 {
+		t.Errorf("%d sessions, want 48", sessions)
+	}
+
+	// The dashboard's "Today's Classes" is empty unless the day the import ran
+	// has sessions on it, so the timetable has to cover every opening day.
+	var todays int
+	d.QueryRow(`SELECT COUNT(*) FROM class_session WHERE session_date = ?`,
+		importDay.Format("2006-01-02")).Scan(&todays)
+	if todays == 0 {
+		t.Error("nothing is scheduled on the import day, so the dashboard opens empty")
+	}
+	if attendance == 0 {
+		t.Error("no attendance written, so the dashboard's check-in list would be empty")
+	}
+	if payments != 10 {
+		t.Errorf("%d payments, want one per family", payments)
+	}
+	if practice == 0 {
+		t.Error("no practice activity written, so the practice strip would be blank")
+	}
+
+	// The revenue chart reads six months back; every payment must land inside it.
+	oldest := importDay.AddDate(0, -6, 0).Format("2006-01-02")
+	var stray int
+	d.QueryRow(`SELECT COUNT(*) FROM payment WHERE payment_date < ? OR payment_date > ?`,
+		oldest, importDay.Format("2006-01-02")).Scan(&stray)
+	if stray != 0 {
+		t.Errorf("%d payments fall outside the six months the revenue chart shows", stray)
+	}
+
+	// Nobody is checked out of a class that is still running.
+	var openRows int
+	d.QueryRow(`SELECT COUNT(*) FROM attendance a JOIN class_session s ON s.session_id = a.session_id
+		WHERE s.session_status = 'Ongoing' AND a.check_out_time IS NOT NULL`).Scan(&openRows)
+	if openRows != 0 {
+		t.Errorf("%d students are checked out of an ongoing session", openRows)
+	}
+}
+
+func TestImportRosterTimetableIsIdempotent(t *testing.T) {
+	d := open(t)
+	r, _ := db.LoadRoster()
+	if _, err := db.ImportRoster(d, r, "pw-one", importDay); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ImportRoster(d, r, "pw-two", importDay); err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]int{"class_session": 48, "payment": 10} {
+		var n int
+		if err := d.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != want {
+			t.Errorf("re-running duplicated %s: %d rows, want %d", table, n, want)
+		}
+	}
+}
