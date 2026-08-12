@@ -206,3 +206,62 @@ func TestAccountEndpointNeverLeaksHashes(t *testing.T) {
 		}
 	}
 }
+
+// The login email is a derived, staff-only column: entity tables do not carry
+// one, and a teacher who can list every student must not thereby get every
+// student's email address.
+func TestDerivedEmailIsStaffOnly(t *testing.T) {
+	srv := newServer(t)
+
+	staff := &client{t: t, srv: srv}
+	staff.login("admin@jca.ac.th")
+	_, _, students := staff.do("GET", "/api/v1/students", nil)
+	var penny map[string]any
+	for _, s := range students {
+		if s["student_id"] == "stu_penny" {
+			penny = s
+		}
+	}
+	if penny == nil {
+		t.Fatal("seeded student stu_penny missing")
+	}
+	if penny["email"] != "penny@jca.ac.th" {
+		t.Fatalf("admin should see the login email, got %v", penny["email"])
+	}
+
+	// Single-row reads go through a different query path, so check both.
+	_, one, _ := staff.do("GET", "/api/v1/students/stu_penny", nil)
+	if one["email"] != "penny@jca.ac.th" {
+		t.Fatalf("admin GET by id should include email, got %v", one["email"])
+	}
+	_, _, parents := staff.do("GET", "/api/v1/parents", nil)
+	if len(parents) == 0 || parents[0]["email"] != "sandy01234@gmail.com" {
+		t.Fatalf("admin should see the parent login email, got %v", parents)
+	}
+
+	for _, who := range []string{"serene@jca.ac.th", "sandy01234@gmail.com", "penny@jca.ac.th"} {
+		c := &client{t: t, srv: srv}
+		c.login(who)
+		_, _, rows := c.do("GET", "/api/v1/students", nil)
+		for _, s := range rows {
+			if _, present := s["email"]; present {
+				t.Errorf("%s must not receive a student email column, got %v", who, s["email"])
+			}
+		}
+	}
+}
+
+// A derived column is read-only: it belongs to another table, so offering it
+// on a write must be rejected rather than silently ignored.
+func TestDerivedEmailRejectedOnWrite(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	status, obj, _ := c.do("PATCH", "/api/v1/students/stu_penny", map[string]any{"email": "attacker@example.com"})
+	if status != 400 {
+		t.Fatalf("writing a derived column: want 400, got %d (%v)", status, obj)
+	}
+	_, one, _ := c.do("GET", "/api/v1/students/stu_penny", nil)
+	if one["email"] != "penny@jca.ac.th" {
+		t.Fatalf("email changed to %v", one["email"])
+	}
+}
