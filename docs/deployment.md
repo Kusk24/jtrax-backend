@@ -61,7 +61,33 @@ Then **remove both** and redeploy again. Seeding is a no-op once any account
 exists, so leaving them set is not destructive — but it keeps a password in the
 service configuration for no reason.
 
-### 4. Point the portals at it
+### 4. Create the real staff sign-ins
+
+The seed is a demo fixture and refuses to touch a database that already has
+accounts, so it cannot be used to add a colleague or fix a forgotten password.
+`JTRAX_STAFF` can. Set it to a JSON array and redeploy:
+
+```
+JTRAX_STAFF=[{"email":"head@jca.ac.th","password":"<choose one>","role":"Admin","name":"JCA Head Office","phone":"02-123-4567"},{"email":"front@jca.ac.th","password":"<choose another>","role":"Receptionist","name":"Front Desk"}]
+```
+
+`role` is `Admin` or `Receptionist` — the two roles the admin console signs in.
+An Admin sees every section; a Receptionist does not get Admins, Academy or
+Settings. Passwords must be at least 8 characters.
+
+It runs on every boot and is idempotent: an account that does not exist is
+created, one that does has its password, role and name updated. That makes it
+the password-reset path too — and because changing a password ends the sessions
+it opened, whoever held the old one is signed out.
+
+**Remove the variable once the accounts exist.** Unlike `JTRAX_SEED` this one
+keeps applying, so leaving it set means live passwords sit in the Render
+dashboard and every deploy silently resets them.
+
+Further accounts are easier from the console itself: the Admins page creates a
+real `user_account` and shows a generated temporary password once.
+
+### 5. Point the portals at it
 
 In each Vercel project (`jtrax-web-app`, `jtrax-admin`) set:
 
@@ -71,7 +97,7 @@ JTRAX_API_URL=https://jtrax-backend.onrender.com
 
 Redeploy. Nothing else changes: `app/api/[...path]/route.ts` already reads it.
 
-### 5. Turn on the keep-alive
+### 6. Turn on the keep-alive
 
 In this repo: Settings > Secrets and variables > Actions > **Variables** >
 `BACKEND_URL` = your Render URL. `.github/workflows/keep-alive.yml` then pings
