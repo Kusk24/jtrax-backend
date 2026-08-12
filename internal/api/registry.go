@@ -46,7 +46,7 @@ func ownParentRow(_ *sql.DB, id *auth.Identity, row map[string]any) bool {
 }
 
 var (
-	everyone = []string{"Teacher", "Parent", "Student"}
+	everyone       = []string{"Teacher", "Parent", "Student"}
 	sessionStatus  = []string{"Scheduled", "Ongoing", "Completed"}
 	enrollStatus   = []string{"Active", "Completed", "Withdrawn"}
 	classTypes     = []string{"Private", "Group", "Master"}
@@ -71,6 +71,12 @@ func Registry() []*Resource {
 				{Name: "last_attended_date", Kind: "text"},
 				{Name: "streak_count", Kind: "int"},
 			},
+			// The login email, which the student table deliberately does not
+			// duplicate. Staff only: teachers can already list every student,
+			// and a name is not an email address.
+			Derived: []Derived{
+				{Name: "email", Expr: "(SELECT ua.email FROM user_account ua WHERE ua.user_account_id = student.user_account_id)"},
+			},
 			ReadRoles: everyone,
 			Scope: map[string]ScopeFn{
 				"Parent":  byParentStudents("student_id"),
@@ -82,6 +88,9 @@ func Registry() []*Resource {
 			Cols: []Col{
 				{Name: "user_account_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
+			},
+			Derived: []Derived{
+				{Name: "email", Expr: "(SELECT ua.email FROM user_account ua WHERE ua.user_account_id = parent.user_account_id)"},
 			},
 			ReadRoles: []string{"Parent"},
 			Scope:     map[string]ScopeFn{"Parent": byOwnParent("parent_id")},

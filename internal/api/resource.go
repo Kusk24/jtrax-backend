@@ -24,6 +24,22 @@ type Col struct {
 	Required bool
 }
 
+// Derived is a read-only column pulled from another table by a scalar
+// subquery — the login email on user_account, say, which the entity tables
+// deliberately do not duplicate. It is selected, never written: `validate`
+// rejects any field without a matching Col, so a derived name in a request
+// body is already a 400.
+//
+// Expr is SQL spliced into the SELECT list, so it must stay a constant
+// authored here in the registry and must never be built from request data.
+type Derived struct {
+	Name string
+	Expr string
+	// Roles beyond staff that may see the column. Empty means staff only —
+	// a derived column widens what a row exposes, so it opts in rather than out.
+	Roles []string
+}
+
 // ScopeFn returns a WHERE fragment + args restricting rows to what the caller
 // may see, or ("", nil) for unrestricted.
 type ScopeFn func(id *auth.Identity) (string, []any)
@@ -32,11 +48,12 @@ type ScopeFn func(id *auth.Identity) (string, []any)
 type OwnFn func(d *sql.DB, id *auth.Identity, row map[string]any) bool
 
 type Resource struct {
-	Name     string // URL segment
-	Table    string
-	IDCol    string
-	IDPrefix string
-	Cols     []Col
+	Name       string // URL segment
+	Table      string
+	IDCol      string
+	IDPrefix   string
+	Cols       []Col
+	Derived    []Derived
 	ReadRoles  []string // roles beyond staff that may read (scoped)
 	WriteRoles []string // roles beyond staff that may create/update
 	Scope      map[string]ScopeFn
@@ -100,10 +117,18 @@ func (rs *Resource) validate(row map[string]any, create bool) error {
 	return nil
 }
 
-func (rs *Resource) selectCols() string {
+// selectCols builds the SELECT list for a caller. Derived columns are omitted
+// unless the role is allowed to see them, so the column never reaches the JSON
+// for a caller who shouldn't have it — rather than being filtered afterwards.
+func (rs *Resource) selectCols(role string) string {
 	names := []string{rs.IDCol}
 	for _, c := range rs.Cols {
 		names = append(names, c.Name)
+	}
+	for _, dc := range rs.Derived {
+		if isStaff(role) || slices.Contains(dc.Roles, role) {
+			names = append(names, dc.Expr+" AS "+dc.Name)
+		}
 	}
 	return strings.Join(names, ", ")
 }
@@ -152,7 +177,7 @@ func (rs *Resource) handleList(d *sql.DB) http.HandlerFunc {
 			where = append(where, name+" = ?")
 			args = append(args, vals[0])
 		}
-		q := "SELECT " + rs.selectCols() + " FROM " + rs.Table
+		q := "SELECT " + rs.selectCols(id.Role) + " FROM " + rs.Table
 		if len(where) > 0 {
 			q += " WHERE " + strings.Join(where, " AND ")
 		}
@@ -179,7 +204,7 @@ func (rs *Resource) fetch(d *sql.DB, id *auth.Identity, rowID string) (map[strin
 		where += " AND " + frag
 		args = append(args, a...)
 	}
-	rows, err := d.Query("SELECT "+rs.selectCols()+" FROM "+rs.Table+" WHERE "+where, args...)
+	rows, err := d.Query("SELECT "+rs.selectCols(id.Role)+" FROM "+rs.Table+" WHERE "+where, args...)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
