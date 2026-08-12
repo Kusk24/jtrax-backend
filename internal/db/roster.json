@@ -1,0 +1,256 @@
+{
+  "classes": [
+    {
+      "name": "Master Class",
+      "class_type": "Master",
+      "description": "Tournament preparation and deep opening study"
+    },
+    {
+      "name": "Intermediate Class",
+      "class_type": "Group",
+      "description": "Tactics, endgames and opening repertoire"
+    },
+    {
+      "name": "Beginner Class",
+      "class_type": "Group",
+      "description": "Fundamentals for new players"
+    },
+    {
+      "name": "Weekend Class",
+      "class_type": "Group",
+      "description": "Saturday and Sunday sessions"
+    }
+  ],
+  "families": [
+    {
+      "parent": {
+        "name": "Carol Carter",
+        "email": "carol.carter@gmail.com",
+        "phone": "+66 81 234 5678",
+        "line_id": "carol.carter"
+      },
+      "students": [
+        {
+          "name": "Emma Carter",
+          "email": "emma.carter@student.jca.ac.th",
+          "date_of_birth": "2015-03-08",
+          "level": "Advanced",
+          "relation": "Mother",
+          "class": "Master Class",
+          "enrolled_date": "2024-01-12",
+          "credits": 8,
+          "expires_in_days": 320,
+          "last_attended_days_ago": 3,
+          "streak": 9
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "David Chen",
+        "email": "david.chen@gmail.com",
+        "phone": "+66 89 001 2233",
+        "line_id": "david.chen"
+      },
+      "students": [
+        {
+          "name": "Liam Chen",
+          "email": "liam.chen@student.jca.ac.th",
+          "date_of_birth": "2013-01-22",
+          "level": "Advanced",
+          "relation": "Father",
+          "class": "Master Class",
+          "enrolled_date": "2023-03-03",
+          "credits": 12,
+          "expires_in_days": 335,
+          "last_attended_days_ago": 2,
+          "streak": 14
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Maria Reyes",
+        "email": "maria.reyes@gmail.com",
+        "phone": "+66 89 771 4420",
+        "line_id": "maria.reyes"
+      },
+      "students": [
+        {
+          "name": "Sofia Reyes",
+          "email": "sofia.reyes@student.jca.ac.th",
+          "date_of_birth": "2014-05-14",
+          "level": "Intermediate",
+          "relation": "Mother",
+          "class": "Intermediate Class",
+          "enrolled_date": "2023-08-20",
+          "credits": 3,
+          "expires_in_days": 354,
+          "last_attended_days_ago": 6,
+          "streak": 4
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Grace Kim",
+        "email": "grace.kim@gmail.com",
+        "phone": "+66 82 110 4432",
+        "line_id": "grace.kim"
+      },
+      "students": [
+        {
+          "name": "Noah Kim",
+          "email": "noah.kim@student.jca.ac.th",
+          "date_of_birth": "2017-02-03",
+          "level": "Beginner",
+          "relation": "Mother",
+          "class": "Beginner Class",
+          "enrolled_date": "2024-02-15",
+          "credits": 6,
+          "expires_in_days": 5,
+          "last_attended_days_ago": 4,
+          "streak": 6
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Raj Patel",
+        "email": "raj.patel@gmail.com",
+        "phone": "+66 83 900 1122",
+        "line_id": "raj.patel"
+      },
+      "students": [
+        {
+          "name": "Ava Patel",
+          "email": "ava.patel@student.jca.ac.th",
+          "date_of_birth": "2016-07-19",
+          "level": "Beginner",
+          "relation": "Father",
+          "class": "Beginner Class",
+          "enrolled_date": "2023-06-09",
+          "credits": 1,
+          "expires_in_days": 285,
+          "last_attended_days_ago": 9,
+          "streak": 2
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Elena Novak",
+        "email": "elena.novak@gmail.com",
+        "phone": "+66 84 220 6671",
+        "line_id": "elena.novak"
+      },
+      "students": [
+        {
+          "name": "Mia Novak",
+          "email": "mia.novak@student.jca.ac.th",
+          "date_of_birth": "2013-04-27",
+          "level": "Intermediate",
+          "relation": "Mother",
+          "class": "Intermediate Class",
+          "enrolled_date": "2022-10-28",
+          "credits": 9,
+          "expires_in_days": 392,
+          "last_attended_days_ago": 2,
+          "streak": 11
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Tom Adams",
+        "email": "tom.adams@gmail.com",
+        "phone": "+66 87 221 9090",
+        "line_id": "tom.adams"
+      },
+      "students": [
+        {
+          "name": "Leo Adams",
+          "email": "leo.adams@student.jca.ac.th",
+          "date_of_birth": "2015-06-11",
+          "level": "Intermediate",
+          "relation": "Father",
+          "class": "Weekend Class",
+          "enrolled_date": "2024-04-05",
+          "credits": 4,
+          "expires_in_days": 311,
+          "last_attended_days_ago": 7,
+          "streak": 5
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Nina Bennet",
+        "email": "nina.bennet@gmail.com",
+        "phone": "+66 89 552 6612",
+        "line_id": "nina.bennet"
+      },
+      "students": [
+        {
+          "name": "Zoe Bennet",
+          "email": "zoe.bennet@student.jca.ac.th",
+          "date_of_birth": "2012-01-09",
+          "level": "Advanced",
+          "relation": "Mother",
+          "class": "Weekend Class",
+          "enrolled_date": "2023-11-17",
+          "credits": 0,
+          "expires_in_days": -102,
+          "last_attended_days_ago": 21,
+          "streak": 0
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Kevin's Parent",
+        "email": "kevin.dad@gmail.com",
+        "phone": "+66 81 555 2231",
+        "line_id": "kevin.dad"
+      },
+      "students": [
+        {
+          "name": "Kevin Lim",
+          "email": "kevin.lim@student.jca.ac.th",
+          "date_of_birth": "2018-03-30",
+          "level": "Beginner",
+          "relation": "Father",
+          "class": "Beginner Class",
+          "enrolled_date": "2022-07-22",
+          "credits": 4,
+          "expires_in_days": 332,
+          "last_attended_days_ago": 5,
+          "streak": 3
+        }
+      ]
+    },
+    {
+      "parent": {
+        "name": "Daniel's Parent",
+        "email": "daniel.dad@gmail.com",
+        "phone": "+66 86 442 1190",
+        "line_id": "daniel.dad"
+      },
+      "students": [
+        {
+          "name": "Daniel Wong",
+          "email": "daniel.wong@student.jca.ac.th",
+          "date_of_birth": "2011-05-02",
+          "level": "Beginner",
+          "relation": "Father",
+          "class": "Beginner Class",
+          "enrolled_date": "2023-09-30",
+          "credits": 2,
+          "expires_in_days": 347,
+          "last_attended_days_ago": 45,
+          "streak": 0
+        }
+      ]
+    }
+  ]
+}

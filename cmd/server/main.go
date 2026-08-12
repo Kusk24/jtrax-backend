@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -30,6 +31,9 @@ func main() {
 	}
 	if err := bootstrapStaff(d); err != nil {
 		log.Fatalf("bootstrap staff: %v", err)
+	}
+	if err := importRoster(d); err != nil {
+		log.Fatalf("import roster: %v", err)
 	}
 
 	origins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
@@ -79,6 +83,30 @@ func bootstrapStaff(d *sql.DB) error {
 		return err
 	}
 	log.Printf("staff accounts provisioned: %s", strings.Join(written, ", "))
+	return nil
+}
+
+// importRoster loads the ten families the admin console used to hard-code, as
+// real parent and student accounts sharing JTRAX_ROSTER_PASSWORD. Opt-in with
+// JTRAX_ROSTER=1; re-running updates rather than duplicates, so the variable is
+// safe to leave set, but there is no reason to.
+func importRoster(d *sql.DB) error {
+	if os.Getenv("JTRAX_ROSTER") != "1" {
+		return nil
+	}
+	password := os.Getenv("JTRAX_ROSTER_PASSWORD")
+	if password == "" {
+		return fmt.Errorf("JTRAX_ROSTER_PASSWORD is required when JTRAX_ROSTER=1")
+	}
+	roster, err := db.LoadRoster()
+	if err != nil {
+		return err
+	}
+	written, err := db.ImportRoster(d, roster, password, time.Now())
+	if err != nil {
+		return err
+	}
+	log.Printf("roster imported: %d accounts (%s)", len(written), strings.Join(written, ", "))
 	return nil
 }
 
