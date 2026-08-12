@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -19,6 +20,7 @@ import (
 
 func main() {
 	dsn := firstSet(os.Getenv("DATABASE_URL"), os.Getenv("JTRAX_DB"), "jtrax.db")
+	dsn = withAuthToken(dsn, os.Getenv("TURSO_AUTH_TOKEN"))
 	d, err := db.Open(dsn)
 	if err != nil {
 		log.Fatalf("open database: %v", err)
@@ -73,6 +75,24 @@ func seedConfig(dsn, flag, password string) (run bool, pw string, err error) {
 		password = db.DevPassword
 	}
 	return true, password, nil
+}
+
+// withAuthToken folds a separately-configured Turso token into the dsn. Render
+// stores the URL and the token as two variables so the secret is never part of
+// a value that gets logged or copied around; the driver wants them as one.
+// A token already present in the dsn wins, and a local file path is untouched.
+func withAuthToken(dsn, token string) string {
+	if token == "" || strings.Contains(dsn, "authToken=") {
+		return dsn
+	}
+	if !strings.HasPrefix(dsn, "libsql://") && !strings.HasPrefix(dsn, "https://") {
+		return dsn
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "authToken=" + url.QueryEscape(token)
 }
 
 // firstSet returns the first non-empty value.

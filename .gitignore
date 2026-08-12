@@ -4,3 +4,8 @@ bin/
 .env.local
 *.log
 .DS_Store
+
+# Local SQLite databases and their WAL sidecars.
+*.db
+*.db-wal
+*.db-shm

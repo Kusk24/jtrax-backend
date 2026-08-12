@@ -73,6 +73,59 @@ func TestSeedConfig(t *testing.T) {
 	}
 }
 
+func TestWithAuthToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		dsn   string
+		token string
+		want  string
+	}{
+		{
+			name:  "token is appended to a bare turso url",
+			dsn:   "libsql://jtrax.turso.io",
+			token: "abc123",
+			want:  "libsql://jtrax.turso.io?authToken=abc123",
+		},
+		{
+			name:  "token joins an existing query string",
+			dsn:   "libsql://jtrax.turso.io?foo=1",
+			token: "abc123",
+			want:  "libsql://jtrax.turso.io?foo=1&authToken=abc123",
+		},
+		{
+			name:  "a token already in the dsn is not doubled",
+			dsn:   "libsql://jtrax.turso.io?authToken=original",
+			token: "abc123",
+			want:  "libsql://jtrax.turso.io?authToken=original",
+		},
+		{
+			name:  "a local file path is left alone",
+			dsn:   "jtrax.db",
+			token: "abc123",
+			want:  "jtrax.db",
+		},
+		{
+			name: "no token is a no-op",
+			dsn:  "libsql://jtrax.turso.io",
+			want: "libsql://jtrax.turso.io",
+		},
+		{
+			name:  "token is url-escaped",
+			dsn:   "libsql://jtrax.turso.io",
+			token: "a b&c",
+			want:  "libsql://jtrax.turso.io?authToken=a+b%26c",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := withAuthToken(c.dsn, c.token); got != c.want {
+				t.Errorf("withAuthToken = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestRedactHidesTursoToken(t *testing.T) {
 	got := db.Redact("libsql://jtrax-demo.turso.io?authToken=super-secret")
 	if got != "libsql://jtrax-demo.turso.io?<redacted>" {

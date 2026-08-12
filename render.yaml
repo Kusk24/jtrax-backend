@@ -1,0 +1,28 @@
+# Render blueprint. Create the service from this file with Blueprints > New,
+# then set the two secret values (marked sync: false) in the dashboard.
+#
+# The free plan spins the service down after 15 minutes idle and a cold start
+# takes 30-60s, which is longer than Vercel will wait. .github/workflows/
+# keep-alive.yml pings /health every 10 minutes to prevent that; see
+# docs/deployment.md for why that still fits inside the free instance hours.
+
+services:
+  - type: web
+    name: jtrax-backend
+    runtime: docker
+    plan: free
+    region: singapore # closest region to Bangkok
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Turso database URL, e.g. libsql://jtrax-<org>.turso.io
+      - key: DATABASE_URL
+        sync: false
+      # Turso auth token from `turso db tokens create jtrax`.
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      # Origins allowed to call the API directly. The portals proxy through
+      # their own /api route server-side, so this is only a safety net.
+      - key: ALLOWED_ORIGINS
+        sync: false
