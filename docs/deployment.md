@@ -87,7 +87,32 @@ dashboard and every deploy silently resets them.
 Further accounts are easier from the console itself: the Admins page creates a
 real `user_account` and shows a generated temporary password once.
 
-### 5. Point the portals at it
+### 5. Import the family roster (optional)
+
+The admin console used to hard-code ten students with their parents, classes,
+credits and contact details. `internal/db/roster.json` is that data, and
+`JTRAX_ROSTER` turns it into twenty real accounts — ten parents, ten students —
+that sign in to the portals:
+
+```
+JTRAX_ROSTER=1
+JTRAX_ROSTER_PASSWORD=<one password they all share>
+```
+
+Redeploy, then **remove both**. Parents sign in with the address the office
+recorded (`carol.carter@gmail.com`); students get `<line-id>@student.jca.ac.th`.
+Every account shares one password, so treat it as demo data — anything real
+should go through the forgot-password flow.
+
+Re-running is safe: rows are matched on email and class name, so a second
+import updates rather than duplicates. It also adopts an account that already
+exists at a roster address rather than failing on the unique constraint.
+
+Credit expiry is stored as an offset from the import date, not the literal date
+in the old fixture — those have all gone past, and a roster that imports as
+"everyone expired" demonstrates nothing.
+
+### 6. Point the portals at it
 
 In each Vercel project (`jtrax-web-app`, `jtrax-admin`) set:
 
@@ -97,7 +122,7 @@ JTRAX_API_URL=https://jtrax-backend.onrender.com
 
 Redeploy. Nothing else changes: `app/api/[...path]/route.ts` already reads it.
 
-### 6. Turn on the keep-alive
+### 7. Turn on the keep-alive
 
 In this repo: Settings > Secrets and variables > Actions > **Variables** >
 `BACKEND_URL` = your Render URL. `.github/workflows/keep-alive.yml` then pings
