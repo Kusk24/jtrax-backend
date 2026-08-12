@@ -28,6 +28,9 @@ func main() {
 	if err := seed(d, dsn); err != nil {
 		log.Fatalf("seed database: %v", err)
 	}
+	if err := bootstrapStaff(d); err != nil {
+		log.Fatalf("bootstrap staff: %v", err)
+	}
 
 	origins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
 	if origins[0] == "" {
@@ -59,6 +62,24 @@ func seed(d *sql.DB, dsn string) error {
 		return nil
 	}
 	return db.Seed(d, password)
+}
+
+// bootstrapStaff provisions real sign-ins from JTRAX_STAFF, a JSON array of
+// {email, password, role, name}. Unlike the demo seed it runs on every boot,
+// local or remote, and updates an account that already exists — so a deployed
+// database gets its first admin, and a forgotten password gets reset, without
+// shell access to the host.
+func bootstrapStaff(d *sql.DB) error {
+	accounts, err := db.ParseStaff(os.Getenv("JTRAX_STAFF"))
+	if err != nil || len(accounts) == 0 {
+		return err
+	}
+	written, err := db.EnsureStaff(d, accounts)
+	if err != nil {
+		return err
+	}
+	log.Printf("staff accounts provisioned: %s", strings.Join(written, ", "))
+	return nil
 }
 
 // seedConfig decides whether to seed and with which password. Split out from
