@@ -46,7 +46,7 @@ func (c *client) do(method, path string, body any) (int, map[string]any, []map[s
 
 func (c *client) login(email string) {
 	status, obj, _ := c.do("POST", "/api/v1/auth/login", map[string]string{
-		"email": email, "password": "jtrax-dev-1234",
+		"email": email, "password": db.DevPassword,
 	})
 	if status != 200 {
 		c.t.Fatalf("login %s: status %d (%v)", email, status, obj)
@@ -60,7 +60,7 @@ func newServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
-	if err := db.Seed(d); err != nil {
+	if err := db.Seed(d, db.DevPassword); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(api.NewHandler(d))

@@ -10,8 +10,17 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 )
 
-// Seed is a no-op when any user account already exists.
-func Seed(d *sql.DB) error {
+// DevPassword signs in every seeded account on a local database. It is a
+// throwaway: a deployment reachable from the internet must pass its own
+// password to Seed, because this one is published in the repository.
+const DevPassword = "jtrax-dev-1234"
+
+// Seed is a no-op when any user account already exists. Every seeded account
+// shares password.
+func Seed(d *sql.DB, password string) error {
+	if password == "" {
+		return fmt.Errorf("seed: password is required")
+	}
 	var n int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM user_account`).Scan(&n); err != nil {
 		return err
@@ -20,8 +29,7 @@ func Seed(d *sql.DB) error {
 		return nil
 	}
 
-	// Same throwaway dev password for every seeded account.
-	hash, err := auth.HashPassword("jtrax-dev-1234")
+	hash, err := auth.HashPassword(password)
 	if err != nil {
 		return err
 	}
