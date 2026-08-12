@@ -21,8 +21,13 @@ type Sender interface {
 	Send(to, subject, body string) error
 }
 
-// Config is read once at startup. AppURL is the public address of the portal
-// the reset link should point at.
+// Config is read once at startup.
+//
+// Two portal URLs because the deployment has two frontends on different
+// domains: staff use the admin console, everyone else uses the web app. Which
+// one a reset link points at is decided from the account's role on the server —
+// never from anything the caller sends, or a request could aim the link at an
+// attacker's host.
 type Config struct {
 	Host     string
 	Port     string
@@ -30,6 +35,7 @@ type Config struct {
 	Password string
 	From     string
 	AppURL   string
+	AdminURL string
 }
 
 // FromEnv reads the SMTP settings. Missing settings are not an error: a
@@ -43,7 +49,19 @@ func FromEnv() Config {
 		Password: os.Getenv("SMTP_PASSWORD"),
 		From:     os.Getenv("MAIL_FROM"),
 		AppURL:   strings.TrimSuffix(os.Getenv("APP_URL"), "/"),
+		AdminURL: strings.TrimSuffix(os.Getenv("ADMIN_URL"), "/"),
 	}
+}
+
+// PortalFor returns the base URL a reset link should use for a role. Staff go
+// to the console; everyone else to the web app. Falls back to AppURL so a
+// deployment that has not set ADMIN_URL still sends a working link rather than
+// one with an empty host.
+func (c Config) PortalFor(role string) string {
+	if (role == "Admin" || role == "Receptionist") && c.AdminURL != "" {
+		return c.AdminURL
+	}
+	return c.AppURL
 }
 
 // Configured reports whether mail can actually be delivered.

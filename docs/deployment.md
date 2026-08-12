@@ -175,7 +175,8 @@ code dependency:
 | `SMTP_PORT` | `587` unless the provider says otherwise |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | from the provider; never committed |
 | `MAIL_FROM` | must be an address the provider let you verify |
-| `APP_URL` | public portal URL — the link is `<APP_URL>/reset-password?token=…` |
+| `APP_URL` | public web-app URL — the link is `<APP_URL>/reset-password?token=…` |
+| `ADMIN_URL` | public admin-console URL, used for staff accounts |
 
 **Leaving `SMTP_HOST` or `MAIL_FROM` unset is not an error.** The endpoint still
 answers normally and writes the reset link to the log instead, marked
@@ -192,6 +193,10 @@ delivery to a personal account.
 
 Two behaviours worth knowing when reading the code:
 
+- The link points at the console for `Admin`/`Receptionist` and at the web app
+  for everyone else. The role is read from the account on the server, never
+  taken from the request — otherwise a caller could aim the link at their own
+  host. With `ADMIN_URL` unset, staff fall back to `APP_URL`.
 - The response to forgot-password is identical for a registered and an
   unregistered address. Anything else would let someone discover which families
   attend the academy by trying addresses.

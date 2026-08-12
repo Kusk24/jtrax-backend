@@ -40,9 +40,9 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 			return
 		}
 
-		var accountID, displayName string
-		err := d.QueryRow(`SELECT user_account_id, display_name FROM user_account WHERE email = ?`, email).
-			Scan(&accountID, &displayName)
+		var accountID, displayName, role string
+		err := d.QueryRow(`SELECT user_account_id, display_name, role FROM user_account WHERE email = ?`, email).
+			Scan(&accountID, &displayName, &role)
 		if err != nil {
 			return // unknown address: say nothing, do nothing
 		}
@@ -52,7 +52,9 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 			log.Printf("password reset: could not create token: %v", err)
 			return
 		}
-		link := resetLink(cfg.AppURL, token)
+		// The role picks the portal, so the link always lands on the app that
+		// account can actually sign in to.
+		link := resetLink(cfg.PortalFor(role), token)
 
 		if sender == nil {
 			// No SMTP configured. Printing the link keeps local development

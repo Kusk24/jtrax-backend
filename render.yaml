@@ -40,6 +40,9 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
-      # Public URL of the portal the reset link should open.
+      # Public URL of each frontend. The account's role picks which one the
+      # reset link opens; without ADMIN_URL, staff links fall back to APP_URL.
       - key: APP_URL
+        sync: false
+      - key: ADMIN_URL
         sync: false

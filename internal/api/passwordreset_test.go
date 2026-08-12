@@ -251,3 +251,43 @@ func TestStoredTokenIsHashedNotRaw(t *testing.T) {
 		t.Fatalf("hashed token not found, got %d rows", n)
 	}
 }
+
+// Two frontends on different domains: a staff reset must land on the console
+// and everyone else on the web app, decided from the account's role rather
+// than anything the caller sent.
+func TestResetLinkGoesToThePortalForTheRole(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	if err := db.Seed(d, db.DevPassword); err != nil {
+		t.Fatal(err)
+	}
+	cap := &captureSender{}
+	srv := httptest.NewServer(api.NewHandlerWithMail(d, mail.Config{
+		AppURL: "https://portal.example", AdminURL: "https://console.example",
+	}, cap))
+	t.Cleanup(srv.Close)
+	c := &client{t: t, srv: srv}
+
+	cases := []struct{ email, wantHost string }{
+		{"admin@jca.ac.th", "https://console.example/reset-password?token="},
+		{"sandy01234@gmail.com", "https://portal.example/reset-password?token="},
+		{"serene@jca.ac.th", "https://portal.example/reset-password?token="},
+	}
+	for _, tc := range cases {
+		c.do("POST", "/api/v1/auth/forgot-password", map[string]string{"email": tc.email})
+		_, body := cap.last()
+		if !strings.Contains(body, tc.wantHost) {
+			t.Errorf("%s: link should start %q, body was %q", tc.email, tc.wantHost, body)
+		}
+	}
+}
+
+func TestPortalForFallsBackWhenAdminURLUnset(t *testing.T) {
+	cfg := mail.Config{AppURL: "https://portal.example"}
+	if got := cfg.PortalFor("Admin"); got != "https://portal.example" {
+		t.Fatalf("with no ADMIN_URL an admin should still get a working link, got %q", got)
+	}
+}
