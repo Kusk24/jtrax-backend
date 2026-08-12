@@ -26,3 +26,20 @@ services:
       # their own /api route server-side, so this is only a safety net.
       - key: ALLOWED_ORIGINS
         sync: false
+      # Forgot-password email over SMTP. Without SMTP_HOST and MAIL_FROM the
+      # endpoint still answers, but logs the reset link instead of sending it —
+      # which is fine locally and wrong here, so set both before announcing the
+      # feature. See docs/deployment.md for picking a provider.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # Public URL of the portal the reset link should open.
+      - key: APP_URL
+        sync: false

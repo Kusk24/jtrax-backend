@@ -157,3 +157,44 @@ Statements are split and applied one at a time (`internal/db/statements.go`)
 because the libSQL protocol takes one statement per request. The splitter
 handles quoted strings and `--` comments but **not** an inner `;`, so a trigger
 body would need the splitter taught about `BEGIN … END` first.
+
+## Forgot-password email
+
+`POST /api/v1/auth/forgot-password` mails a single-use link that expires in an
+hour; `POST /api/v1/auth/reset-password` spends it. Both are rate limited —
+forgot-password to 3/minute per IP, because each accepted call sends mail to
+someone else's inbox and an unthrottled one lends the academy's sending
+reputation to a spammer.
+
+Delivery is plain SMTP, so the provider is a configuration choice rather than a
+code dependency:
+
+| Variable | Notes |
+|---|---|
+| `SMTP_HOST` | e.g. `smtp-relay.brevo.com` |
+| `SMTP_PORT` | `587` unless the provider says otherwise |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | from the provider; never committed |
+| `MAIL_FROM` | must be an address the provider let you verify |
+| `APP_URL` | public portal URL — the link is `<APP_URL>/reset-password?token=…` |
+
+**Leaving `SMTP_HOST` or `MAIL_FROM` unset is not an error.** The endpoint still
+answers normally and writes the reset link to the log instead, marked
+`SENSITIVE`. That keeps a fresh clone usable without a mail server, and it means
+a deploy that forgot to configure mail fails quietly rather than 500-ing — so
+check the logs once after enabling it.
+
+Picking a provider on the free-and-no-card constraint: Brevo's free tier allows
+a few hundred messages a day to arbitrary recipients with a verified sender
+address, which is the shape this needs. Resend's free tier is generous but
+sending to addresses other than your own requires a verified domain. Gmail with
+an app password works and is capped around 500/day, at the cost of tying
+delivery to a personal account.
+
+Two behaviours worth knowing when reading the code:
+
+- The response to forgot-password is identical for a registered and an
+  unregistered address. Anything else would let someone discover which families
+  attend the academy by trying addresses.
+- Completing a reset **deletes every session for that account** and voids any
+  other outstanding link. If the reset happened because somebody else knew the
+  old password, leaving their session alive would defeat the point.
