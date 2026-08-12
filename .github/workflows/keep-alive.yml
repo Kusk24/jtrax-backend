@@ -1,0 +1,32 @@
+# Render's free plan spins a service down after 15 minutes idle, and the
+# 30-60s cold start that follows is longer than Vercel waits before returning
+# a 504. Pinging /health every 10 minutes keeps the instance warm.
+#
+# A full month of uptime costs ~730 of the 750 free instance-hours, so this
+# fits — but only while jtrax-backend is the *only* free service in the
+# workspace. See docs/deployment.md.
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the health endpoint
+        env:
+          # Repository variable (not a secret): Settings > Secrets and
+          # variables > Actions > Variables, e.g. https://jtrax-backend.onrender.com
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "BACKEND_URL variable is not set; nothing to ping."
+            exit 0
+          fi
+          # A cold start can take a minute, so allow generous timeouts.
+          curl --fail --silent --show-error --location \
+               --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 15 \
+               "$BACKEND_URL/health"

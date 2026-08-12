@@ -3,6 +3,7 @@ package httpx
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +28,26 @@ func CORS(allowedOrigins []string, next http.Handler) http.Handler {
 	})
 }
 
+// clientIP identifies the caller for rate limiting. Deployed behind a proxy
+// every RemoteAddr is the proxy's, which would put all callers in one bucket,
+// so the left-most X-Forwarded-For entry wins when present.
+//
+// That header is caller-supplied and trivially spoofed, so it may only relax
+// a limit, never tighten one — it is used for rate limiting alone and never
+// for an authorization decision.
+func clientIP(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		if first, _, found := strings.Cut(fwd, ","); found {
+			return strings.TrimSpace(first)
+		}
+		return strings.TrimSpace(fwd)
+	}
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip
+	}
+	return r.RemoteAddr
+}
+
 // RateLimit is a fixed-window per-IP limiter for unauthenticated endpoints.
 func RateLimit(perMinute int, next http.HandlerFunc) http.HandlerFunc {
 	type window struct {
@@ -36,10 +57,7 @@ func RateLimit(perMinute int, next http.HandlerFunc) http.HandlerFunc {
 	var mu sync.Mutex
 	seen := map[string]*window{}
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		}
+		ip := clientIP(r)
 		mu.Lock()
 		wd := seen[ip]
 		now := time.Now()

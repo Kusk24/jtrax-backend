@@ -1,4 +1,5 @@
-// Package db opens the SQLite database and applies embedded migrations.
+// Package db opens the JTrax database — a local SQLite file in development
+// or a remote Turso database in deployment — and applies embedded migrations.
 package db
 
 import (
@@ -6,27 +7,50 @@ import (
 	"embed"
 	"fmt"
 	"sort"
+	"strings"
 
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// Open opens (creating if needed) the SQLite file at path and migrates it.
-func Open(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
-	d, err := sql.Open("sqlite", dsn)
+// Open opens the database named by dsn and applies pending migrations.
+func Open(dsn string) (*sql.DB, error) {
+	driver, conn, remote := resolve(dsn)
+	d, err := sql.Open(driver, conn)
 	if err != nil {
 		return nil, err
 	}
-	// modernc.org/sqlite is single-writer; serialize access to avoid SQLITE_BUSY.
-	d.SetMaxOpenConns(1)
+	if !remote {
+		// modernc.org/sqlite is single-writer; serialize access to avoid SQLITE_BUSY.
+		d.SetMaxOpenConns(1)
+	}
 	if err := migrate(d); err != nil {
 		d.Close()
 		return nil, err
 	}
 	return d, nil
+}
+
+// resolve maps a dsn to its driver. A libsql:// or https:// dsn is a remote
+// Turso database reached over HTTP; anything else is a local SQLite file path.
+func resolve(dsn string) (driver, conn string, remote bool) {
+	if strings.HasPrefix(dsn, "libsql://") || strings.HasPrefix(dsn, "https://") {
+		return "libsql", dsn, true
+	}
+	conn = fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", dsn)
+	return "sqlite", conn, false
+}
+
+// Redact strips the query string from a dsn — Turso carries its auth token
+// there — so a dsn can be logged safely.
+func Redact(dsn string) string {
+	if i := strings.Index(dsn, "?"); i >= 0 {
+		return dsn[:i] + "?<redacted>"
+	}
+	return dsn
 }
 
 // migrate applies every migrations/NNNN_*.sql not yet recorded, in filename order.
@@ -62,9 +86,14 @@ func migrate(d *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(string(body)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %s: %w", name, err)
+		// One statement per Exec on every driver: the remote libSQL protocol
+		// requires it, and running it locally too keeps dev and deployment on
+		// the same path.
+		for _, stmt := range splitStatements(string(body)) {
+			if _, err := tx.Exec(stmt); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("migration %s: %w", name, err)
+			}
 		}
 		if _, err := tx.Exec(`INSERT INTO schema_migration (filename) VALUES (?)`, name); err != nil {
 			tx.Rollback()
