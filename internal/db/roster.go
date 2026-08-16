@@ -503,17 +503,32 @@ func importPayment(d *sql.DB, studentID string, p RosterPayment, today time.Time
 	if method == "" {
 		method = "Cash"
 	}
+	// The names are written with the payment, not left to be joined: a payment
+	// outlives the student it was for, and these are what a detached row has
+	// left to say who it was about.
 	_, err = d.Exec(`INSERT INTO payment (payment_id, student_id, enrollment_id, amount,
-		discount_amount, final_amount, payment_method, status, payment_date, reference_number)
-		VALUES (?,?,?,?,?,?,?, 'Paid', ?, ?)
+		discount_amount, final_amount, payment_method, status, payment_date, reference_number,
+		student_name, class_name, parent_name)
+		VALUES (?,?,?,?,?,?,?, 'Paid', ?, ?,
+			(SELECT name FROM student WHERE student_id = ?),
+			(SELECT c.name FROM class c
+				JOIN student_enrollment e ON e.class_id = c.class_id
+				WHERE e.enrollment_id = ?),
+			(SELECT pr.name FROM parent pr
+				JOIN student_parent sp ON sp.parent_id = pr.parent_id
+				WHERE sp.student_id = ?))
 		ON CONFLICT (payment_id) DO UPDATE SET
 			amount = excluded.amount,
 			discount_amount = excluded.discount_amount,
 			final_amount = excluded.final_amount,
 			payment_method = excluded.payment_method,
-			payment_date = excluded.payment_date`,
+			payment_date = excluded.payment_date,
+			student_name = excluded.student_name,
+			class_name = excluded.class_name,
+			parent_name = excluded.parent_name`,
 		id, studentID, enrollmentID, p.Amount, p.Discount, p.Amount-p.Discount,
-		method, date.Format("2006-01-02"), strings.ToUpper(method[:2])+"-"+date.Format("20060102"))
+		method, date.Format("2006-01-02"), strings.ToUpper(method[:2])+"-"+date.Format("20060102"),
+		studentID, enrollmentID, studentID)
 	return err
 }
 

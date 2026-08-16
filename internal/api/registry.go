@@ -211,9 +211,16 @@ func Registry() []*Resource {
 		{
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",
 			Cols: []Col{
-				{Name: "student_id", Kind: "text", Required: true},
+				// Not required: a payment outlives the student it was taken
+				// for, and a detached one carries the names below instead.
+				{Name: "student_id", Kind: "text"},
 				{Name: "enrollment_id", Kind: "text"},
 				{Name: "credit_package_id", Kind: "text"},
+				// Snapshots of who and what, written when the money changed
+				// hands. Renaming a class later must not rewrite old receipts.
+				{Name: "student_name", Kind: "text"},
+				{Name: "class_name", Kind: "text"},
+				{Name: "parent_name", Kind: "text"},
 				{Name: "amount", Kind: "real", Required: true},
 				{Name: "discount_amount", Kind: "real"},
 				{Name: "final_amount", Kind: "real", Required: true},
