@@ -25,7 +25,8 @@ type deleteResult struct {
 	Children       []string `json:"children,omitempty"`
 	AccountsKept   int      `json:"accounts_kept"`
 	AttendanceRows int64    `json:"attendance_rows"`
-	PaymentRows    int64    `json:"payment_rows"`
+	// Payments are detached, not deleted — this counts the ones kept.
+	PaymentRows int64 `json:"payment_rows"`
 }
 
 // deleteAccount removes a login and its sessions. Best-effort: an account still
@@ -68,12 +69,31 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 	if err != nil {
 		return err
 	}
-	pay, err := tx.Exec(`DELETE FROM payment WHERE student_id = ?`, studentID)
+	n, _ := att.RowsAffected()
+	res.AttendanceRows += n
+
+	// Payments are kept. The money was received, and "who paid what" has to be
+	// answerable a year after the student left — so the row is detached from
+	// the student rather than deleted with them, and the names it will need are
+	// written onto it first. COALESCE so a payment recorded with its own
+	// snapshot keeps that one: it is what was true at the till.
+	pay, err := tx.Exec(`UPDATE payment SET
+		student_name = COALESCE(student_name,
+			(SELECT name FROM student WHERE student_id = ?)),
+		class_name = COALESCE(class_name,
+			(SELECT c.name FROM class c
+				JOIN student_enrollment e ON e.class_id = c.class_id
+				WHERE e.enrollment_id = payment.enrollment_id)),
+		parent_name = COALESCE(parent_name,
+			(SELECT p.name FROM parent p
+				JOIN student_parent sp ON sp.parent_id = p.parent_id
+				WHERE sp.student_id = ?)),
+		student_id = NULL,
+		enrollment_id = NULL
+		WHERE student_id = ?`, studentID, studentID, studentID)
 	if err != nil {
 		return err
 	}
-	n, _ := att.RowsAffected()
-	res.AttendanceRows += n
 	n, _ = pay.RowsAffected()
 	res.PaymentRows += n
 

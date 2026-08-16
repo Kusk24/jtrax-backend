@@ -41,11 +41,10 @@ func TestCascadeDeletesAStudentAndEverythingPointingAtThem(t *testing.T) {
 		t.Fatalf("student should be gone, got %d", status)
 	}
 
-	// Nothing she was referenced by may be left behind.
+	// Nothing she was referenced by may be left behind — except the money.
 	for _, path := range []string{
 		"/api/v1/attendance?student_id=stu_penny",
 		"/api/v1/enrollments?student_id=stu_penny",
-		"/api/v1/payments?student_id=stu_penny",
 		"/api/v1/practice-activities?student_id=stu_penny",
 		"/api/v1/student-parents?student_id=stu_penny",
 	} {
@@ -188,5 +187,112 @@ func TestCascadingAMissingStudentIsANotFound(t *testing.T) {
 
 	if status, _, _ := c.do("DELETE", "/api/v1/students/stu_nobody/cascade", nil); status == 200 {
 		t.Fatal("deleting a student who does not exist should not report success")
+	}
+}
+
+
+func TestDeletingAStudentKeepsTheirPayments(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+
+	_, _, before := c.do("GET", "/api/v1/payments", nil)
+	mine := 0
+	for _, p := range before {
+		if p["student_id"] == "stu_penny" {
+			mine++
+		}
+	}
+	if mine == 0 {
+		t.Fatal("the seed should give Penny a payment for this to mean anything")
+	}
+
+	status, res, _ := c.do("DELETE", "/api/v1/students/stu_penny/cascade", nil)
+	if status != 200 {
+		t.Fatalf("cascade: want 200, got %d (%v)", status, res)
+	}
+	if int(res["payment_rows"].(float64)) != mine {
+		t.Fatalf("want %d payments kept, reported %v", mine, res["payment_rows"])
+	}
+
+	_, _, after := c.do("GET", "/api/v1/payments", nil)
+	if len(after) != len(before) {
+		t.Fatalf("the books lost rows: %d payments before, %d after", len(before), len(after))
+	}
+
+	// Detached, and still saying who it was for.
+	kept := 0
+	for _, p := range after {
+		if p["student_name"] != "Penny" {
+			continue
+		}
+		kept++
+		if p["student_id"] != nil {
+			t.Fatalf("payment should be detached, still points at %v", p["student_id"])
+		}
+		if p["enrollment_id"] != nil {
+			t.Fatalf("payment should be detached from the enrolment, got %v", p["enrollment_id"])
+		}
+		if p["parent_name"] != "Sandy Jones" {
+			t.Fatalf("want the guardian who paid recorded, got %v", p["parent_name"])
+		}
+		if p["class_name"] == nil || p["class_name"] == "" {
+			t.Fatal("want the class recorded on the kept payment")
+		}
+		if p["final_amount"] == nil {
+			t.Fatal("the amount must survive")
+		}
+	}
+	if kept != mine {
+		t.Fatalf("want %d payments naming Penny, found %d", mine, kept)
+	}
+}
+
+func TestDeletingAParentWithChildrenKeepsThePayments(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+
+	_, _, before := c.do("GET", "/api/v1/payments", nil)
+	if status, _, _ := c.do("DELETE", "/api/v1/parents/par_sandy/cascade?children=delete", nil); status != 200 {
+		t.Fatalf("cascade: want 200, got %d", status)
+	}
+	_, _, after := c.do("GET", "/api/v1/payments", nil)
+	if len(after) != len(before) {
+		t.Fatalf("deleting the whole family lost payments: %d before, %d after", len(before), len(after))
+	}
+	for _, p := range after {
+		if p["student_name"] == nil || p["student_name"] == "" {
+			t.Fatalf("a detached payment lost the name it was for: %v", p)
+		}
+	}
+}
+
+func TestASnapshotAlreadyOnThePaymentIsNotOverwritten(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+
+	// What the till recorded at the time, which may differ from the row's
+	// current name — a class renamed since, a student's name corrected.
+	status, created, _ := c.do("POST", "/api/v1/payments", map[string]any{
+		"student_id": "stu_uri", "amount": 100, "final_amount": 100,
+		"payment_method": "Cash", "payment_date": "2026-05-01",
+		"student_name": "Uri as written at the till",
+		"class_name":   "Intermediate as it was called then",
+		"parent_name":  "Sandy as she signed",
+	})
+	if status != 201 {
+		t.Fatalf("create: want 201, got %d (%v)", status, created)
+	}
+	id := created["payment_id"].(string)
+
+	if status, _, _ := c.do("DELETE", "/api/v1/students/stu_uri/cascade", nil); status != 200 {
+		t.Fatalf("cascade: want 200, got %d", status)
+	}
+
+	_, kept, _ := c.do("GET", "/api/v1/payments/"+id, nil)
+	if kept["student_name"] != "Uri as written at the till" {
+		t.Fatalf("the till's own record was overwritten: %v", kept["student_name"])
+	}
+	if kept["class_name"] != "Intermediate as it was called then" {
+		t.Fatalf("the class snapshot was overwritten: %v", kept["class_name"])
 	}
 }

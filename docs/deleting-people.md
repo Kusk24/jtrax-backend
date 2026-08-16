@@ -48,19 +48,32 @@ Both answer with what actually went:
 }
 ```
 
+## Payments are kept, not deleted
+
+A payment is a financial record. The money was received, and "who paid what"
+has to be answerable long after the student left — so the cascade **detaches**
+payments rather than deleting them: `student_id` and `enrollment_id` are set to
+NULL and the names are written onto the row first (`student_name`,
+`class_name`, `parent_name`, added in migration `0006`).
+
+`COALESCE`, so a payment recorded with its own snapshot keeps that one — it is
+what was true at the till, and renaming a class later must not rewrite last
+year's receipts.
+
 ## Order
 
 Forced by the foreign keys. `credit_transaction` references the enrolment, the
 payment *and* the attendance row, so it goes first of all:
 
 1. `credit_transaction` — by enrolment, by payment, by attendance
-2. `attendance`, `payment`
-3. `student_enrollment`
-4. `practice_activity`, `practice_settings`, `puzzle_attempt`,
+2. `attendance`
+3. `payment` — detached, not deleted (above)
+4. `student_enrollment`
+5. `practice_activity`, `practice_settings`, `puzzle_attempt`,
    `tournament_registration`
-5. `student_parent`
-6. `student`
-7. `auth_session`, `password_reset`, then `user_account`
+6. `student_parent`
+7. `student`
+8. `auth_session`, `password_reset`, then `user_account`
 
 A parent is `parent_contact` → `notification_preference` → `student_parent` →
 `parent` → the account.
@@ -82,3 +95,17 @@ every branch: the plain delete still refusing, the cascade clearing each
 referencing table, a guardian kept when a sibling remains, taken when none does,
 children kept by default and removed on request, and all four roles checked
 against the route.
+
+## A note on the 0006 rebuild
+
+Making `student_id` nullable meant a table rebuild, and
+`credit_transaction.payment_id` points into the table being dropped.
+`PRAGMA defer_foreign_keys` does **not** rescue that: `DROP TABLE` raises one
+deferred violation per referencing row and nothing clears them, so the COMMIT
+fails — verified against a real pre-migration database, not assumed.
+
+The migration instead parks those links in a scratch table, nulls them,
+rebuilds, and puts them back, so no reference is ever dangling and no pragma is
+needed. It was run against a database built on the previous schema with seeded
+payments and credit transactions: two payments preserved with their names
+backfilled, two credit links restored, `pragma foreign_key_check` clean.
