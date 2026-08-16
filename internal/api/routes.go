@@ -38,6 +38,7 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 
 	mountUserAccounts(mux, d)
 	mountGameRooms(mux, d)
+	mountPuzzles(mux, d)
 	for _, rs := range Registry() {
 		rs.Mount(mux, d)
 	}
