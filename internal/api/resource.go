@@ -58,6 +58,11 @@ type Resource struct {
 	WriteRoles []string // roles beyond staff that may create/update
 	Scope      map[string]ScopeFn
 	Own        OwnFn
+	// Check is validation beyond enums and required columns — the shape of a
+	// value rather than its presence. It receives the row as it will exist
+	// after the write, so an update that changes one field is still checked
+	// against the whole record.
+	Check func(row map[string]any) error
 }
 
 func isStaff(role string) bool { return role == "Admin" || role == "Receptionist" }
@@ -259,6 +264,12 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
+		if rs.Check != nil {
+			if err := rs.Check(row); err != nil {
+				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+				return
+			}
+		}
 		if rowID == "" {
 			if rs.IDPrefix == "" {
 				httpx.Error(w, http.StatusBadRequest, rs.IDCol+" is required", nil)
@@ -332,6 +343,19 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 		if len(patch) == 0 {
 			httpx.JSON(w, http.StatusOK, existing)
 			return
+		}
+		if rs.Check != nil {
+			merged := map[string]any{}
+			for k, v := range existing {
+				merged[k] = v
+			}
+			for k, v := range patch {
+				merged[k] = v
+			}
+			if err := rs.Check(merged); err != nil {
+				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+				return
+			}
 		}
 		sets := []string{}
 		args := []any{}
