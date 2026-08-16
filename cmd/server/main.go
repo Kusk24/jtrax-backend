@@ -35,6 +35,11 @@ func main() {
 	if err := importRoster(d); err != nil {
 		log.Fatalf("import roster: %v", err)
 	}
+	// Puzzles are content, not demo accounts, so this runs everywhere — there
+	// is nothing here that publishing could leak.
+	if err := db.SeedPuzzles(d); err != nil {
+		log.Fatalf("seed puzzles: %v", err)
+	}
 
 	origins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
 	if origins[0] == "" {

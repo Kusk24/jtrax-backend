@@ -63,6 +63,11 @@ func newServer(t *testing.T) *httptest.Server {
 	if err := db.Seed(d, db.DevPassword); err != nil {
 		t.Fatal(err)
 	}
+	// Puzzles are content rather than demo data, so the server loads them on
+	// every boot; the harness has to match or puzzle tests see an empty bank.
+	if err := db.SeedPuzzles(d); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(api.NewHandler(d))
 	t.Cleanup(srv.Close)
 	return srv

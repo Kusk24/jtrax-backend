@@ -340,6 +340,23 @@ func Registry() []*Resource {
 			Own: ownChild,
 		},
 		{
+			// Authoring only. Students never touch this resource — they are
+			// served by /puzzles/daily, which omits the solution. Teachers can
+			// read and write so they can set the position they taught on
+			// Tuesday rather than a random fork.
+			Name: "puzzles", Table: "puzzle", IDCol: "puzzle_id", IDPrefix: "pzl",
+			Cols: []Col{
+				{Name: "fen", Kind: "text", Required: true},
+				{Name: "moves", Kind: "text", Required: true},
+				{Name: "rating", Kind: "int"},
+				{Name: "themes", Kind: "text"},
+				{Name: "source", Kind: "text", Enum: puzzleSources},
+				{Name: "created_by", Kind: "text"},
+			},
+			ReadRoles: []string{"Teacher"}, WriteRoles: []string{"Teacher"},
+			Check: checkPuzzle,
+		},
+		{
 			Name: "system-configuration", Table: "system_configuration", IDCol: "config_key", IDPrefix: "",
 			Cols: []Col{
 				{Name: "config_value", Kind: "text", Required: true},
