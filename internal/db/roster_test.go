@@ -274,6 +274,17 @@ func TestImportRosterWritesTheTimetable(t *testing.T) {
 		t.Error("no practice activity written, so the practice strip would be blank")
 	}
 
+	// Every imported payment carries the names it will need if the student it
+	// was for is ever deleted — the row outlives them.
+	var nameless int
+	d.QueryRow(`SELECT COUNT(*) FROM payment
+		WHERE student_name IS NULL OR student_name = ''
+		   OR class_name IS NULL OR class_name = ''
+		   OR parent_name IS NULL OR parent_name = ''`).Scan(&nameless)
+	if nameless != 0 {
+		t.Errorf("%d imported payments have no student, class or payer recorded on them", nameless)
+	}
+
 	// The revenue chart reads six months back; every payment must land inside it.
 	oldest := importDay.AddDate(0, -6, 0).Format("2006-01-02")
 	var stray int
