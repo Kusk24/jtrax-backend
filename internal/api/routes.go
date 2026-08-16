@@ -37,6 +37,7 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 	mux.HandleFunc("PATCH /api/v1/auth/me", handleUpdateMe(d))
 
 	mountUserAccounts(mux, d)
+	mountGameRooms(mux, d)
 	for _, rs := range Registry() {
 		rs.Mount(mux, d)
 	}

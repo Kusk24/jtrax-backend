@@ -3,6 +3,7 @@ module github.com/Kusk24/jtrax-backend
 go 1.25.0
 
 require (
+	github.com/notnil/chess v1.10.0
 	github.com/tursodatabase/libsql-client-go v0.0.0-20260528064733-9d5d30a29a60
 	modernc.org/sqlite v1.56.0
 )
