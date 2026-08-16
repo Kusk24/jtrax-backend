@@ -46,3 +46,11 @@ services:
         sync: false
       - key: ADMIN_URL
         sync: false
+      # Encrypts the LINE channel credentials an admin enters in the console.
+      # The credentials themselves are never set here — only this key is, and
+      # without it the console refuses to store them at all. Generate with
+      # `openssl rand -base64 32` and paste it in the dashboard — Render's own
+      # generateValue is not guaranteed to be exactly 32 decodable bytes, and a
+      # key of the wrong length fails at boot. See docs/line-messaging.md.
+      - key: LINE_TOKEN_KEY
+        sync: false
