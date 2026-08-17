@@ -286,6 +286,9 @@ func Registry() []*Resource {
 				{Name: "registration_website_url", Kind: "text"},
 				{Name: "registration_qr_code_image", Kind: "text"},
 				{Name: "regulations_document_url", Kind: "text"},
+				// Opt-in, and staff-only to change: turning it on publishes
+				// children's names and scores to anyone with the link.
+				{Name: "results_public", Kind: "bool"},
 			},
 			ReadRoles: everyone,
 		},
