@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -102,6 +103,12 @@ func importRoster(d *sql.DB) error {
 	password := os.Getenv("JTRAX_ROSTER_PASSWORD")
 	if password == "" {
 		return fmt.Errorf("JTRAX_ROSTER_PASSWORD is required when JTRAX_ROSTER=1")
+	}
+	// The one account-creating path that had no password rule at all. A roster
+	// imported with a four-character shared password creates real accounts that
+	// the console would refuse to create by hand.
+	if err := auth.ValidatePassword(password); err != nil {
+		return fmt.Errorf("JTRAX_ROSTER_PASSWORD: %w", err)
 	}
 	roster, err := db.LoadRoster()
 	if err != nil {

@@ -15,11 +15,14 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
-// minPasswordLen matches the staff-facing account endpoints, so a password
-// that is acceptable when an admin sets it is acceptable when a user resets it.
-const minPasswordLen = 8
-
 func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
+	// Budgets reset requests per address, for the same reason sign-in is
+	// budgeted per account: the callers all arrive from one server, so an IP
+	// budget of three a minute was three for the whole academy. Three per
+	// address still stops anyone using the academy's mail reputation to pester
+	// a third party, which is what this limit is actually for.
+	resetLimiter := httpx.NewLimiter(3)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Email string `json:"email"`
@@ -28,7 +31,7 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 			httpx.Error(w, http.StatusBadRequest, "email is required", err)
 			return
 		}
-		email := strings.ToLower(strings.TrimSpace(in.Email))
+		email := auth.NormalizeEmail(in.Email)
 
 		// The response is identical whether or not the address is registered.
 		// Anything else turns this endpoint into a way to enumerate the
@@ -36,12 +39,16 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 		defer httpx.JSON(w, http.StatusAccepted, map[string]string{
 			"status": "if that email has an account, a reset link is on its way",
 		})
-		if email == "" {
+		// Over budget is treated exactly like an unknown address — the same
+		// reply, nothing sent. Saying "too many requests" here would leak that
+		// somebody has been asking about this particular address.
+		if email == "" || !resetLimiter.Allow(email) {
 			return
 		}
 
 		var accountID, displayName, role string
-		err := d.QueryRow(`SELECT user_account_id, display_name, role FROM user_account WHERE email = ?`, email).
+		err := d.QueryRow(`SELECT user_account_id, display_name, role FROM user_account
+		                   WHERE lower(trim(email)) = ?`, email).
 			Scan(&accountID, &displayName, &role)
 		if err != nil {
 			return // unknown address: say nothing, do nothing
@@ -91,8 +98,8 @@ func handleResetPassword(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusBadRequest, "token and password are required", err)
 			return
 		}
-		if len(in.Password) < minPasswordLen {
-			httpx.Error(w, http.StatusBadRequest, "password must be at least 8 characters", nil)
+		if err := auth.ValidatePassword(in.Password); err != nil {
+			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		if err := auth.ConsumeReset(d, in.Token, in.Password); err != nil {

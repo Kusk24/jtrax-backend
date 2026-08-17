@@ -85,9 +85,18 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
 			return
 		}
-		in.Email = strings.ToLower(strings.TrimSpace(in.Email))
-		if in.Email == "" || len(in.Password) < 8 || in.DisplayName == "" {
-			httpx.Error(w, http.StatusBadRequest, "email, display_name and a password of at least 8 characters are required", nil)
+		if in.DisplayName == "" {
+			httpx.Error(w, http.StatusBadRequest, "display_name is required", nil)
+			return
+		}
+		email, err := auth.ValidateEmail(in.Email)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			return
+		}
+		in.Email = email
+		if err := auth.ValidatePassword(in.Password); err != nil {
+			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		ok := false
@@ -140,8 +149,13 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		}
 		id := r.PathValue("id")
 		if in.Email != nil {
+			email, err := auth.ValidateEmail(*in.Email)
+			if err != nil {
+				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+				return
+			}
 			if _, err := d.Exec(`UPDATE user_account SET email = ? WHERE user_account_id = ?`,
-				strings.ToLower(strings.TrimSpace(*in.Email)), id); err != nil {
+				email, id); err != nil {
 				httpx.Error(w, http.StatusBadRequest, "email must be unique", err)
 				return
 			}
@@ -150,8 +164,8 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 			d.Exec(`UPDATE user_account SET display_name = ? WHERE user_account_id = ?`, *in.DisplayName, id)
 		}
 		if in.Password != nil {
-			if len(*in.Password) < 8 {
-				httpx.Error(w, http.StatusBadRequest, "password must be at least 8 characters", nil)
+			if err := auth.ValidatePassword(*in.Password); err != nil {
+				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
 			hash, err := auth.HashPassword(*in.Password)

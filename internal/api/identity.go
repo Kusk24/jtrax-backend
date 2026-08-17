@@ -29,6 +29,17 @@ func requireIdentity(d *sql.DB, w http.ResponseWriter, r *http.Request) *auth.Id
 }
 
 func handleLogin(d *sql.DB) http.HandlerFunc {
+	// Budgets sign-in attempts **per account**, not per IP.
+	//
+	// The console reaches this API from its own server, so every member of
+	// staff shares one address and an IP budget would let the first few
+	// attempts of the minute lock out everybody else. Ten tries per account
+	// per minute stops password guessing without taking a colleague down.
+	//
+	// Owned by the handler rather than the package, so two servers in one
+	// process — which is every test in this suite — do not share a budget.
+	loginLimiter := httpx.NewLimiter(10)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Email    string `json:"email"`
@@ -38,14 +49,28 @@ func handleLogin(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusBadRequest, "email and password are required", err)
 			return
 		}
+		email := auth.NormalizeEmail(in.Email)
+		if !loginLimiter.Allow(email) {
+			// A distinct status, because "you are locked out for a minute" and
+			// "your password is wrong" send a person to different places, and
+			// the portals show different messages for each.
+			httpx.Error(w, http.StatusTooManyRequests,
+				"too many sign-in attempts for this account, try again in a minute", nil)
+			return
+		}
 		var accountID, hash string
-		err := d.QueryRow(`SELECT user_account_id, password_hash FROM user_account WHERE email = ?`,
-			strings.ToLower(strings.TrimSpace(in.Email))).Scan(&accountID, &hash)
+		// Matched case-insensitively as well as normalised, so a row that
+		// predates normalisation is still reachable.
+		err := d.QueryRow(`SELECT user_account_id, password_hash FROM user_account
+		                   WHERE lower(trim(email)) = ?`, email).Scan(&accountID, &hash)
 		if err != nil || !auth.VerifyPassword(in.Password, hash) {
 			// Same message for unknown email and wrong password.
 			httpx.Error(w, http.StatusUnauthorized, "invalid email or password", nil)
 			return
 		}
+		// A correct password clears the budget, so earlier fumbles are not
+		// still counted against them for the rest of the minute.
+		loginLimiter.Forget(email)
 		token, err := auth.CreateSession(d, accountID)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not create session", err)
