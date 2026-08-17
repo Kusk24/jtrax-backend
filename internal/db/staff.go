@@ -39,7 +39,11 @@ func ParseStaff(raw string) ([]StaffAccount, error) {
 	}
 	for i := range list {
 		a := &list[i]
-		a.Email = strings.ToLower(strings.TrimSpace(a.Email))
+		email, err := auth.ValidateEmail(a.Email)
+		if err != nil {
+			return nil, fmt.Errorf("JTRAX_STAFF[%d] (%s): %w", i, a.Email, err)
+		}
+		a.Email = email
 		a.Role = strings.TrimSpace(a.Role)
 		a.Name = strings.TrimSpace(a.Name)
 		if a.Email == "" || a.Name == "" {
@@ -50,8 +54,8 @@ func ParseStaff(raw string) ([]StaffAccount, error) {
 		}
 		// The console signs in with this password over a public URL, so hold it
 		// to the same floor the create-account endpoint enforces.
-		if len(a.Password) < 8 {
-			return nil, fmt.Errorf("JTRAX_STAFF[%d] (%s): password must be at least 8 characters", i, a.Email)
+		if err := auth.ValidatePassword(a.Password); err != nil {
+			return nil, fmt.Errorf("JTRAX_STAFF[%d] (%s): %w", i, a.Email, err)
 		}
 	}
 	return list, nil

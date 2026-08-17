@@ -19,20 +19,20 @@ func TestParseStaff(t *testing.T) {
 		{name: "empty is not an error", raw: "  "},
 		{
 			name: "one account",
-			raw:  `[{"email":"A@JCA.ac.th","password":"long-enough","role":"Admin","name":"Head Office"}]`,
+			raw:  `[{"email":"A@JCA.ac.th","password":"long-enough1","role":"Admin","name":"Head Office"}]`,
 			want: 1,
 		},
 		{
 			name: "two accounts",
-			raw: `[{"email":"a@jca.ac.th","password":"long-enough","role":"Admin","name":"A"},
-			       {"email":"b@jca.ac.th","password":"long-enough","role":"Receptionist","name":"B"}]`,
+			raw: `[{"email":"a@jca.ac.th","password":"long-enough1","role":"Admin","name":"A"},
+			       {"email":"b@jca.ac.th","password":"long-enough1","role":"Receptionist","name":"B"}]`,
 			want: 2,
 		},
 		{name: "not json", raw: `a@jca.ac.th:pw`, wantErr: true},
 		{name: "not an array", raw: `{"email":"a@jca.ac.th"}`, wantErr: true},
 		{
 			name:    "unknown role",
-			raw:     `[{"email":"a@jca.ac.th","password":"long-enough","role":"Teacher","name":"A"}]`,
+			raw:     `[{"email":"a@jca.ac.th","password":"long-enough1","role":"Teacher","name":"A"}]`,
 			wantErr: true,
 		},
 		{
@@ -42,7 +42,7 @@ func TestParseStaff(t *testing.T) {
 		},
 		{
 			name:    "missing name",
-			raw:     `[{"email":"a@jca.ac.th","password":"long-enough","role":"Admin"}]`,
+			raw:     `[{"email":"a@jca.ac.th","password":"long-enough1","role":"Admin"}]`,
 			wantErr: true,
 		},
 	}
@@ -61,7 +61,7 @@ func TestParseStaff(t *testing.T) {
 }
 
 func TestParseStaffLowercasesEmail(t *testing.T) {
-	got, err := db.ParseStaff(`[{"email":" Front@JCA.ac.th ","password":"long-enough","role":"Receptionist","name":"Front Desk"}]`)
+	got, err := db.ParseStaff(`[{"email":" Front@JCA.ac.th ","password":"long-enough1","role":"Receptionist","name":"Front Desk"}]`)
 	if err != nil {
 		t.Fatal(err)
 	}

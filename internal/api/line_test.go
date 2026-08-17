@@ -319,7 +319,7 @@ func TestLineCredentialsAreAdminOnly(t *testing.T) {
 	c, _ := newLineServer(t)
 	// A receptionist answers messages but does not hold the credential.
 	status, _, _ := c.do("POST", "/api/v1/user-accounts", map[string]string{
-		"email": "desk@jca.ac.th", "password": "desk-password", "role": "Receptionist",
+		"email": "desk@jca.ac.th", "password": "desk-password1", "role": "Receptionist",
 		"display_name": "Front Desk",
 	})
 	if status != 201 {
@@ -327,7 +327,7 @@ func TestLineCredentialsAreAdminOnly(t *testing.T) {
 	}
 	desk := &client{t: t, srv: c.srv}
 	status, obj, _ := desk.do("POST", "/api/v1/auth/login", map[string]string{
-		"email": "desk@jca.ac.th", "password": "desk-password",
+		"email": "desk@jca.ac.th", "password": "desk-password1",
 	})
 	if status != 200 {
 		t.Fatalf("receptionist login: status %d (%v)", status, obj)

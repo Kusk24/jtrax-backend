@@ -92,7 +92,7 @@ func TestResetPasswordEndToEnd(t *testing.T) {
 	// The raw token must not be what is stored.
 	c.token = ""
 	status, _, _ = c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": token, "password": "a-brand-new-password",
+		"token": token, "password": "a-brand-new-password1",
 	})
 	if status != 200 {
 		t.Fatalf("reset-password: want 200, got %d", status)
@@ -106,7 +106,7 @@ func TestResetPasswordEndToEnd(t *testing.T) {
 		t.Fatalf("old password should be rejected, got %d", status)
 	}
 	status, obj, _ := c.do("POST", "/api/v1/auth/login", map[string]string{
-		"email": "sandy01234@gmail.com", "password": "a-brand-new-password",
+		"email": "sandy01234@gmail.com", "password": "a-brand-new-password1",
 	})
 	if status != 200 {
 		t.Fatalf("new password should work, got %d (%v)", status, obj)
@@ -127,18 +127,18 @@ func TestResetTokenIsSingleUse(t *testing.T) {
 	token := tokenFrom(body)
 
 	if status, _, _ := c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": token, "password": "first-new-password",
+		"token": token, "password": "first-new-password1",
 	}); status != 200 {
 		t.Fatalf("first use: want 200, got %d", status)
 	}
 	if status, _, _ := c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": token, "password": "second-new-password",
+		"token": token, "password": "second-new-password1",
 	}); status != 400 {
 		t.Fatalf("replayed token: want 400, got %d", status)
 	}
 	// The replay must not have taken effect.
 	if status, _, _ := c.do("POST", "/api/v1/auth/login", map[string]string{
-		"email": "penny@jca.ac.th", "password": "second-new-password",
+		"email": "penny@jca.ac.th", "password": "second-new-password1",
 	}); status != 401 {
 		t.Fatalf("replayed reset changed the password anyway, got %d", status)
 	}
@@ -159,12 +159,12 @@ func TestSecondRequestVoidsTheFirstLink(t *testing.T) {
 		t.Fatal("two requests produced the same token")
 	}
 	if status, _, _ := c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": second, "password": "newest-password",
+		"token": second, "password": "newest-password1",
 	}); status != 200 {
 		t.Fatalf("second link should work, got %d", status)
 	}
 	if status, _, _ := c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": first, "password": "attacker-password",
+		"token": first, "password": "attacker-password1",
 	}); status != 400 {
 		t.Fatalf("first link should be void, got %d", status)
 	}
@@ -202,8 +202,8 @@ func TestResetRejectsBadInput(t *testing.T) {
 		token string
 		pass  string
 	}{
-		{"unknown token", "deadbeef", "long-enough-password"},
-		{"empty token", "", "long-enough-password"},
+		{"unknown token", "deadbeef", "long-enough-password1"},
+		{"empty token", "", "long-enough-password1"},
 		{"short password", token, "short"},
 	}
 	for _, tc := range cases {
@@ -217,7 +217,7 @@ func TestResetRejectsBadInput(t *testing.T) {
 	}
 	// The valid token survived the short-password attempt.
 	if status, _, _ := c.do("POST", "/api/v1/auth/reset-password", map[string]string{
-		"token": token, "password": "long-enough-password",
+		"token": token, "password": "long-enough-password1",
 	}); status != 200 {
 		t.Fatalf("token should still be usable, got %d", status)
 	}

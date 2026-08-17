@@ -196,7 +196,9 @@ func ensureClass(d *sql.DB, c RosterClass) (string, error) {
 // id, reusing the id of an account that already exists so a roster email that
 // was seeded earlier is adopted rather than duplicated.
 func ensureAccount(d *sql.DB, email, role, name, hash, idPrefix string) (string, error) {
-	email = strings.ToLower(strings.TrimSpace(email))
+	// Normalised here as well as by the caller: this is the last gate before a
+	// row lands, and an address stored with capitals can never be signed in to.
+	email = auth.NormalizeEmail(email)
 	var id string
 	err := d.QueryRow(`SELECT user_account_id FROM user_account WHERE email = ?`, email).Scan(&id)
 	switch {
