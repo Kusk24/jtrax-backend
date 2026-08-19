@@ -587,7 +587,10 @@ func handleCancelRoom(d *sql.DB, h *hub, relay *lichessRelay) http.HandlerFunc {
 	}
 }
 
-func mountGameRooms(mux *http.ServeMux, d *sql.DB) {
+// mountGameRooms returns the relay it built, so an accepted challenge can start
+// a rated game through the same one. Two relays would mean two watchers on the
+// same board and two sets of moves forwarded to Lichess.
+func mountGameRooms(mux *http.ServeMux, d *sql.DB) *lichessRelay {
 	h := newHub()
 	relay := newLichessRelay(d, h, lichessOAuthFromEnv(d))
 	// Rated games that were in play when this process last stopped still need
@@ -604,4 +607,5 @@ func mountGameRooms(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("POST "+base+"/{id}/moves", handleMove(d, h, relay))
 	mux.HandleFunc("POST "+base+"/{id}/resign", handleResign(d, h, relay))
 	mux.HandleFunc("GET "+base+"/{id}/events", handleRoomEvents(d, h))
+	return relay
 }
