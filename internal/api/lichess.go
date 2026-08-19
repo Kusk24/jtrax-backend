@@ -47,6 +47,9 @@ const verifyCodeLength = 8
 type lichessDeps struct {
 	db     *sql.DB
 	client *lichess.Client
+	// oauth is the play-access half. Held here so unlinking can revoke the
+	// grant on Lichess rather than only forgetting it locally.
+	oauth *lichessOAuth
 	// One sync at a time. Without this, a class of pupils opening the app at
 	// once would each trigger their own full fetch.
 	mu       sync.Mutex
@@ -251,9 +254,17 @@ func (l *lichessDeps) syncAll(force bool) (int, error) {
 }
 
 func (l *lichessDeps) storeRatings(studentID string, u lichess.User) error {
+	return storeLichessRatings(l.db, studentID, u)
+}
+
+// storeLichessRatings writes one player's ratings.
+//
+// A free function rather than only a method because the OAuth callback needs it
+// too, and that path has no lichessDeps to hand.
+func storeLichessRatings(db *sql.DB, studentID string, u lichess.User) error {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	day := time.Now().UTC().Format("2006-01-02")
-	tx, err := l.db.Begin()
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
@@ -531,6 +542,12 @@ func handleLichessUnlink(l *lichessDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
 			return
 		}
+		// Revoked before the row goes, because revoking needs the token that is
+		// about to be deleted. Deleting only our copy would leave a live grant
+		// on the student's Lichess account forever, which is not what the
+		// person pressing "disconnect" is asking for.
+		l.oauth.revokeToken(studentID)
+
 		tx, err := l.db.Begin()
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
@@ -538,6 +555,7 @@ func handleLichessUnlink(l *lichessDeps) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 		for _, q := range []string{
+			`DELETE FROM lichess_oauth_state WHERE student_id = ?`,
 			`DELETE FROM lichess_rating_day WHERE student_id = ?`,
 			`DELETE FROM lichess_rating WHERE student_id = ?`,
 			`DELETE FROM student_lichess WHERE student_id = ?`,
@@ -626,12 +644,20 @@ func handleLichessHistory(l *lichessDeps) http.HandlerFunc {
 /* ---- mount ---- */
 
 func mountLichess(mux *http.ServeMux, d *sql.DB) {
-	deps := &lichessDeps{db: d, client: lichess.New()}
+	deps := &lichessDeps{db: d, client: lichess.New(), oauth: lichessOAuthFromEnv(d)}
 	if base := strings.TrimSpace(os.Getenv("LICHESS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.
 		deps.client.BaseURL = base
 	}
 	const p = "/api/v1/lichess"
+
+	// The OAuth pair. Start is signed in; the callback cannot be — the browser
+	// arrives on a redirect from lichess.org — so its budget is tighter and the
+	// single-use state row is what authenticates it.
+	mux.HandleFunc("POST "+p+"/oauth/start", httpx.RateLimit(20, handleLichessOAuthStart(deps.oauth)))
+	mux.HandleFunc("GET "+p+"/oauth/callback", httpx.RateLimit(30, handleLichessOAuthCallback(deps.oauth)))
+	mux.HandleFunc("GET "+p+"/play-status", handleLichessPlayStatus(deps.oauth))
+
 	mux.HandleFunc("GET "+p+"/links", handleLichessList(deps))
 	mux.HandleFunc("GET "+p+"/me", handleLichessMine(deps))
 	// Both of these make an outbound request on the caller's behalf, so they
