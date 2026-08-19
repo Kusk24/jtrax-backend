@@ -54,3 +54,20 @@ services:
       # key of the wrong length fails at boot. See docs/line-messaging.md.
       - key: LINE_TOKEN_KEY
         sync: false
+
+      # Lichess rated play. Both are required together, and without them the
+      # student portal shows "Lichess play is not configured on this server" —
+      # accounts still link and ratings still sync, but no game can be relayed,
+      # because relaying needs a stored OAuth token per player and there is
+      # nowhere safe to put one.
+      #
+      # LICHESS_TOKEN_KEY seals those tokens. Exactly 32 decodable bytes:
+      # `openssl rand -base64 32`, pasted in the dashboard. Never committed.
+      - key: LICHESS_TOKEN_KEY
+        sync: false
+      # Where Lichess sends a pupil back after they approve. Must be this
+      # service's own public address — the callback lands on the API, not on a
+      # portal — and must match exactly, including scheme and no trailing slash.
+      # e.g. https://jtrax-backend.onrender.com
+      - key: PUBLIC_API_URL
+        sync: false

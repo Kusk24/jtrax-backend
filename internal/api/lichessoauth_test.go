@@ -416,3 +416,19 @@ func completeCallback(t *testing.T, base *client, state, code string) int {
 	defer res.Body.Close()
 	return res.StatusCode
 }
+
+// The screen shows opposite things for "you have not connected" and "this
+// school has not set it up", so the two must be distinguishable in the reply.
+func TestPlayStatusSaysWhenTheServerCannotDoRatedPlay(t *testing.T) {
+	// No LICHESS_TOKEN_KEY, no PUBLIC_API_URL: the default in these tests.
+	penny := &client{t: t, srv: newServer(t)}
+	penny.login("penny@jca.ac.th")
+
+	_, obj, _ := penny.do("GET", "/api/v1/lichess/play-status", nil)
+	if obj["canPlay"] != false {
+		t.Fatalf("unconfigured server should not report canPlay: %v", obj)
+	}
+	if obj["configured"] != false {
+		t.Fatalf("want configured=false so the portal can say why, got %v", obj["configured"])
+	}
+}

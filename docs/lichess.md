@@ -214,3 +214,22 @@ Reasons surfaced to players: `noPlayAccess`, `tokenExpired`, `challengeFailed`,
   re-attaches a stream to every Active rated room. A game that ended while the
   process was down is reconciled on reconnect, because Lichess replays the full
   state before closing a finished game's stream.
+
+## Turning on rated play
+
+Rated play is off until two environment variables are set on the backend, and
+the student portal says so rather than offering a button that cannot work:
+
+| Variable | What it is |
+|---|---|
+| `LICHESS_TOKEN_KEY` | Seals each pupil's OAuth token. Exactly 32 decodable bytes — generate with `openssl rand -base64 32`. Never committed; set it in the Render dashboard. |
+| `PUBLIC_API_URL` | This service's own public address, e.g. `https://jtrax-backend.onrender.com`. Lichess redirects the pupil back to `<PUBLIC_API_URL>/api/v1/lichess/oauth/callback`, so it must match byte for byte — right scheme, no trailing slash. |
+
+Without them the log says `lichess: play access disabled (need LICHESS_TOKEN_KEY
+and PUBLIC_API_URL)` and `play-status` returns `configured: false`. Accounts can
+still be linked and ratings still sync; only relaying a game is off, because
+relaying needs a stored token per player and there is nowhere safe to keep one.
+
+Rotating `LICHESS_TOKEN_KEY` invalidates every stored token — pupils have to
+grant access again. It is deliberately separate from `LINE_TOKEN_KEY` so that
+rotating one credential store does not take out the other.
