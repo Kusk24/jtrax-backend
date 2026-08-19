@@ -183,6 +183,30 @@ func handlePublicResults(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
+		// When the event is published on chess-results.com, that is the result —
+		// the arbiter's upload is what players and federations treat as true,
+		// and a second table typed in here would be wrong the moment a round
+		// lands. Our own rounds are not served alongside it: chess-results
+		// publishes a ranking, and pairing it with stale boards of ours would
+		// invite exactly the disagreement this is meant to end.
+		linked, err := linkedResultsFor(d, id)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			return
+		}
+		if linked != nil {
+			httpx.JSON(w, http.StatusOK, map[string]any{
+				"tournament": map[string]any{"name": name, "status": status},
+				"source":     linked.Source,
+				"sourceUrl":  linked.URL,
+				"stage":      linked.Stage,
+				"fetchedAt":  linked.FetchedAt,
+				"rounds":     []any{},
+				"standings":  publicExternalStandings(linked.Standings),
+			})
+			return
+		}
+
 		rounds, table, err := loadResults(d, id)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
