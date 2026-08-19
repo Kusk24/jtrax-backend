@@ -52,6 +52,7 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 	mountLine(mux, d)
 	mountLichess(mux, d)
 	mountTournamentResults(mux, d)
+	mountChessResults(mux, d)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
