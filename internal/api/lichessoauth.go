@@ -468,7 +468,16 @@ func (o *lichessOAuth) finish(w http.ResponseWriter, r *http.Request, returnTo, 
 
 // lichessPlayStatus is what a portal needs to decide which button to show.
 type lichessPlayStatus struct {
-	CanPlay      bool   `json:"canPlay"`
+	CanPlay bool `json:"canPlay"`
+	// Whether this server can relay rated games at all — it needs
+	// LICHESS_TOKEN_KEY and PUBLIC_API_URL, and without them there is nowhere
+	// safe to keep a pupil's token.
+	//
+	// Separate from CanPlay because the two mean opposite things to the person
+	// reading the screen. "You have not connected yet" is something a child can
+	// fix; "this school has not set it up" is not, and offering them a button
+	// that cannot possibly work is worse than saying so.
+	Configured   bool   `json:"configured"`
 	Username     string `json:"username,omitempty"`
 	ExpiresAt    string `json:"expiresAt,omitempty"`
 	ExpiringSoon bool   `json:"expiringSoon"`
@@ -482,6 +491,7 @@ func (o *lichessOAuth) playStatusFor(studentID string) lichessPlayStatus {
 	if !o.configured() {
 		return st
 	}
+	st.Configured = true
 	var enc, expires, managed sql.NullString
 	var username string
 	err := o.db.QueryRow(`SELECT username, token_enc, token_expires_at, managed_by
