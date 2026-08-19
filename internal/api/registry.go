@@ -68,6 +68,10 @@ func Registry() []*Resource {
 				{Name: "date_of_birth", Kind: "text"},
 				{Name: "current_level", Kind: "text"},
 				{Name: "fide_rating", Kind: "real"},
+				// The join key to external tournament tables: a FIDE ID names
+				// this child in any arbiter's standings for life, which their
+				// name never reliably does.
+				{Name: "fide_id", Kind: "text"},
 				{Name: "last_attended_date", Kind: "text"},
 				{Name: "streak_count", Kind: "int"},
 			},
