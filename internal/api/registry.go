@@ -54,7 +54,9 @@ var (
 	payStatus      = []string{"Paid"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
-	contactTypes   = []string{"phone", "email", "line_id"}
+	// Public sign-ups arrive Pending; staff entry has always meant Approved.
+	registrationStat = []string{"Pending", "Approved", "Rejected", "Withdrawn"}
+	contactTypes     = []string{"phone", "email", "line_id"}
 )
 
 // Registry lists every CRUD resource served under /api/v1.
@@ -293,6 +295,10 @@ func Registry() []*Resource {
 				// Opt-in, and staff-only to change: turning it on publishes
 				// children's names and scores to anyone with the link.
 				{Name: "results_public", Kind: "bool"},
+				// Opt-in for the same reason: it opens a write endpoint to
+				// anyone with the link.
+				{Name: "public_registration", Kind: "bool"},
+				{Name: "student_discount_pct", Kind: "int"},
 			},
 			ReadRoles: everyone,
 		},
@@ -308,7 +314,9 @@ func Registry() []*Resource {
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",
 			Cols: []Col{
 				{Name: "tournament_id", Kind: "text", Required: true},
-				{Name: "student_id", Kind: "text", Required: true},
+				// No longer required: a member of the public registering for an
+				// open event has no student record, and NULL is what says so.
+				{Name: "student_id", Kind: "text"},
 				{Name: "participant_name", Kind: "text", Required: true},
 				{Name: "participant_contact", Kind: "text"},
 				{Name: "participant_date_of_birth", Kind: "text"},
@@ -316,6 +324,12 @@ func Registry() []*Resource {
 				{Name: "fide_rating", Kind: "real"},
 				{Name: "fee_charged", Kind: "real"},
 				{Name: "registered_at", Kind: "text"},
+				{Name: "status", Kind: "text", Enum: registrationStat},
+				{Name: "source", Kind: "text"},
+				{Name: "contact_email", Kind: "text"},
+				{Name: "contact_phone", Kind: "text"},
+				{Name: "fee_quoted", Kind: "real"},
+				{Name: "student_discount_applied", Kind: "bool"},
 			},
 			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Parent"},
 			Scope: map[string]ScopeFn{
