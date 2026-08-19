@@ -1,12 +1,16 @@
-// Package lichess reads public player data from lichess.org.
+// Package lichess talks to lichess.org: reading public player data, and — with
+// a token the player granted — playing their games.
 //
-// No credential of any kind. Lichess serves player profiles and ratings to
-// anyone, with no key, no registration and no approval — which is why this
-// package has no configuration and why the feature costs nothing to run.
+// This file is the unauthenticated half. Lichess serves player profiles and
+// ratings to anyone, with no key, no registration and no approval, which is why
+// rating tracking costs nothing to run and works for a student who never grants
+// anything.
 //
-// Only reads. Nothing here plays a game, joins a team or changes anything on
-// Lichess; those all need an OAuth token belonging to the player, and the
-// academy has no business holding one.
+// The authenticated half lives in oauth.go and play.go. It exists because
+// "results on Lichess" cannot be faked from outside: a game only counts if it
+// was really played there, by the real accounts, which needs each player's own
+// OAuth grant. The academy holds those tokens sealed and uses them for nothing
+// but the game in front of it.
 //
 // # Why one bulk call rather than one per student
 //

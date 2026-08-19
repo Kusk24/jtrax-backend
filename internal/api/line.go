@@ -99,29 +99,6 @@ func (l *lineDeps) creds() (*lineCreds, error) {
 	return &lineCreds{Token: token, Secret: secret}, nil
 }
 
-/* ---- time ----
-
-   The schema follows the house convention and lets SQLite stamp rows with
-   datetime('now'), which is "2006-01-02 15:04:05" in UTC. That string is not
-   ISO 8601, and browsers parse it as *local* time — which would show a Bangkok
-   receptionist every message seven hours out. So it is stored in the house
-   format and converted on the way out. */
-
-const lineTimeLayout = "2006-01-02 15:04:05"
-
-func lineNow() string { return time.Now().UTC().Format(lineTimeLayout) }
-
-// lineISO converts a stored timestamp to RFC 3339 for the wire. An unparseable
-// value is passed through rather than dropped: a wrong-looking timestamp in the
-// UI is easier to diagnose than a missing one.
-func lineISO(stored string) string {
-	t, err := time.Parse(lineTimeLayout, stored)
-	if err != nil {
-		return stored
-	}
-	return t.UTC().Format(time.RFC3339)
-}
-
 /* ---- views ---- */
 
 type lineConversation struct {
@@ -172,7 +149,7 @@ func listConversations(d *sql.DB) ([]lineConversation, error) {
 			return nil, err
 		}
 		c.Followed = followed == 1
-		c.LastAt = lineISO(c.LastAt)
+		c.LastAt = sqliteISO(c.LastAt)
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -201,7 +178,7 @@ func threadOf(d *sql.DB, userID string) ([]lineMessageView, error) {
 			&m.SentBy, &m.Channel, &m.Delivery, &m.Reason); err != nil {
 			return nil, err
 		}
-		m.SentAt = lineISO(m.SentAt)
+		m.SentAt = sqliteISO(m.SentAt)
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -311,7 +288,7 @@ func (l *lineDeps) applyEvent(ev line.Event, c lineSender) bool {
 		l.upsertContact(uid, c)
 		if _, err := l.db.Exec(`UPDATE line_contact
 		                        SET followed = 1, reply_token = ?, reply_token_at = ?
-		                        WHERE line_user_id = ?`, ev.ReplyToken, lineNow(), uid); err != nil {
+		                        WHERE line_user_id = ?`, ev.ReplyToken, sqliteNow(), uid); err != nil {
 			log.Printf("line: follow %s: %v", uid, err)
 			return false
 		}
@@ -319,7 +296,7 @@ func (l *lineDeps) applyEvent(ev line.Event, c lineSender) bool {
 
 	case "message":
 		l.upsertContact(uid, c)
-		at := ev.At().Format(lineTimeLayout)
+		at := ev.At().Format(sqliteTimeLayout)
 		// OR IGNORE against the unique provider id: LINE guarantees at-least-once
 		// delivery, so the same message can arrive twice, and a redelivery must
 		// not post it again or bump the unread count again.
@@ -339,7 +316,7 @@ func (l *lineDeps) applyEvent(ev line.Event, c lineSender) bool {
 		                        SET last_message_at = ?, unread_count = unread_count + 1,
 		                            followed = 1, reply_token = ?, reply_token_at = ?
 		                        WHERE line_user_id = ?`,
-			at, ev.ReplyToken, lineNow(), uid); err != nil {
+			at, ev.ReplyToken, sqliteNow(), uid); err != nil {
 			log.Printf("line: touch contact %s: %v", uid, err)
 		}
 		return true
@@ -358,7 +335,7 @@ func (l *lineDeps) upsertContact(uid string, c lineSender) {
 	err := l.db.QueryRow(`SELECT display_name FROM line_contact WHERE line_user_id = ?`, uid).Scan(&name)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		now := lineNow()
+		now := sqliteNow()
 		if _, err := l.db.Exec(`INSERT INTO line_contact (line_user_id, first_seen_at, last_message_at)
 		                        VALUES (?, ?, ?)`, uid, now, now); err != nil {
 			log.Printf("line: create contact %s: %v", uid, err)
@@ -418,7 +395,7 @@ func handleLineThread(l *lineDeps) http.HandlerFunc {
 			return
 		}
 		c.Followed = followed == 1
-		c.LastAt = lineISO(c.LastAt)
+		c.LastAt = sqliteISO(c.LastAt)
 		messages, err := threadOf(l.db, uid)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not load messages", err)
@@ -515,7 +492,7 @@ func handleLineSend(l *lineDeps) http.HandlerFunc {
 			log.Printf("line: send to %s failed: %v", uid, sendErr)
 		}
 		msgID := newID("lmsg")
-		at := lineNow()
+		at := sqliteNow()
 		if _, err := l.db.Exec(`
 			INSERT INTO line_message
 			  (line_message_id, line_user_id, direction, kind, body, sent_at, sent_by,
@@ -536,7 +513,7 @@ func handleLineSend(l *lineDeps) http.HandlerFunc {
 
 		view := lineMessageView{
 			ID: msgID, Direction: "Out", Kind: "text", Body: text,
-			SentAt: lineISO(at), SentBy: id.DisplayName,
+			SentAt: sqliteISO(at), SentBy: id.DisplayName,
 			Channel: used, Delivery: delivery, Reason: reason,
 		}
 		if sendErr != nil {
@@ -574,7 +551,7 @@ func lineTokenFresh(at sql.NullString) bool {
 	if !at.Valid || at.String == "" {
 		return false
 	}
-	t, err := time.Parse(lineTimeLayout, at.String)
+	t, err := time.Parse(sqliteTimeLayout, at.String)
 	if err != nil {
 		return false
 	}
@@ -647,7 +624,7 @@ func handleLineChannelGet(l *lineDeps) http.HandlerFunc {
 		if err == nil {
 			out["configured"] = true
 			out["tokenHint"] = hint
-			out["updatedAt"] = lineISO(updatedAt)
+			out["updatedAt"] = sqliteISO(updatedAt)
 			// The remaining allowance is the real constraint on this feature,
 			// so it is shown where the credentials are. A failure to read it is
 			// not a failure of the page.
@@ -751,7 +728,7 @@ func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
 			  token_hint = excluded.token_hint,
 			  updated_at = excluded.updated_at,
 			  updated_by = excluded.updated_by`,
-			tokenEnc, secretEnc, hint, lineNow(), id.UserAccountID); err != nil {
+			tokenEnc, secretEnc, hint, sqliteNow(), id.UserAccountID); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not store credentials", err)
 			return
 		}
