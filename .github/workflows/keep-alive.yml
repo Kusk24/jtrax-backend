@@ -2,6 +2,14 @@
 # 30-60s cold start that follows is longer than Vercel waits before returning
 # a 504. Pinging /health every 10 minutes keeps the instance warm.
 #
+# Every five minutes, not every ten, because GitHub does not run scheduled
+# workflows on time. Observed gaps on this repo: 11:00, 11:35, 11:55 — a
+# 35-minute hole, well past Render's 15-minute idle window, so the service slept
+# and the next visitor paid the cold start anyway. Asking twice as often does not
+# cost twice as much: a service that never sleeps bills the same instance-hours
+# whether it is pinged 5 or 50 times an hour, so the only thing doubling the rate
+# buys is tolerance for GitHub being late.
+#
 # A full month of uptime costs ~730 of the 750 free instance-hours, so this
 # fits — but only while jtrax-backend is the *only* free service in the
 # workspace. See docs/deployment.md.
@@ -9,7 +17,7 @@ name: keep-alive
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
