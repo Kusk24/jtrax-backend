@@ -119,3 +119,98 @@ test fail — nine of nine caught.
 - **A closed or renamed account simply drops out of the bulk reply.** Those
   students keep their last known ratings rather than being blanked, so one bad
   username cannot wipe a class.
+
+---
+
+# Playing rated games on Lichess
+
+Everything above is read-only. This part is not: a JTrax game room can *be* a
+real, rated game on lichess.org, so a result played on the academy's board moves
+a student's actual rating.
+
+## Why the earlier "there is no write API" was wrong
+
+There is one, and it needs no registration:
+
+| Endpoint | Auth | Rated |
+| --- | --- | --- |
+| `POST /api/challenge/open` | none at all | yes |
+| `POST /api/import` | optional token | **never** |
+| `POST /api/board/game/{id}/move/{uci}` | `board:play` | yes |
+
+Importing a PGN after the fact produces a real game page and a real analysis
+board, but an imported game is never rated. The only way a game played here can
+count is for it to *be* a Lichess game while it is played — which is what the
+relay does.
+
+## The shape
+
+1. A student grants play access through OAuth2 with PKCE. There is no client
+   secret: Lichess does not register applications, so `client_id` is any stable
+   string and the flow's security is PKCE alone.
+2. The token is sealed with AES-256-GCM (`LICHESS_TOKEN_KEY`) and stored on
+   `student_lichess`. It is the most dangerous value in the database — it can
+   resign a child's games — and it is never returned by any endpoint.
+3. Staff create a room with `lichessRated: true` and a clock.
+4. When the second seat fills, white's token issues a challenge to black's
+   username and black's token accepts it. Both students must have granted.
+5. Every accepted JTrax move is forwarded with the token of the player who made
+   it, **after** it is stored and published locally.
+6. A stream of the Lichess game runs alongside and has the last word on the
+   result.
+
+## Who is authoritative
+
+Split deliberately:
+
+- **JTrax decides legality and turn order.** It already replays the move list on
+  every request, and waiting on a network round trip before showing a child
+  their own move is what makes a board feel broken.
+- **Lichess decides the rated result.** It owns the clock and the rating.
+
+Both run the same rules over the same move list, so they agree about chess. The
+one thing they can disagree about is *time* — which is exactly what the stream
+is for.
+
+## Detaching
+
+If they disagree anyway, the room stops being rated, records why, and says so on
+the board while the pupils are still playing. It never rolls their board back to
+match: taking back a move a child already played is worse than losing a rating.
+
+Reasons surfaced to players: `noPlayAccess`, `tokenExpired`, `challengeFailed`,
+`opponentDeclined`, `moveRejected`, `unreachable`, `notConfigured`.
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `LICHESS_TOKEN_KEY` | 32 bytes, base64 or hex. Without it play access is off. |
+| `PUBLIC_API_URL` | This server's own public URL — the OAuth `redirect_uri` is built from it and must match byte-for-byte between authorize and exchange. |
+| `LICHESS_CLIENT_ID` | Shown on Lichess's consent screen. Defaults to `jtrax.app`. |
+| `APP_URL`, `ADMIN_URL` | The only origins a callback may redirect back to. |
+
+## Things that bite
+
+- **Tokens last a year and there is no refresh token.** There is no renewal loop
+  to write, only an expiry to watch and a student to ask again. The portal warns
+  a month out; `playStatusFor` reports `expiringSoon`.
+- **Under-13s cannot hold a Lichess account.** The intended arrangement is an
+  account created and held by a parent or teacher with Kid Mode on. `managed_by`
+  records who holds it, because that is a safeguarding fact about a child rather
+  than a UI detail.
+- **Kid Mode is not verified by us.** Reading it needs the `preference:read`
+  scope, and widening every child's grant for a check an adult can do once is a
+  bad trade. Kid Mode restricts chat, forums and messages — not play.
+- **A teacher-versus-pupil game can never be rated.** Only a student row has a
+  Lichess link, which is correct: a coaching game should not move a rating.
+- **Lichess only accepts certain clocks** — 0, 15, 30, 45, 60, 90, or any
+  multiple of 60 up to 10800. Validated at room creation, not at pairing time,
+  because by then two pupils are sitting at a board waiting.
+- **Repeatedly pairing the same two pupils is what boosting looks like.** Nothing
+  here throttles it. Worth watching before a whole class plays rated ladders
+  against each other every week.
+- **Rooms are resumed after a restart**, but only on the next boot: `resume()`
+  re-attaches a stream to every Active rated room. A game that ended while the
+  process was down is reconciled on reconnect, because Lichess replays the full
+  state before closing a finished game's stream.

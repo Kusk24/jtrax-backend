@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,16 @@ func (c *client) login(email string) {
 }
 
 func newServer(t *testing.T) *httptest.Server {
+	return newServerOn(t, newDB(t))
+}
+
+// newDB opens and seeds a fresh database.
+//
+// Split from newServer so a test can stand up a *second* server on the same
+// data — which is how a restart is simulated, and the only way to test that
+// anything survives one.
+func newDB(t *testing.T) *sql.DB {
+	t.Helper()
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +79,11 @@ func newServer(t *testing.T) *httptest.Server {
 	if err := db.SeedPuzzles(d); err != nil {
 		t.Fatal(err)
 	}
+	return d
+}
+
+func newServerOn(t *testing.T, d *sql.DB) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(api.NewHandler(d))
 	t.Cleanup(srv.Close)
 	return srv
