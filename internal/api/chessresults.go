@@ -499,6 +499,7 @@ func mountChessResults(mux *http.ServeMux, d *sql.DB) {
 	// Mounted here so both share one client and one per-tournament fetch
 	// throttle — two throttles would be no throttle at all.
 	const t = "/api/v1/tournaments"
+	mux.HandleFunc("GET "+t+"/{id}/chess-results", handleGetChessResultsLink(deps))
 	mux.HandleFunc("POST "+t+"/{id}/chess-results", httpx.RateLimit(10, handleLinkChessResults(deps)))
 	mux.HandleFunc("DELETE "+t+"/{id}/chess-results", handleUnlinkChessResults(deps))
 	mux.HandleFunc("POST "+t+"/{id}/chess-results/refresh", httpx.RateLimit(10, handleRefreshTournamentResults(deps)))

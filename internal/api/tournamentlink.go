@@ -84,6 +84,31 @@ func publicExternalStandings(rows []externalStanding) []map[string]any {
 	return out
 }
 
+// handleGetChessResultsLink reports what a tournament is linked to, if anything.
+//
+// Staff-only and read-only: it never fetches from chess-results, it reads the
+// copy already stored. The console calls it when the Results tab opens, and a
+// screen opening must not cost somebody else's server a request.
+func handleGetChessResultsLink(c *chessResultsDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(c.db, w, r) == nil {
+			return
+		}
+		out, err := linkedResultsFor(c.db, r.PathValue("id"))
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			return
+		}
+		if out == nil {
+			// Not linked is a fact, not a failure — the card renders its empty
+			// state from this rather than from an error.
+			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+			return
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
 // handleLinkChessResults points a tournament at a chess-results event.
 //
 // Tracking the event and linking it are one action deliberately: a member of
