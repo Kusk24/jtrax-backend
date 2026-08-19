@@ -1,0 +1,17 @@
+-- 0015_tournament_chess_results_link.sql — point one of the academy's own
+-- tournaments at the chess-results.com event it is published as.
+--
+-- The academy does not author the standings for an event an arbiter runs. The
+-- arbiter pairs it in Swiss-Manager and uploads to chess-results.com, and that
+-- upload is the real result — the thing players, parents and federations treat
+-- as true. JTrax typing a second copy of it by hand would be a second source
+-- that is wrong the moment a round lands.
+--
+-- So a tournament may name the chess-results event it *is*, and from then on its
+-- public page follows the arbiter rather than the console. Registration, fees
+-- and the student discount stay here, because chess-results has no notion of
+-- any of them; the standings live there, because that is where they are made.
+--
+-- Nullable, and null is the normal case: an in-house club night has no
+-- chess-results event and its standings are the console's to keep.
+ALTER TABLE tournament ADD COLUMN chess_results_id INTEGER;

@@ -299,6 +299,10 @@ func Registry() []*Resource {
 				// anyone with the link.
 				{Name: "public_registration", Kind: "bool"},
 				{Name: "student_discount_pct", Kind: "int"},
+				// The chess-results.com event this tournament is published as,
+				// when the standings are somebody else's to author. Read here so
+				// the console's list can say which events follow an arbiter.
+				{Name: "chess_results_id", Kind: "int"},
 			},
 			ReadRoles: everyone,
 		},
