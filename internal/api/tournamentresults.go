@@ -535,6 +535,42 @@ func refreshRoundStatus(d *sql.DB, roundID string) {
 	}
 }
 
+// handleListLiveTournaments names the published events worth pointing a
+// portal at: upcoming and ongoing tournaments whose results page is public.
+//
+// This is the discovery half of the public results page — the parent and
+// student portals ask it "is there a tournament to follow right now" and link
+// to /t/<id>. It carries names and ids only, both already served by the
+// results endpoint itself, and completed events drop off so the portals stop
+// advertising an event that is over.
+func handleListLiveTournaments(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := d.Query(`
+			SELECT tournament_id, name, tournament_status FROM tournament
+			WHERE results_public = 1 AND tournament_status IN ('Upcoming','Ongoing')
+			ORDER BY CASE tournament_status WHEN 'Ongoing' THEN 0 ELSE 1 END, start_date, tournament_id`)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			return
+		}
+		defer rows.Close()
+		out := []map[string]any{}
+		for rows.Next() {
+			var id, name, status string
+			if err := rows.Scan(&id, &name, &status); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+				return
+			}
+			out = append(out, map[string]any{"tournamentId": id, "name": name, "status": status})
+		}
+		if err := rows.Err(); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
 func mountTournamentResults(mux *http.ServeMux, d *sql.DB, cr *chessResultsDeps) {
 	const p = "/api/v1/tournaments"
 	mux.HandleFunc("GET "+p+"/{id}/results", handleTournamentResults(d))
@@ -547,4 +583,6 @@ func mountTournamentResults(mux *http.ServeMux, d *sql.DB, cr *chessResultsDeps)
 	// rate-limited because anything unauthenticated has to be.
 	mux.HandleFunc("GET /api/v1/public/tournaments/{id}/results",
 		httpx.RateLimit(60, handlePublicResults(d, cr)))
+	mux.HandleFunc("GET /api/v1/public/live-tournaments",
+		httpx.RateLimit(60, handleListLiveTournaments(d)))
 }

@@ -218,3 +218,42 @@ func TestAFinishedEventIsNeverRefetched(t *testing.T) {
 		t.Fatalf("a final event still lists %d rounds, want 5", len(rounds))
 	}
 }
+
+// The portals' discovery question: is there a tournament to follow right now?
+func TestLiveTournamentListShowsOnlyPublishedUnfinishedEvents(t *testing.T) {
+	base := &client{t: t, srv: newServer(t)}
+	base.login("admin@jca.ac.th")
+	mk := func(name, status string, public bool) {
+		if st, out, _ := base.do("POST", "/api/v1/tournaments", map[string]any{
+			"name": name, "tournament_status": status, "results_public": public,
+		}); st != 201 {
+			t.Fatalf("create %s: %d (%v)", name, st, out)
+		}
+	}
+	mk("Ongoing & public", "Ongoing", true)
+	mk("Upcoming & public", "Upcoming", true)
+	mk("Finished & public", "Completed", true)
+	mk("Ongoing but private", "Ongoing", false)
+
+	pub := &client{t: t, srv: base.srv}
+	status, _, list := pub.do("GET", "/api/v1/public/live-tournaments", nil)
+	if status != 200 {
+		t.Fatalf("live list: %d", status)
+	}
+	names := make([]string, len(list))
+	for i, e := range list {
+		names[i] = e["name"].(string)
+	}
+	if len(names) != 2 || names[0] != "Ongoing & public" || names[1] != "Upcoming & public" {
+		t.Fatalf("live list = %v — finished and private events must not appear, ongoing leads", names)
+	}
+	for _, e := range list {
+		for key := range e {
+			switch key {
+			case "tournamentId", "name", "status":
+			default:
+				t.Fatalf("live list leaks %q: %v", key, e)
+			}
+		}
+	}
+}
