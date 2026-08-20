@@ -52,8 +52,9 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 	mountPuzzles(mux, d)
 	mountLine(mux, d)
 	mountLichess(mux, d)
-	mountTournamentResults(mux, d)
-	mountChessResults(mux, d)
+	// Chess-results first: the public results route refreshes through its deps.
+	crDeps := mountChessResults(mux, d)
+	mountTournamentResults(mux, d, crDeps)
 	mountPublicRegistration(mux, d)
 	mountRegistrationQueue(mux, d)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern

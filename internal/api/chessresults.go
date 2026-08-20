@@ -29,9 +29,13 @@ import (
 )
 
 // externalSyncInterval is how stale a copy of an *unfinished* tournament may
-// be before a read refreshes it. Rounds land every hour or two on the day; six
-// hours (the Lichess cadence) would show parents yesterday's table.
-const externalSyncInterval = 30 * time.Minute
+// be before a read refreshes it. The academy's own workflow is Swiss-Manager →
+// upload to chess-results after every round: pairings land minutes before play
+// and results minutes after, and a parent at the venue is refreshing exactly
+// then. Three minutes keeps the page live through a round turnaround while the
+// floor below keeps the site's cost bounded — and a finished event never
+// refreshes at all.
+const externalSyncInterval = 3 * time.Minute
 
 // externalRefreshFloor is the minimum gap between fetches of one tournament,
 // however they are triggered. This is the politeness budget: the site is a
@@ -170,10 +174,164 @@ func (c *chessResultsDeps) refreshExternal(extID string, crID int) error {
 	if err != nil {
 		return err
 	}
-	return c.storeExternal(extID, t)
+	if err := c.storeExternal(extID, t); err != nil {
+		return err
+	}
+	// Best-effort: the standings are already stored, and a torn round page
+	// must not make the whole refresh look failed.
+	if err := c.syncRounds(extID, t); err != nil {
+		log.Printf("chessresults: rounds for %d: %v", crID, err)
+	}
+	return nil
 }
 
 var errExternalThrottled = errors.New("chessresults: refreshed too recently")
+
+// roundsFetchBudget caps the round pages one refresh may pull. A played round
+// is fetched once and kept forever, so a live event costs one or two pages per
+// refresh; the budget only bites when a long-finished event is first linked,
+// where the history simply arrives over two refreshes instead of one.
+const roundsFetchBudget = 5
+
+// syncRounds brings the stored rounds up to what the ranking heading says has
+// been played, and probes for the next round's pairings — the page a parent
+// wants between the arbiter's pairing upload and the results upload.
+func (c *chessResultsDeps) syncRounds(extID string, t *chessresults.Tournament) error {
+	played := chessresults.PlayedRounds(t.Stage)
+	final := chessresults.FinalStage(t.Stage)
+
+	// Which rounds are already stored as played. Ids first, rows closed, then
+	// any further queries — single-connection sqlite deadlocks otherwise.
+	have := map[int]bool{}
+	rows, err := c.db.Query(`SELECT round_no FROM external_round
+	                         WHERE external_tournament_id = ? AND played = 1`, extID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		have[n] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	budget := roundsFetchBudget
+	for k := 1; k <= played && budget > 0; k++ {
+		if have[k] {
+			// A counted round is immutable: fetched once, never again.
+			continue
+		}
+		budget--
+		r, err := c.client.FetchRound(t.ID, k)
+		if errors.Is(err, chessresults.ErrNoSuchRound) {
+			// A hole in the site's own pages; the rounds around it still count.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := c.storeRound(extID, r, true); err != nil {
+			return err
+		}
+	}
+
+	if final {
+		// The event is over: a stored "next round" that never happened would
+		// hang a pending round under a final table forever.
+		if _, err := c.db.Exec(`DELETE FROM external_pairing
+		                        WHERE external_tournament_id = ? AND round_no > ?`, extID, played); err != nil {
+			return err
+		}
+		_, err := c.db.Exec(`DELETE FROM external_round
+		                     WHERE external_tournament_id = ? AND round_no > ?`, extID, played)
+		return err
+	}
+	if budget <= 0 {
+		return nil
+	}
+
+	// The next round: published before it is played, and replaced wholesale on
+	// every refresh because pairings can be corrected until play starts.
+	next := played + 1
+	r, err := c.client.FetchRound(t.ID, next)
+	if errors.Is(err, chessresults.ErrNoSuchRound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return c.storeRound(extID, r, false)
+}
+
+// storeRound writes one round, matching seats to students by exact normalised
+// name — the pairing page has no FIDE column, so name is all there is.
+func (c *chessResultsDeps) storeRound(extID string, r *chessresults.Round, played bool) error {
+	byName := map[string]string{}
+	rows, err := c.db.Query(`SELECT student_id, name FROM student`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		byName[chessresults.NormalizeName(name)] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	playedInt := 0
+	if played {
+		playedInt = 1
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO external_round (external_tournament_id, round_no, played, round_date, fetched_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(external_tournament_id, round_no)
+		DO UPDATE SET played = excluded.played, round_date = excluded.round_date,
+		              fetched_at = excluded.fetched_at`,
+		extID, r.Number, playedInt, r.Date); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM external_pairing
+	                      WHERE external_tournament_id = ? AND round_no = ?`, extID, r.Number); err != nil {
+		return err
+	}
+	for _, pr := range r.Pairings {
+		var white, black any
+		if id, ok := byName[chessresults.NormalizeName(pr.WhiteName)]; ok {
+			white = id
+		}
+		if id, ok := byName[chessresults.NormalizeName(pr.BlackName)]; ok {
+			black = id
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO external_pairing (external_tournament_id, round_no, board,
+			    white_name, white_rating, black_name, black_rating, result,
+			    white_student_id, black_student_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			extID, r.Number, pr.Board, pr.WhiteName, pr.WhiteRating,
+			pr.BlackName, pr.BlackRating, pr.Result, white, black); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
 
 /* ---- endpoints ---- */
 
@@ -243,6 +401,9 @@ func handleTrackExternal(c *chessResultsDeps) http.HandlerFunc {
 		if err := c.storeExternal(extID, t); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
 			return
+		}
+		if err := c.syncRounds(extID, t); err != nil {
+			log.Printf("chessresults: rounds for %d: %v", crID, err)
 		}
 		view, err := loadExternal(c.db, extID)
 		if err != nil {
@@ -358,7 +519,12 @@ func handleGetExternal(c *chessResultsDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load standings", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"tournament": view, "standings": standings})
+		rounds, err := loadExternalRounds(c.db, extID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load rounds", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"tournament": view, "standings": standings, "rounds": rounds})
 	}
 }
 
@@ -461,6 +627,14 @@ func handleUntrackExternal(c *chessResultsDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
+		if _, err := tx.Exec(`DELETE FROM external_pairing WHERE external_tournament_id = ?`, extID); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			return
+		}
+		if _, err := tx.Exec(`DELETE FROM external_round WHERE external_tournament_id = ?`, extID); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			return
+		}
 		res, err := tx.Exec(`DELETE FROM external_tournament WHERE external_tournament_id = ?`, extID)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
@@ -480,7 +654,7 @@ func handleUntrackExternal(c *chessResultsDeps) http.HandlerFunc {
 
 /* ---- mount ---- */
 
-func mountChessResults(mux *http.ServeMux, d *sql.DB) {
+func mountChessResults(mux *http.ServeMux, d *sql.DB) *chessResultsDeps {
 	deps := &chessResultsDeps{db: d, client: chessresults.New(), lastFetch: map[int]time.Time{}}
 	if base := strings.TrimSpace(os.Getenv("CHESS_RESULTS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.
@@ -503,4 +677,5 @@ func mountChessResults(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("POST "+t+"/{id}/chess-results", httpx.RateLimit(10, handleLinkChessResults(deps)))
 	mux.HandleFunc("DELETE "+t+"/{id}/chess-results", handleUnlinkChessResults(deps))
 	mux.HandleFunc("POST "+t+"/{id}/chess-results/refresh", httpx.RateLimit(10, handleRefreshTournamentResults(deps)))
+	return deps
 }
