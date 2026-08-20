@@ -28,7 +28,33 @@ type linkedResults struct {
 	Stage      string             `json:"stage,omitempty"`
 	FetchedAt  string             `json:"fetchedAt,omitempty"`
 	Standings  []externalStanding `json:"standings"`
+	Rounds     []linkedRound      `json:"rounds"`
 	ChessResID int                `json:"chessResultsId"`
+	// extID keys the stored copy; internal, never serialised.
+	extID string `json:"-"`
+}
+
+// linkedRound is one round as read from the source's pairing page.
+type linkedRound struct {
+	Round  int    `json:"round"`
+	Date   string `json:"date,omitempty"`
+	Played bool   `json:"played"`
+	Boards []linkedBoard `json:"pairings"`
+}
+
+type linkedBoard struct {
+	Board       int    `json:"board"`
+	White       string `json:"white"`
+	WhiteRating int    `json:"whiteRating,omitempty"`
+	Black       string `json:"black"`
+	BlackRating int    `json:"blackRating,omitempty"`
+	Result      string `json:"result,omitempty"`
+	// Which seats are the academy's own pupils — staff and parent views only;
+	// the public shape strips these.
+	WhiteStudentID   string `json:"whiteStudentId,omitempty"`
+	WhiteStudentName string `json:"whiteStudentName,omitempty"`
+	BlackStudentID   string `json:"blackStudentId,omitempty"`
+	BlackStudentName string `json:"blackStudentName,omitempty"`
 }
 
 // linkedResultsFor returns the external standings for a tournament, or nil when
@@ -59,11 +85,77 @@ func linkedResultsFor(d *sql.DB, tournamentID string) (*linkedResults, error) {
 	if err != nil {
 		return nil, err
 	}
+	rounds, err := loadExternalRounds(d, extID)
+	if err != nil {
+		return nil, err
+	}
 	return &linkedResults{
 		Source: "chess-results", URL: chessResultsURL(int(crID.Int64)),
-		Stage: stage, FetchedAt: fetched, Standings: rows,
-		ChessResID: int(crID.Int64),
+		Stage: stage, FetchedAt: fetched, Standings: rows, Rounds: rounds,
+		ChessResID: int(crID.Int64), extID: extID,
 	}, nil
+}
+
+// loadExternalRounds reads every stored round with its boards, in play order.
+func loadExternalRounds(d *sql.DB, extID string) ([]linkedRound, error) {
+	rows, err := d.Query(`
+		SELECT p.round_no, r.round_date, r.played, p.board,
+		       p.white_name, p.white_rating, p.black_name, p.black_rating, p.result,
+		       COALESCE(p.white_student_id,''), COALESCE(ws.name,''),
+		       COALESCE(p.black_student_id,''), COALESCE(bs.name,'')
+		FROM external_pairing p
+		JOIN external_round r ON r.external_tournament_id = p.external_tournament_id
+		                     AND r.round_no = p.round_no
+		LEFT JOIN student ws ON ws.student_id = p.white_student_id
+		LEFT JOIN student bs ON bs.student_id = p.black_student_id
+		WHERE p.external_tournament_id = ?
+		ORDER BY p.round_no, p.board`, extID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []linkedRound{}
+	for rows.Next() {
+		var (
+			n, played int
+			date      string
+			b         linkedBoard
+		)
+		if err := rows.Scan(&n, &date, &played, &b.Board,
+			&b.White, &b.WhiteRating, &b.Black, &b.BlackRating, &b.Result,
+			&b.WhiteStudentID, &b.WhiteStudentName, &b.BlackStudentID, &b.BlackStudentName); err != nil {
+			return nil, err
+		}
+		if len(out) == 0 || out[len(out)-1].Round != n {
+			out = append(out, linkedRound{Round: n, Date: date, Played: played == 1})
+		}
+		out[len(out)-1].Boards = append(out[len(out)-1].Boards, b)
+	}
+	return out, rows.Err()
+}
+
+// publicExternalRounds strips the rounds to what may be shown without a
+// session — same rule as the standings: the arbiter's published names stay,
+// which rows are our pupils does not.
+func publicExternalRounds(rounds []linkedRound) []map[string]any {
+	out := make([]map[string]any, 0, len(rounds))
+	for _, r := range rounds {
+		boards := make([]map[string]any, 0, len(r.Boards))
+		for _, b := range r.Boards {
+			boards = append(boards, map[string]any{
+				"board": b.Board, "white": b.White, "whiteRating": b.WhiteRating,
+				"black": b.Black, "blackRating": b.BlackRating, "result": b.Result,
+			})
+		}
+		status := "pending"
+		if r.Played {
+			status = "played"
+		}
+		out = append(out, map[string]any{
+			"round": r.Round, "date": r.Date, "status": status, "pairings": boards,
+		})
+	}
+	return out
 }
 
 // publicExternalStandings strips a linked table down to what may be shown
@@ -175,6 +267,9 @@ func handleLinkChessResults(c *chessResultsDeps) http.HandlerFunc {
 			if err := c.storeExternal(extID, t); err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
 				return
+			}
+			if err := c.syncRounds(extID, t); err != nil {
+				log.Printf("chessresults: rounds for %d: %v", crID, err)
 			}
 		} else if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not check", err)

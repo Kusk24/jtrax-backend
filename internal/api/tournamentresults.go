@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/chessresults"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/standings"
 )
@@ -166,7 +167,7 @@ func handleTournamentResults(d *sql.DB) http.HandlerFunc {
 // per event, it is rate-limited, and it carries only what is already pinned to
 // the wall at a tournament hall — name, category, score. No contact details, no
 // date of birth, no student id, nothing that ties a child to a JTrax account.
-func handlePublicResults(d *sql.DB) http.HandlerFunc {
+func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		var name, status string
@@ -195,13 +196,29 @@ func handlePublicResults(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		if linked != nil {
+			// The academy's workflow is Swiss-Manager → upload after every
+			// round, so while the event is live this page follows the uploads
+			// by itself: a stale read starts a refresh in the background and
+			// serves the stored copy now — a parent's phone never waits on
+			// chess-results.com, and the next poll gets the fresh table. The
+			// floor in allowFetch keeps a hall full of phones at one upstream
+			// fetch per interval.
+			if cr != nil && !chessresults.FinalStage(linked.Stage) && staleExternal(linked.FetchedAt) {
+				extID, crID := linked.extID, linked.ChessResID
+				go func() {
+					if err := cr.refreshExternal(extID, crID); err != nil &&
+						!errors.Is(err, errExternalThrottled) {
+						log.Printf("chessresults: public refresh %d: %v", crID, err)
+					}
+				}()
+			}
 			httpx.JSON(w, http.StatusOK, map[string]any{
 				"tournament": map[string]any{"name": name, "status": status},
 				"source":     linked.Source,
 				"sourceUrl":  linked.URL,
 				"stage":      linked.Stage,
 				"fetchedAt":  linked.FetchedAt,
-				"rounds":     []any{},
+				"rounds":     publicExternalRounds(linked.Rounds),
 				"standings":  publicExternalStandings(linked.Standings),
 			})
 			return
@@ -518,7 +535,7 @@ func refreshRoundStatus(d *sql.DB, roundID string) {
 	}
 }
 
-func mountTournamentResults(mux *http.ServeMux, d *sql.DB) {
+func mountTournamentResults(mux *http.ServeMux, d *sql.DB, cr *chessResultsDeps) {
 	const p = "/api/v1/tournaments"
 	mux.HandleFunc("GET "+p+"/{id}/results", handleTournamentResults(d))
 	mux.HandleFunc("POST "+p+"/{id}/rounds", handleCreateRound(d))
@@ -529,5 +546,5 @@ func mountTournamentResults(mux *http.ServeMux, d *sql.DB) {
 	// The one endpoint here that needs no session. Published events only, and
 	// rate-limited because anything unauthenticated has to be.
 	mux.HandleFunc("GET /api/v1/public/tournaments/{id}/results",
-		httpx.RateLimit(60, handlePublicResults(d)))
+		httpx.RateLimit(60, handlePublicResults(d, cr)))
 }

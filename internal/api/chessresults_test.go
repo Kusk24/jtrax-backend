@@ -42,12 +42,47 @@ func newCRStub(t *testing.T) *crStub {
 			<tr><td>2</td><td>Penny</td><td></td><td>1200</td></tr>
 			<tr><td>3</td><td>Stranger, Alice</td><td>5800000</td><td>1400</td></tr>
 			</table>`)
+		case "2":
+			s.roundPage(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(s.srv.Close)
 	return s
+}
+
+// roundPage serves art=2 the way the real site does, including its one trap:
+// a round past the last published one is answered with the last one, never a
+// 404 — the page's own heading is the only honest field.
+func (s *crStub) roundPage(w http.ResponseWriter, r *http.Request) {
+	stage, _ := s.stage.Load().(string)
+	played := 0
+	fmt.Sscanf(stage, "Rank after Round %d", &played)
+	if played == 0 {
+		fmt.Sscanf(stage, "Final Ranking after %d Rounds", &played)
+	}
+	// Pairings for the next round are published unless the event is over.
+	last := played
+	if stage[:5] != "Final" {
+		last = played + 1
+	}
+	rd := 0
+	fmt.Sscanf(r.URL.Query().Get("rd"), "%d", &rd)
+	if rd > last {
+		rd = last
+	}
+	result := `<td class="CRc">1 - 0</td>`
+	if rd > played {
+		result = `<td class="CRc">&nbsp;</td>`
+	}
+	fmt.Fprintf(w, `<h2>Bangkok Open 2026</h2><h2>Pairings/Results</h2>
+	<h3>Round %d on 2026/08/1%d</h3>
+	<table class="CRs1">
+	<tr><th>Bo.</th><th>No.</th><td>White</td><th>Rtg</th><th>Pts.</th><th>Result</th><th>Pts.</th><td>Black</td><th>Rtg</th><th>No.</th></tr>
+	<tr><td>1</td><td>1</td><td>Somchai, Niran</td><td>1650</td><td>%d</td>%s<td>%d</td><td>Stranger, Alice</td><td>1400</td><td>3</td></tr>
+	<tr><td>2</td><td>2</td><td>Penny</td><td>1200</td><td>0</td><td class="CRc">1</td><td></td><td>bye</td><td></td><td></td></tr>
+	</table>`, rd, rd, rd-1, result, rd-1)
 }
 
 func newCRServer(t *testing.T) (*client, *crStub) {
