@@ -333,12 +333,15 @@ func handleRefreshTournamentResults(c *chessResultsDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusNotFound, "that event is no longer tracked", err)
 			return
 		}
-		if !c.allowFetch(int(crID.Int64)) {
-			httpx.Error(w, http.StatusTooManyRequests,
-				"that tournament was fetched moments ago, try again shortly", nil)
-			return
-		}
+		// refreshExternal claims the politeness floor itself — claiming it here
+		// too made every claim inside fail, and this button answered 502 from
+		// the day it shipped. The floor belongs in exactly one place.
 		if err := c.refreshExternal(extID, int(crID.Int64)); err != nil {
+			if errors.Is(err, errExternalThrottled) {
+				httpx.Error(w, http.StatusTooManyRequests,
+					"that tournament was fetched moments ago, try again shortly", nil)
+				return
+			}
 			log.Printf("chessresults: refreshing %d: %v", crID.Int64, err)
 			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read just now", err)
 			return
