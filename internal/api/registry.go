@@ -178,6 +178,10 @@ func Registry() []*Resource {
 				{Name: "session_status", Kind: "text", Enum: sessionStatus},
 			},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
+			// The form collects a start and an end and never worked out the
+			// difference, so every session staff created carried a NULL
+			// length — and a length is what an hour of class costs.
+			AfterWrite: storeSessionHours,
 		},
 		{
 			Name: "enrollments", Table: "student_enrollment", IDCol: "enrollment_id", IDPrefix: "enr",
@@ -208,6 +212,12 @@ func Registry() []*Resource {
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
+			// One credit is one hour: being at a session spends what the
+			// session lasts. Here rather than in the console because the front
+			// desk, the teacher's roster and Class History all write these
+			// rows, and three clients would keep three versions of the rule.
+			AfterWrite:   chargeAttendance,
+			BeforeDelete: refundAttendance,
 		},
 		{
 			Name: "credit-packages", Table: "credit_package", IDCol: "credit_package_id", IDPrefix: "pkg",
