@@ -46,12 +46,13 @@ func ownParentRow(_ *sql.DB, id *auth.Identity, row map[string]any) bool {
 }
 
 var (
-	everyone       = []string{"Teacher", "Parent", "Student"}
-	sessionStatus  = []string{"Scheduled", "Ongoing", "Completed"}
-	enrollStatus   = []string{"Active", "Completed", "Withdrawn"}
-	classTypes     = []string{"Private", "Group", "Master"}
-	payMethods     = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
-	payStatus      = []string{"Paid"}
+	everyone      = []string{"Teacher", "Parent", "Student"}
+	sessionStatus = []string{"Scheduled", "Ongoing", "Completed"}
+	enrollStatus  = []string{"Active", "Completed", "Withdrawn"}
+	classTypes    = []string{"Private", "Group", "Master"}
+	payMethods    = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
+	// Pending and Refunded are not revenue; the console totals only Paid.
+	payStatus      = []string{"Paid", "Pending", "Refunded"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
 	// Public sign-ups arrive Pending; staff entry has always meant Approved.
@@ -69,6 +70,10 @@ func Registry() []*Resource {
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "date_of_birth", Kind: "text"},
 				{Name: "current_level", Kind: "text"},
+				// The school the child attends the rest of the week. The desk
+				// tells two same-named children apart by it, and a pickup has
+				// to fit around its own bell.
+				{Name: "current_school", Kind: "text"},
 				{Name: "fide_rating", Kind: "real"},
 				// The join key to external tournament tables: a FIDE ID names
 				// this child in any arbiter's standings for life, which their
