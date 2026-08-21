@@ -193,6 +193,53 @@ func TestAClassNeedsOnlyAName(t *testing.T) {
 	}
 }
 
+// A package that has been sold cannot be deleted — a payment points at it, and
+// the console reads it to say what that payment bought. Retiring it takes it
+// off the price list and leaves the receipt adding up.
+func TestArchivingAPackageKeepsWhatItSold(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Last Term's Class"})
+	_, pkg, _ := c.do("POST", "/api/v1/credit-packages", map[string]any{
+		"class_id": class["class_id"], "credit_amount": 20, "standard_price": 12000, "validity_days": 90,
+	})
+	_, student, _ := c.do("POST", "/api/v1/students", map[string]any{"name": "Bought One"})
+	_, payment, _ := c.do("POST", "/api/v1/payments", map[string]any{
+		"student_id": student["student_id"], "credit_package_id": pkg["credit_package_id"],
+		"amount": 12000, "final_amount": 12000, "payment_method": "Cash",
+		"status": "Paid", "payment_date": "2026-08-21",
+	})
+
+	// The wall: a sold package cannot be deleted.
+	status, _, _ := c.do("DELETE", "/api/v1/credit-packages/"+pkg["credit_package_id"].(string), nil)
+	if status == 200 {
+		t.Fatalf("a sold package should not be deletable outright")
+	}
+
+	status, archived, _ := c.do("PATCH", "/api/v1/credit-packages/"+pkg["credit_package_id"].(string),
+		map[string]any{"archived_at": "2026-08-21T10:00:00Z"})
+	if status != 200 || archived["archived_at"] == nil {
+		t.Fatalf("archive: %d (%v)", status, archived)
+	}
+
+	// The receipt still adds up: the payment still finds its package, and the
+	// package still says twenty credits.
+	_, got, _ := c.do("GET", "/api/v1/credit-packages/"+pkg["credit_package_id"].(string), nil)
+	if amount, _ := got["credit_amount"].(float64); !near(amount, 20) {
+		t.Fatalf("the package should still say what it sold, got %v", got["credit_amount"])
+	}
+	_, stillThere, _ := c.do("GET", "/api/v1/payments/"+payment["payment_id"].(string), nil)
+	if stillThere["credit_package_id"] != pkg["credit_package_id"] {
+		t.Fatalf("the payment lost its package: %v", stillThere)
+	}
+
+	status, restored, _ := c.do("PATCH", "/api/v1/credit-packages/"+pkg["credit_package_id"].(string),
+		map[string]any{"archived_at": nil})
+	if status != 200 || restored["archived_at"] != nil {
+		t.Fatalf("restore: %d (%v)", status, restored)
+	}
+}
+
 // Archiving retires a class without touching what it leaves behind.
 func TestArchivingAClassKeepsItsHistory(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}

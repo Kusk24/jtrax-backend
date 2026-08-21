@@ -239,6 +239,10 @@ func Registry() []*Resource {
 				{Name: "credit_amount", Kind: "real", Required: true},
 				{Name: "standard_price", Kind: "real", Required: true},
 				{Name: "validity_days", Kind: "int", Required: true},
+				// Set when the academy stops selling this package. Payments
+				// point at it and a receipt has to keep saying what it bought,
+				// so the row stays and only the till forgets. See 0021.
+				{Name: "archived_at", Kind: "text"},
 			},
 			ReadRoles: everyone,
 		},
