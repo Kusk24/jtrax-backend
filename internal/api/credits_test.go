@@ -1,0 +1,193 @@
+// One credit is one hour, and half an hour is half a credit. These tests care
+// mostly about the fractions surviving: a balance that silently rounds 1.5 to
+// 1 or 2 is worse than one that never moved at all.
+package api_test
+
+import (
+	"math"
+	"testing"
+)
+
+// balanceOf sums the ledger for one enrolment, the way every screen does.
+func balanceOf(c *client, enrolmentID string) float64 {
+	_, _, rows := c.do("GET", "/api/v1/credit-transactions", nil)
+	total := 0.0
+	for _, r := range rows {
+		if r["enrollment_id"] == enrolmentID {
+			amount, _ := r["amount"].(float64)
+			total += amount
+		}
+	}
+	return total
+}
+
+func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+// desk sets up a class, a student enrolled in it, and an opening balance.
+func desk(t *testing.T, c *client, start, end string, opening float64) (studentID, sessionID, enrolmentID string) {
+	t.Helper()
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Half Hour Club", "class_type": "Group"})
+	_, session, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": class["class_id"], "session_date": "2026-08-21",
+		"start_time": start, "end_time": end, "session_status": "Ongoing",
+	})
+	_, student, _ := c.do("POST", "/api/v1/students", map[string]any{"name": "Half Hour Child"})
+	_, enrolment, _ := c.do("POST", "/api/v1/enrollments", map[string]any{
+		"student_id": student["student_id"], "class_id": class["class_id"],
+		"enrolled_date": "2026-08-01", "status": "Active",
+	})
+	if opening != 0 {
+		c.do("POST", "/api/v1/credit-transactions", map[string]any{
+			"enrollment_id": enrolment["enrollment_id"], "transaction_type": "purchase",
+			"amount": opening, "transaction_date": "2026-08-01",
+		})
+	}
+	return student["student_id"].(string), session["session_id"].(string), enrolment["enrollment_id"].(string)
+}
+
+func TestHalfHourCostsHalfACredit(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "14:30", 14)
+
+	status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("check in: %d (%v)", status, att)
+	}
+
+	if got := balanceOf(c, enrolmentID); !near(got, 13.5) {
+		t.Fatalf("14 credits minus half an hour should be 13.5, got %v", got)
+	}
+}
+
+func TestNinetyMinutesCostsOneAndAHalf(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "09:00", "10:30", 10)
+
+	c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T02:00:00Z",
+	})
+	if got := balanceOf(c, enrolmentID); !near(got, 8.5) {
+		t.Fatalf("want 8.5, got %v", got)
+	}
+}
+
+// The console's session form never set duration_hours; the length has to come
+// off the clock, or every session staff create is free.
+func TestSessionLengthIsStoredFromTheClock(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Clocked", "class_type": "Group"})
+	_, session, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": class["class_id"], "session_date": "2026-08-21",
+		"start_time": "10:00", "end_time": "11:30", "session_status": "Scheduled",
+	})
+	_, got, _ := c.do("GET", "/api/v1/class-sessions/"+session["session_id"].(string), nil)
+	if hours, _ := got["duration_hours"].(float64); !near(hours, 1.5) {
+		t.Fatalf("duration_hours should be worked out from the times, got %v", got["duration_hours"])
+	}
+}
+
+// Undoing a check-in has to give the hour back, or a mistaken press costs a
+// family real money.
+func TestRemovingAnAttendanceRefundsIt(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "14:30", 14)
+
+	_, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if got := balanceOf(c, enrolmentID); !near(got, 13.5) {
+		t.Fatalf("want 13.5 after check in, got %v", got)
+	}
+
+	status, _, _ := c.do("DELETE", "/api/v1/attendance/"+att["attendance_id"].(string), nil)
+	if status != 200 {
+		t.Fatalf("delete: %d", status)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 14) {
+		t.Fatalf("the hour should have come back, got %v", got)
+	}
+}
+
+// Moving a child to a longer class must change what the afternoon cost, not
+// charge them for both.
+func TestMovingToAnotherSessionRecharges(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, shortSession, enrolmentID := desk(t, c, "14:00", "14:30", 14)
+
+	_, longClass, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Long", "class_type": "Group"})
+	_, longSession, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": longClass["class_id"], "session_date": "2026-08-21",
+		"start_time": "15:00", "end_time": "17:00", "session_status": "Ongoing",
+	})
+
+	_, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": shortSession, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	c.do("PATCH", "/api/v1/attendance/"+att["attendance_id"].(string), map[string]any{
+		"session_id": longSession["session_id"],
+	})
+
+	// 14 − 2, not 14 − 0.5 − 2.
+	if got := balanceOf(c, enrolmentID); !near(got, 12) {
+		t.Fatalf("want 12 after moving to the two-hour class, got %v", got)
+	}
+}
+
+// A child at the desk has to be recordable even with nothing left to spend.
+func TestAnEmptyBalanceGoesNegativeRatherThanRefusing(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
+
+	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("a student with no credits must still be recordable, got %d", status)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, -1) {
+		t.Fatalf("want -1, got %v", got)
+	}
+}
+
+// A student with no enrolment has nowhere to charge. The visit is still a fact.
+func TestAttendanceWithoutAnEnrolmentIsStillRecorded(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Drop In", "class_type": "Group"})
+	_, session, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": class["class_id"], "session_date": "2026-08-21",
+		"start_time": "14:00", "end_time": "15:00", "session_status": "Ongoing",
+	})
+	_, student, _ := c.do("POST", "/api/v1/students", map[string]any{"name": "Walk In"})
+
+	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": student["student_id"], "session_id": session["session_id"],
+		"check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("want 201, got %d", status)
+	}
+}
+
+// A timetable with no readable length is incomplete, not free — and must not
+// hand out credits by charging a negative number of hours.
+func TestSessionEndingBeforeItStartsChargesNothing(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "15:00", "14:00", 5)
+
+	c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if got := balanceOf(c, enrolmentID); !near(got, 5) {
+		t.Fatalf("balance should be untouched, got %v", got)
+	}
+}

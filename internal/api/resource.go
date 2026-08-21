@@ -63,6 +63,32 @@ type Resource struct {
 	// after the write, so an update that changes one field is still checked
 	// against the whole record.
 	Check func(row map[string]any) error
+	// AfterWrite is a consequence of the row elsewhere in the database:
+	// attendance spending the credits its session costs, a session working out
+	// its own length. It runs after the INSERT or UPDATE and **inside the same
+	// transaction**, so a row and what it costs cannot land separately.
+	//
+	// It is given the row's id and must derive everything else from what is
+	// now stored, which makes it the same function for a create and an update
+	// — write it to be re-runnable rather than incremental.
+	AfterWrite func(tx *sql.Tx, rowID string) error
+	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
+	BeforeDelete func(tx *sql.Tx, rowID string) error
+}
+
+// inTx runs a write and its consequence as one unit. Resources with no hook
+// keep the plain single-statement path — a transaction per row would be a cost
+// paid by every resource for the sake of two.
+func inTx(d *sql.DB, write func(tx *sql.Tx) error) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	if err := write(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func isStaff(role string) bool { return role == "Admin" || role == "Receptionist" }
@@ -297,7 +323,18 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 			marks = append(marks, "?")
 			args = append(args, v)
 		}
-		_, err := d.Exec("INSERT INTO "+rs.Table+" ("+strings.Join(names, ", ")+") VALUES ("+strings.Join(marks, ", ")+")", args...)
+		insert := "INSERT INTO " + rs.Table + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(marks, ", ") + ")"
+		var err error
+		if rs.AfterWrite == nil {
+			_, err = d.Exec(insert, args...)
+		} else {
+			err = inTx(d, func(tx *sql.Tx) error {
+				if _, e := tx.Exec(insert, args...); e != nil {
+					return e
+				}
+				return rs.AfterWrite(tx, rowID)
+			})
+		}
 		if err != nil {
 			httpx.Error(w, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
 			return
@@ -364,7 +401,21 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			args = append(args, v)
 		}
 		args = append(args, r.PathValue("id"))
-		if _, err := d.Exec("UPDATE "+rs.Table+" SET "+strings.Join(sets, ", ")+" WHERE "+rs.IDCol+" = ?", args...); err != nil {
+		query := "UPDATE " + rs.Table + " SET " + strings.Join(sets, ", ") + " WHERE " + rs.IDCol + " = ?"
+		if rs.AfterWrite == nil {
+			_, err = d.Exec(query, args...)
+		} else {
+			/* Re-run rather than adjust: moving a student to a longer class has
+			   to change what the afternoon cost, and the hook works that out
+			   from the row as it now stands. */
+			err = inTx(d, func(tx *sql.Tx) error {
+				if _, e := tx.Exec(query, args...); e != nil {
+					return e
+				}
+				return rs.AfterWrite(tx, r.PathValue("id"))
+			})
+		}
+		if err != nil {
 			httpx.Error(w, http.StatusBadRequest, "could not update record", err)
 			return
 		}
@@ -388,12 +439,35 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		res, err := d.Exec("DELETE FROM "+rs.Table+" WHERE "+rs.IDCol+" = ?", r.PathValue("id"))
+		del := "DELETE FROM " + rs.Table + " WHERE " + rs.IDCol + " = ?"
+		var affected int64
+		var err error
+		if rs.BeforeDelete == nil {
+			var res sql.Result
+			if res, err = d.Exec(del, r.PathValue("id")); err == nil {
+				affected, _ = res.RowsAffected()
+			}
+		} else {
+			/* What the row cost has to go with the row, and in the same breath:
+			   credits refunded but the attendance still standing would be worse
+			   than either alone. */
+			err = inTx(d, func(tx *sql.Tx) error {
+				if e := rs.BeforeDelete(tx, r.PathValue("id")); e != nil {
+					return e
+				}
+				res, e := tx.Exec(del, r.PathValue("id"))
+				if e != nil {
+					return e
+				}
+				affected, _ = res.RowsAffected()
+				return nil
+			})
+		}
 		if err != nil {
 			httpx.Error(w, http.StatusConflict, "cannot delete: record is referenced by other data", err)
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if affected == 0 {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)
 			return
 		}
