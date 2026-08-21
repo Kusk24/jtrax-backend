@@ -114,17 +114,23 @@ func TestRemovingAnAttendanceRefundsIt(t *testing.T) {
 	}
 }
 
-// Moving a child to a longer class must change what the afternoon cost, not
-// charge them for both.
+// Moving a child between two classes they are enrolled in must change what the
+// afternoon cost, not charge them for both.
 func TestMovingToAnotherSessionRecharges(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
 	studentID, shortSession, enrolmentID := desk(t, c, "14:00", "14:30", 14)
 
-	_, longClass, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Long", "class_type": "Group"})
+	_, longClass, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Long"})
 	_, longSession, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
 		"class_id": longClass["class_id"], "session_date": "2026-08-21",
 		"start_time": "15:00", "end_time": "17:00", "session_status": "Ongoing",
+	})
+	// Enrolled in this one too — the desk only offers a child their own
+	// classes, so a move between them is a move between enrolments.
+	_, longEnrolment, _ := c.do("POST", "/api/v1/enrollments", map[string]any{
+		"student_id": studentID, "class_id": longClass["class_id"],
+		"enrolled_date": "2026-08-01", "status": "Active",
 	})
 
 	_, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
@@ -134,9 +140,91 @@ func TestMovingToAnotherSessionRecharges(t *testing.T) {
 		"session_id": longSession["session_id"],
 	})
 
-	// 14 − 2, not 14 − 0.5 − 2.
-	if got := balanceOf(c, enrolmentID); !near(got, 12) {
-		t.Fatalf("want 12 after moving to the two-hour class, got %v", got)
+	// The half hour came back off the first enrolment...
+	if got := balanceOf(c, enrolmentID); !near(got, 14) {
+		t.Fatalf("the short class should have been refunded, got %v", got)
+	}
+	// ...and the two hours went on the class they actually attended.
+	if got := balanceOf(c, longEnrolment["enrollment_id"].(string)); !near(got, -2) {
+		t.Fatalf("want -2 on the two-hour class, got %v", got)
+	}
+}
+
+// A child may only be checked in to a class they are enrolled in — the desk
+// offers nothing else. Class History can still put someone into a session
+// after the fact to correct a record, and that visit is recorded; there is no
+// enrolment for it to charge, and taking the hour off a different class they
+// did attend would be worse than taking it off nothing.
+func TestAttendanceInAClassTheyAreNotEnrolledInChargesNothing(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, _, enrolmentID := desk(t, c, "14:00", "14:30", 14)
+
+	_, other, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Someone Else's Class"})
+	_, otherSession, _ := c.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": other["class_id"], "session_date": "2026-08-21",
+		"start_time": "15:00", "end_time": "16:00", "session_status": "Ongoing",
+	})
+
+	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": otherSession["session_id"],
+		"check_in_time": "2026-08-21T08:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("the visit is still a fact: want 201, got %d", status)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 14) {
+		t.Fatalf("their own class must not pay for it, got %v", got)
+	}
+}
+
+// A class is written down with a name and nothing else; class_type is filled in
+// rather than demanded.
+func TestAClassNeedsOnlyAName(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+
+	status, created, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Saturday Beginners"})
+	if status != 201 {
+		t.Fatalf("want 201, got %d (%v)", status, created)
+	}
+	if created["class_type"] != "Group" {
+		t.Fatalf("class_type should default rather than be demanded, got %v", created["class_type"])
+	}
+}
+
+// Archiving retires a class without touching what it leaves behind.
+func TestArchivingAClassKeepsItsHistory(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 10)
+	c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+
+	_, session, _ := c.do("GET", "/api/v1/class-sessions/"+sessionID, nil)
+	classID := session["class_id"].(string)
+
+	status, archived, _ := c.do("PATCH", "/api/v1/classes/"+classID,
+		map[string]any{"archived_at": "2026-08-21T10:00:00Z"})
+	if status != 200 || archived["archived_at"] == nil {
+		t.Fatalf("archive: %d (%v)", status, archived)
+	}
+
+	// The row is still there to be joined to, so the name survives on
+	// everything that referenced it.
+	_, got, _ := c.do("GET", "/api/v1/classes/"+classID, nil)
+	if got["name"] != "Half Hour Club" {
+		t.Fatalf("the class should still name itself, got %v", got)
+	}
+	if bal := balanceOf(c, enrolmentID); !near(bal, 9) {
+		t.Fatalf("the hour attended should still be spent, got %v", bal)
+	}
+
+	// And it comes back, which a delete never would.
+	status, restored, _ := c.do("PATCH", "/api/v1/classes/"+classID, map[string]any{"archived_at": nil})
+	if status != 200 || restored["archived_at"] != nil {
+		t.Fatalf("restore: %d (%v)", status, restored)
 	}
 }
 

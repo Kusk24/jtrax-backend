@@ -22,6 +22,15 @@ type Col struct {
 	Kind     string // text | int | real | bool
 	Enum     []string
 	Required bool
+	// Default is written on create when the caller omits the column. It is for
+	// a column the database insists on but the office should not have to
+	// answer: class_type describes a class rather than identifies it, and a
+	// class needs only a name to be written down.
+	//
+	// Not the same as Required. Required means "you must say"; Default means
+	// "if you don't, this is what it is". A column with both would be a
+	// contradiction, and the registry has none.
+	Default any
 }
 
 // Derived is a read-only column pulled from another table by a scalar
@@ -286,6 +295,16 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 		}
 		rowID, _ := row[rs.IDCol].(string)
 		delete(row, rs.IDCol)
+		/* Before validation, so a defaulted column is checked like any other —
+		   a bad Default should fail here rather than at the database. */
+		for _, c := range rs.Cols {
+			if c.Default == nil {
+				continue
+			}
+			if v, present := row[c.Name]; !present || v == nil || v == "" {
+				row[c.Name] = c.Default
+			}
+		}
 		if err := rs.validate(row, true); err != nil {
 			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 			return
