@@ -90,13 +90,12 @@ func enrolmentForCharge(tx *sql.Tx, studentID, sessionID string) string {
 	if err == nil {
 		return enrolment
 	}
-	// Enrolled in the academy but not in this class — a child sitting in on
-	// another group. The hour is still theirs to pay for.
-	tx.QueryRow(`
-		SELECT enrollment_id FROM student_enrollment WHERE student_id = ?
-		ORDER BY CASE status WHEN 'Active' THEN 0 ELSE 1 END LIMIT 1`,
-		studentID).Scan(&enrolment)
-	return enrolment
+	// No enrolment in this class. The desk will not offer a class a child is
+	// not enrolled in, so this is a correction made elsewhere — Class History
+	// putting someone into a session after the fact. The visit is recorded;
+	// there is no enrolment whose balance it could come off, and guessing at
+	// another one would take credits from a class they did attend.
+	return ""
 }
 
 // chargeAttendance writes what this attendance costs, replacing whatever it

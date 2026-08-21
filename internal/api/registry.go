@@ -161,10 +161,23 @@ func Registry() []*Resource {
 		{
 			Name: "classes", Table: "class", IDCol: "class_id", IDPrefix: "cls",
 			Cols: []Col{
+				// Only the name is asked for. The rest describe a class rather
+				// than identify it, and the office should not have to answer
+				// three questions to write down that it teaches Beginners.
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "description", Kind: "text"},
-				{Name: "class_type", Kind: "text", Enum: classTypes, Required: true},
+				// NOT NULL in the database, so a name-only class needs
+				// something here; Group is what the console has always sent
+				// when nobody chose.
+				{Name: "class_type", Kind: "text", Enum: classTypes, Default: "Group"},
+				// Set when the academy stops running this class. The row stays
+				// so last term's attendance and receipts still name it; every
+				// picker leaves it out. See 0020.
+				{Name: "archived_at", Kind: "text"},
 			},
+			// Archived classes are served like any other: the console needs
+			// them to put a name on an old enrolment, and hides them from the
+			// places where one is chosen.
 			ReadRoles: everyone,
 		},
 		{
