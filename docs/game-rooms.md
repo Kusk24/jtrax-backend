@@ -52,7 +52,8 @@ All are under `/api/v1/game-rooms` and require a session.
 | `POST` | `/game-rooms` | staff | Mints a room and its code. Optional `label`. |
 | `GET` | `/game-rooms` | any | Staff see every room (`?status=` filters); a player sees only rooms they are seated in. |
 | `GET` | `/game-rooms/{id}` | staff, seated players | Room, move list, the caller's seat, and every legal move. |
-| `DELETE` | `/game-rooms/{id}` | staff | Marks the room `Cancelled`. Never deletes — a played game is a record. |
+| `DELETE` | `/game-rooms/{id}` | staff | Marks the room `Cancelled`. Ends the game; keeps the record. |
+| `DELETE` | `/game-rooms/{id}/record` | staff | Removes the room and its moves for good. `409` while the game is `Active`. |
 | `POST` | `/game-rooms/join` | Student, Teacher | Body `{"code":"ABC123"}`. Rate-limited to 20/min per IP. |
 | `POST` | `/game-rooms/{id}/moves` | seated players | Body `{"move":"e2e4"}` in UCI. |
 | `POST` | `/game-rooms/{id}/resign` | seated players | Colour comes from the caller's seat. |

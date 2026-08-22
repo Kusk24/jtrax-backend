@@ -587,6 +587,86 @@ func handleCancelRoom(d *sql.DB, h *hub, relay *lichessRelay) http.HandlerFunc {
 	}
 }
 
+// handleDeleteRoom removes a room and its moves for good.
+//
+// Cancelling and deleting are different acts and both are wanted. Cancelling
+// ends a game that is happening; the row stays, because a game that was played
+// is a record. Deleting throws the record away, which is what the office needs
+// for the rooms that are not records at all — a code minted for a lesson that
+// did not happen, a board opened twice by mistake, the three test rooms from
+// the afternoon somebody was learning the screen. Those accumulate at the top
+// of the list forever and there was no way to be rid of one.
+//
+// So they are separate endpoints rather than one DELETE that changed meaning.
+// An older console still sends DELETE for "Stop this game", and having that
+// destroy a game mid-deploy is exactly the accident worth designing out.
+//
+// A game being played is refused. The two players are mid-move, and the fix
+// for a game that should not be running is to stop it — which is the other
+// endpoint, and reversible in a way this is not.
+func handleDeleteRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		if !isStaff(id.Role) {
+			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			return
+		}
+		roomID := r.PathValue("id")
+
+		var status string
+		switch err := d.QueryRow(`SELECT status FROM game_room WHERE game_room_id = ?`,
+			roomID).Scan(&status); {
+		case errors.Is(err, sql.ErrNoRows):
+			httpx.Error(w, http.StatusNotFound, "no such room", nil)
+			return
+		case err != nil:
+			httpx.Error(w, http.StatusInternalServerError, "could not read room", err)
+			return
+		}
+		if status == "Active" {
+			httpx.Error(w, http.StatusConflict, "stop the game before deleting it", nil)
+			return
+		}
+
+		tx, err := d.Begin()
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not delete room", err)
+			return
+		}
+		defer tx.Rollback()
+
+		// game_move.game_room_id is NOT NULL, so the moves go with the room
+		// rather than being orphaned. A challenge's link is nullable and the
+		// challenge itself is a separate record of who asked whom — that one is
+		// unhooked, not destroyed.
+		for _, step := range []struct {
+			q    string
+			args []any
+		}{
+			{`DELETE FROM game_move WHERE game_room_id = ?`, []any{roomID}},
+			{`UPDATE game_challenge SET game_room_id = NULL WHERE game_room_id = ?`, []any{roomID}},
+			{`DELETE FROM game_room WHERE game_room_id = ?`, []any{roomID}},
+		} {
+			if _, err := tx.Exec(step.q, step.args...); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not delete room", err)
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not delete room", err)
+			return
+		}
+
+		// An Open room can still hold a relay slot if it was minted rated, and
+		// the watcher would outlive the row it is watching.
+		relay.abandon(roomID)
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	}
+}
+
 // mountGameRooms returns the relay it built, so an accepted challenge can start
 // a rated game through the same one. Two relays would mean two watchers on the
 // same board and two sets of moves forwarded to Lichess.
@@ -603,7 +683,11 @@ func mountGameRooms(mux *http.ServeMux, d *sql.DB) *lichessRelay {
 	// be guessing, so it carries a tighter budget than the rest.
 	mux.HandleFunc("POST "+base+"/join", httpx.RateLimit(20, handleJoinRoom(d, h, relay)))
 	mux.HandleFunc("GET "+base+"/{id}", handleGetRoom(d))
+	// Cancel keeps DELETE /{id} — an older console sends it for "Stop this
+	// game", and a deploy window where that destroys a board is not a thing to
+	// invite. Throwing the record away is its own path.
 	mux.HandleFunc("DELETE "+base+"/{id}", handleCancelRoom(d, h, relay))
+	mux.HandleFunc("DELETE "+base+"/{id}/record", handleDeleteRoom(d, relay))
 	mux.HandleFunc("POST "+base+"/{id}/moves", handleMove(d, h, relay))
 	mux.HandleFunc("POST "+base+"/{id}/resign", handleResign(d, h, relay))
 	mux.HandleFunc("GET "+base+"/{id}/events", handleRoomEvents(d, h))
