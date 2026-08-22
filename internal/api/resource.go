@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -83,6 +84,25 @@ type Resource struct {
 	AfterWrite func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
+}
+
+// RuleError is a refusal the caller should be told about in words: a rule of
+// the academy's, not a database constraint. The generic handlers report it
+// verbatim instead of burying it under "could not create record", because
+// "not enough credits" is something the desk can act on and "check references
+// and uniqueness" is not.
+type RuleError struct{ Message string }
+
+func (e RuleError) Error() string { return e.Message }
+
+// ruleMessage returns the sentence to show the caller, and whether the error
+// was a rule at all.
+func ruleMessage(err error) (string, bool) {
+	var rule RuleError
+	if errors.As(err, &rule) {
+		return rule.Message, true
+	}
+	return "", false
 }
 
 // inTx runs a write and its consequence as one unit. Resources with no hook
@@ -355,6 +375,10 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 			})
 		}
 		if err != nil {
+			if msg, ok := ruleMessage(err); ok {
+				httpx.Error(w, http.StatusBadRequest, msg, err)
+				return
+			}
 			httpx.Error(w, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
 			return
 		}
@@ -435,6 +459,10 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			})
 		}
 		if err != nil {
+			if msg, ok := ruleMessage(err); ok {
+				httpx.Error(w, http.StatusBadRequest, msg, err)
+				return
+			}
 			httpx.Error(w, http.StatusBadRequest, "could not update record", err)
 			return
 		}

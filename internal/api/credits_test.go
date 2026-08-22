@@ -5,6 +5,7 @@ package api_test
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,12 @@ func TestMovingToAnotherSessionRecharges(t *testing.T) {
 		"student_id": studentID, "class_id": longClass["class_id"],
 		"enrolled_date": "2026-08-01", "status": "Active",
 	})
+	// Credits on this one too: an hour cannot be taken from a balance that
+	// does not have it, so a move has to be affordable in the class moved to.
+	c.do("POST", "/api/v1/credit-transactions", map[string]any{
+		"enrollment_id": longEnrolment["enrollment_id"], "transaction_type": "purchase",
+		"amount": 6, "transaction_date": "2026-08-01",
+	})
 
 	_, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
 		"student_id": studentID, "session_id": shortSession, "check_in_time": "2026-08-21T07:00:00Z",
@@ -145,8 +152,8 @@ func TestMovingToAnotherSessionRecharges(t *testing.T) {
 		t.Fatalf("the short class should have been refunded, got %v", got)
 	}
 	// ...and the two hours went on the class they actually attended.
-	if got := balanceOf(c, longEnrolment["enrollment_id"].(string)); !near(got, -2) {
-		t.Fatalf("want -2 on the two-hour class, got %v", got)
+	if got := balanceOf(c, longEnrolment["enrollment_id"].(string)); !near(got, 4) {
+		t.Fatalf("want 4 on the two-hour class, got %v", got)
 	}
 }
 
@@ -275,20 +282,51 @@ func TestArchivingAClassKeepsItsHistory(t *testing.T) {
 	}
 }
 
-// A child at the desk has to be recordable even with nothing left to spend.
-func TestAnEmptyBalanceGoesNegativeRatherThanRefusing(t *testing.T) {
+// Credits cannot go below zero. A debt nobody agreed to is not a record of
+// anything, and nothing in the console ever collects it — the office tops the
+// child up and adds them again.
+func TestAnEmptyBalanceRefusesRatherThanGoingNegative(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
 	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
 
-	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+	status, body, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 400 {
+		t.Fatalf("want 400, got %d (%v)", status, body)
+	}
+	// Said in words the desk can act on, not "check references and uniqueness".
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "credits left") {
+		t.Fatalf("the refusal should say why: %q", msg)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 0) {
+		t.Fatalf("balance should be untouched, got %v", got)
+	}
+
+	// And no attendance was left behind: the charge and the row roll back together.
+	_, _, rows := c.do("GET", "/api/v1/attendance", nil)
+	for _, r := range rows {
+		if r["student_id"] == studentID {
+			t.Fatalf("a refused check-in must not leave an attendance row: %v", r)
+		}
+	}
+}
+
+// Exactly enough is enough — the floor is zero, not "some to spare".
+func TestExactlyEnoughCreditsIsAllowed(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "14:30", 0.5)
+
+	status, body, _ := c.do("POST", "/api/v1/attendance", map[string]any{
 		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
 	})
 	if status != 201 {
-		t.Fatalf("a student with no credits must still be recordable, got %d", status)
+		t.Fatalf("want 201, got %d (%v)", status, body)
 	}
-	if got := balanceOf(c, enrolmentID); !near(got, -1) {
-		t.Fatalf("want -1, got %v", got)
+	if got := balanceOf(c, enrolmentID); !near(got, 0) {
+		t.Fatalf("want 0, got %v", got)
 	}
 }
 

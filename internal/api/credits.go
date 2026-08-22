@@ -33,6 +33,14 @@ func hoursBetween(start, end string) float64 {
 	return float64(e-s) / 60
 }
 
+// trimFloat writes a credit figure the way a person would: "1.5", "0.5", "14"
+// — never "14.000000" and never "1.1666666666666667".
+func trimFloat(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
+
 func minutesOfDay(clock string) (int, bool) {
 	parts := strings.Split(strings.TrimSpace(clock), ":")
 	if len(parts) < 2 {
@@ -131,6 +139,28 @@ func chargeAttendance(tx *sql.Tx, attendanceID string) error {
 	enrolment := enrolmentForCharge(tx, studentID, sessionID)
 	if enrolment == "" {
 		return nil
+	}
+
+	/* An hour cannot be taken from a balance that does not have it. The office
+	   tops the child up — at the desk, or by recording the payment — and adds
+	   them again; a balance that has gone below zero is a debt nobody agreed
+	   to and nothing in the console ever collects.
+
+	   Read after the delete above, so re-running this for a session whose times
+	   changed measures the balance without its own old charge rather than
+	   refusing to move an attendance that is already paid for. */
+	var balance float64
+	if err := tx.QueryRow(
+		`SELECT COALESCE(SUM(amount), 0) FROM credit_transaction WHERE enrollment_id = ?`,
+		enrolment).Scan(&balance); err != nil {
+		return err
+	}
+	if balance < hours {
+		var name string
+		tx.QueryRow(`SELECT name FROM student WHERE student_id = ?`, studentID).Scan(&name)
+		return RuleError{Message: fmt.Sprintf(
+			"%s has %s credits left and this session costs %s",
+			name, trimFloat(balance), trimFloat(hours))}
 	}
 
 	// Dated to the day the class ran, not to now: attendance is corrected
