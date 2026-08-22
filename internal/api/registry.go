@@ -170,6 +170,14 @@ func Registry() []*Resource {
 				// something here; Group is what the console has always sent
 				// when nobody chose.
 				{Name: "class_type", Kind: "text", Enum: classTypes, Default: "Group"},
+				// How the class is drawn and labelled. Both were offered by the
+				// Academy screen for as long as it has existed and neither was
+				// ever stored — the console re-derived them from class_type on
+				// every render, so picking an icon changed nothing. No enum on
+				// the icon: the names belong to the console's icon set, which
+				// moves with the design. See 0022.
+				{Name: "icon", Kind: "text"},
+				{Name: "badge", Kind: "text"},
 				// Set when the academy stops running this class. The row stays
 				// so last term's attendance and receipts still name it; every
 				// picker leaves it out. See 0020.
