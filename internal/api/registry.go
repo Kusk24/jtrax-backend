@@ -109,7 +109,11 @@ func Registry() []*Resource {
 		{
 			Name: "teachers", Table: "teacher", IDCol: "teacher_id", IDPrefix: "tch",
 			Cols: []Col{
-				{Name: "user_account_id", Kind: "text", Required: true},
+				// Optional since 0023. The academy has no teacher workflow and
+				// issues no teacher logins, so a teacher is a record of who
+				// teaches — the Academy list, and the name on a parent's class
+				// card. Rows written before that still carry their account.
+				{Name: "user_account_id", Kind: "text"},
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "phone", Kind: "text"},
 				{Name: "email", Kind: "text"},
