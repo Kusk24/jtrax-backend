@@ -437,6 +437,12 @@ func Registry() []*Resource {
 			Cols: []Col{
 				{Name: "config_value", Kind: "text", Required: true},
 			},
+			// Readable by every signed-in role: the parent portal shows the
+			// certificate milestone (certificate_sessions), and the rest is
+			// display configuration of the same kind. That is a rule about
+			// this table — secrets live in the environment, never here, or
+			// this line has to change. Writes stay staff-only.
+			ReadRoles: everyone,
 		},
 	}
 }
