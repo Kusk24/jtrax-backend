@@ -170,6 +170,10 @@ func Seed(d *sql.DB, password string) error {
 
 		{`INSERT INTO system_configuration (config_key, config_value) VALUES (?,?)`,
 			[]any{"academy_name", "JCA Chess Academy"}},
+		// The classes-attended milestone the parent portal counts toward; the
+		// console edits it under Settings.
+		{`INSERT INTO system_configuration (config_key, config_value) VALUES (?,?)`,
+			[]any{"certificate_sessions", "50"}},
 	}
 	for _, s := range steps {
 		if err := exec(s.q, s.args...); err != nil {
