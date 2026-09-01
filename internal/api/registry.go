@@ -297,7 +297,15 @@ func Registry() []*Resource {
 		{
 			Name: "credit-transactions", Table: "credit_transaction", IDCol: "credit_transaction_id", IDPrefix: "ctx",
 			Cols: []Col{
-				{Name: "enrollment_id", Kind: "text", Required: true},
+				// Not required since 0026: a credit with no enrolment is one
+				// the child holds and has not spent anywhere yet, which is
+				// what is left when their last enrolment is deleted.
+				{Name: "enrollment_id", Kind: "text"},
+				// Who the hours belong to, and what they were bought for. The
+				// enrolment used to answer both by proxy, which worked only
+				// while there was one.
+				{Name: "student_id", Kind: "text"},
+				{Name: "class_id", Kind: "text"},
 				{Name: "transaction_type", Kind: "text", Enum: creditTxTypes, Required: true},
 				{Name: "amount", Kind: "real", Required: true},
 				{Name: "expiry_date", Kind: "text"},
@@ -307,13 +315,23 @@ func Registry() []*Resource {
 				{Name: "notes", Kind: "text"},
 			},
 			ReadRoles: []string{"Parent", "Student"},
+			// Reached by the enrolment *or* by the student on the row. Since
+			// 0026 a credit can outlive its enrolment, and matching only
+			// through `student_enrollment` would have made a family's
+			// remaining balance disappear from their own portal the moment the
+			// office tidied away the course it was bought for. `student_id` is
+			// null on nothing the backfill could resolve, so the first arm
+			// still carries the rows written before that migration.
 			Scope: map[string]ScopeFn{
 				"Parent": func(id *auth.Identity) (string, []any) {
-					return `enrollment_id IN (SELECT enrollment_id FROM student_enrollment
-						WHERE student_id IN (SELECT student_id FROM student_parent WHERE parent_id = ?))`, []any{id.ParentID}
+					return `(enrollment_id IN (SELECT enrollment_id FROM student_enrollment
+						WHERE student_id IN (SELECT student_id FROM student_parent WHERE parent_id = ?))
+						OR student_id IN (SELECT student_id FROM student_parent WHERE parent_id = ?))`,
+						[]any{id.ParentID, id.ParentID}
 				},
 				"Student": func(id *auth.Identity) (string, []any) {
-					return `enrollment_id IN (SELECT enrollment_id FROM student_enrollment WHERE student_id = ?)`, []any{id.StudentID}
+					return `(enrollment_id IN (SELECT enrollment_id FROM student_enrollment WHERE student_id = ?)
+						OR student_id = ?)`, []any{id.StudentID, id.StudentID}
 				},
 			},
 		},
