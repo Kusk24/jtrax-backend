@@ -74,6 +74,10 @@ func Registry() []*Resource {
 				// tells two same-named children apart by it, and a pickup has
 				// to fit around its own bell.
 				{Name: "current_school", Kind: "text"},
+				// Which site the child is enrolled at. One today; the console
+				// has always displayed it and never stored it, so every row
+				// said "Bangkok" whether or not anyone had chosen it.
+				{Name: "branch", Kind: "text"},
 				{Name: "fide_rating", Kind: "real"},
 				// The join key to external tournament tables: a FIDE ID names
 				// this child in any arbiter's standings for life, which their
