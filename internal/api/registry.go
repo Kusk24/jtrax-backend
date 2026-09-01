@@ -219,6 +219,11 @@ func Registry() []*Resource {
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "enrolled_date", Kind: "text", Required: true},
 				{Name: "status", Kind: "text", Enum: enrollStatus},
+				// The course this child moved out of to be here. Null on an
+				// enrolment made directly, which is most of them. It answers
+				// the question a Withdrawn row cannot: whether they left the
+				// academy or moved up.
+				{Name: "moved_from_class_id", Kind: "text"},
 			},
 			ReadRoles: everyone,
 			Scope: map[string]ScopeFn{
