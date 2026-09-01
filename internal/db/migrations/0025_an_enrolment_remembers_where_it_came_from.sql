@@ -1,0 +1,26 @@
+-- 0025_an_enrolment_remembers_where_it_came_from.sql — moving a child between
+-- courses, without losing which course they were in.
+--
+-- The console could enrol a child and withdraw them, and nothing else. A move
+-- was those two acts done by hand, one after the other, and the result was two
+-- unrelated rows: a Withdrawn enrolment in the old course and an Active one in
+-- the new, with nothing saying the second happened because of the first.
+--
+-- That answer matters months later. "Why did this child stop attending
+-- Beginner?" has two very different answers — they left the academy, or they
+-- moved up to Intermediate — and the roster could not tell them apart. It is
+-- also what the credits followed: a transfer writes a matching pair of ledger
+-- entries ([[credits-follow-the-child]]), and those notes were the only trace,
+-- which meant a move with a zero balance left none at all.
+--
+-- The class, not the enrolment. An enrolment nothing has been spent against is
+-- deleted rather than withdrawn — a mistake being undone — so a reference to
+-- one can vanish. A class row never does: retiring it keeps it
+-- ([[0007-retire-a-row-instead-of-deleting-it]]), which is exactly the
+-- guarantee a historical pointer needs.
+--
+-- Nullable, and null on every existing row: enrolments written before this
+-- migration were made directly, and guessing a predecessor for them would be
+-- inventing history rather than recording it.
+
+ALTER TABLE student_enrollment ADD COLUMN moved_from_class_id TEXT REFERENCES class(class_id);
