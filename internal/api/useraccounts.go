@@ -155,7 +155,8 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 	})
 
 	mux.HandleFunc("PATCH "+base+"/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if requireStaff(d, w, r) == nil {
+		caller := requireStaff(d, w, r)
+		if caller == nil {
 			return
 		}
 		var in struct {
@@ -168,6 +169,25 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 			return
 		}
 		id := r.PathValue("id")
+		/* Setting somebody else's password is an admin's job, not the front
+		   desk's.
+
+		   It is the one write here that hands over an account rather than
+		   editing a record: whoever types the new password can sign in as that
+		   person, read every family's details, and act as them. That is a
+		   different kind of authority from booking a class, and the academy
+		   wants it held by the people who already have the rest of it.
+
+		   Creating an account still is not restricted, because registration is
+		   the front desk's actual job — the difference is that a new account
+		   belongs to nobody yet, so there is nothing to take over.
+
+		   Changing your *own* is always allowed, so this cannot lock a
+		   receptionist out of the one account they are entitled to. */
+		if in.Password != nil && caller.Role != "Admin" && caller.UserAccountID != id {
+			httpx.Error(w, http.StatusForbidden, "only an admin can reset another account's password", nil)
+			return
+		}
 		if in.Email != nil {
 			/* Which rule applies is a fact about the account, and a PATCH body
 			   does not carry the role — so it is read, not taken on trust. A

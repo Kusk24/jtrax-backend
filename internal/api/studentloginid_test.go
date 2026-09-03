@@ -163,3 +163,94 @@ func TestAskingToResetAnIDIsAcceptedAndSendsNothing(t *testing.T) {
 		t.Errorf("forgot-password for an ID: status %d, want 202", status)
 	}
 }
+
+/* ---- who may hand over an account ---- */
+
+// loginAs signs in with a password other than the seeded development one, which
+// is what any account created inside a test has.
+func loginAs(t *testing.T, c *client, email, password string) *client {
+	t.Helper()
+	out := &client{t: t, srv: c.srv}
+	status, obj, _ := out.do("POST", "/api/v1/auth/login", map[string]string{
+		"email": email, "password": password,
+	})
+	if status != 200 {
+		t.Fatalf("login %s: %d (%v)", email, status, obj)
+	}
+	out.token = obj["token"].(string)
+	return out
+}
+
+// Setting somebody else's password is the one write here that hands over an
+// account rather than editing a record: whoever types it can sign in as that
+// person. The academy wants that held by an admin, not the front desk.
+func TestOnlyAnAdminResetsSomebodyElsesPassword(t *testing.T) {
+	admin := &client{t: t, srv: newServer(t)}
+	admin.login("admin@jca.ac.th")
+
+	_, desk, _ := admin.do("POST", "/api/v1/user-accounts", map[string]string{
+		"email": "desk@jca.ac.th", "password": "chess1234",
+		"role": "Receptionist", "display_name": "Front Desk",
+	})
+	_, child, _ := admin.do("POST", "/api/v1/user-accounts", map[string]string{
+		"email": "stu_penny_ward", "password": "chess1234",
+		"role": "Student", "display_name": "Penny Ward",
+	})
+	childPath := "/api/v1/user-accounts/" + child["user_account_id"].(string)
+
+	receptionist := loginAs(t, admin, "desk@jca.ac.th", "chess1234")
+	status, obj, _ := receptionist.do("PATCH", childPath, map[string]string{"password": "newpass123"})
+	if status != 403 {
+		t.Fatalf("a receptionist reset a child's password: %d (%v)", status, obj)
+	}
+	// And it really did not take, rather than being refused after the write.
+	if s, _, _ := (&client{t: t, srv: admin.srv}).do("POST", "/api/v1/auth/login", map[string]string{
+		"email": "stu_penny_ward", "password": "newpass123",
+	}); s == 200 {
+		t.Error("the password changed anyway — the refusal came after the write")
+	}
+
+	// The admin can, and the child can then sign in with what was set.
+	if status, obj, _ := admin.do("PATCH", childPath, map[string]string{"password": "newpass123"}); status != 200 {
+		t.Fatalf("an admin resetting a child's password: %d (%v)", status, obj)
+	}
+	if s, _, _ := (&client{t: t, srv: admin.srv}).do("POST", "/api/v1/auth/login", map[string]string{
+		"email": "stu_penny_ward", "password": "newpass123",
+	}); s != 200 {
+		t.Errorf("the child cannot sign in with the password the office set: %d", s)
+	}
+
+	// A receptionist keeps every other edit — this is about handing over an
+	// account, not about demoting the front desk.
+	if status, obj, _ := receptionist.do("PATCH", childPath, map[string]string{
+		"display_name": "Penny Ward-Smith",
+	}); status != 200 {
+		t.Errorf("a receptionist can no longer correct a name: %d (%v)", status, obj)
+	}
+
+	// And can still change their own password, or the rule locks them out of
+	// the one account they are entitled to.
+	deskPath := "/api/v1/user-accounts/" + desk["user_account_id"].(string)
+	if status, obj, _ := receptionist.do("PATCH", deskPath, map[string]string{"password": "mine12345"}); status != 200 {
+		t.Errorf("a receptionist cannot change their own password: %d (%v)", status, obj)
+	}
+}
+
+// Registration is the front desk's actual job, and a brand-new account belongs
+// to nobody yet — so creating one with a password is not taking anything over.
+func TestAReceptionistStillRegisters(t *testing.T) {
+	admin := &client{t: t, srv: newServer(t)}
+	admin.login("admin@jca.ac.th")
+	admin.do("POST", "/api/v1/user-accounts", map[string]string{
+		"email": "desk@jca.ac.th", "password": "chess1234",
+		"role": "Receptionist", "display_name": "Front Desk",
+	})
+
+	receptionist := loginAs(t, admin, "desk@jca.ac.th", "chess1234")
+	if status, obj, _ := receptionist.do("POST", "/api/v1/user-accounts", map[string]string{
+		"email": "stu_new_child", "password": "chess1234",
+		"role": "Student", "display_name": "New Child",
+	}); status != 201 {
+		t.Errorf("a receptionist cannot register a student: %d (%v)", status, obj)
+	}
+}
