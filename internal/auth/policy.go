@@ -1,10 +1,10 @@
-// Account rules: what counts as an email address, and what counts as a
+// Account rules: what counts as a sign-in identifier, and what counts as a
 // password.
 //
 // Gathered here because they were previously four separate checks in four
 // files — `len(p) < 8` written out three times and a constant the fourth — and
 // rules copied by hand drift. Every path that creates or changes an account now
-// calls the same two functions.
+// calls the same functions.
 package auth
 
 import (
@@ -31,6 +31,7 @@ var (
 	ErrPasswordSpaces = errors.New("password cannot start or end with a space")
 	ErrPasswordWeak   = errors.New("password must contain a letter and a number")
 	ErrEmailInvalid   = errors.New("that does not look like an email address")
+	ErrLoginIDInvalid = errors.New("a sign-in ID must be 3-64 characters of letters, digits, dot, dash or underscore, or a valid email address")
 )
 
 // ValidatePassword applies the academy's password rule.
@@ -106,6 +107,57 @@ func ValidateEmail(email string) (string, error) {
 		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") ||
 		strings.Contains(normalized, " ") {
 		return "", ErrEmailInvalid
+	}
+	return normalized, nil
+}
+
+// LooksLikeEmail reports whether an identifier is an address something could
+// actually be sent to — the test every feature that *mails* a person has to
+// make before it tries.
+func LooksLikeEmail(identifier string) bool {
+	_, err := ValidateEmail(identifier)
+	return err == nil
+}
+
+// ValidateLoginID checks a sign-in identifier and returns its canonical form.
+//
+// An account signs in with one string, and for most of the academy that string
+// is an email address. It cannot be for the children: a seven-year-old has no
+// mailbox, and the console used to paper over that by minting
+// `penny.ward@student.jca.ac.th` — an address shaped like a promise the academy
+// could not keep. Nobody can receive at it, so the reset link it exists to
+// carry goes nowhere, and it invites the office to write to a child who has no
+// inbox. **A fake address is worse than an honest ID**, because only one of the
+// two tells you what it cannot do.
+//
+// So an identifier is either a real email address or a bare ID: `stu_penny_ward`.
+// One column, one namespace, one UNIQUE index — an ID cannot collide with an
+// address, because an address contains an `@` and an ID may not.
+//
+// The character set is the intersection of what reads back correctly over the
+// phone and what survives a URL, a CSV and a shell without quoting. No spaces:
+// an identifier a parent has to type must not have an invisible difference
+// between two versions of itself.
+func ValidateLoginID(identifier string) (string, error) {
+	normalized := NormalizeEmail(identifier)
+	if strings.Contains(normalized, "@") {
+		// Anything claiming to be an address is held to the address rules, so
+		// `penny@student` cannot slip through as "just an ID with an @ in it".
+		return ValidateEmail(identifier)
+	}
+	n := len(normalized)
+	if n < 3 || n > 64 {
+		return "", ErrLoginIDInvalid
+	}
+	for i, r := range normalized {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case (r == '.' || r == '-' || r == '_') && i > 0:
+			// Not leading, so an ID always starts with something a person
+			// would read aloud.
+		default:
+			return "", ErrLoginIDInvalid
+		}
 	}
 	return normalized, nil
 }
