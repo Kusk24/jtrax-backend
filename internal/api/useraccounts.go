@@ -25,6 +25,26 @@ func requireStaff(d *sql.DB, w http.ResponseWriter, r *http.Request) *auth.Ident
 	return id
 }
 
+// validateIdentifierFor returns the canonical sign-in identifier for an account
+// of this role, or the reason it is not one.
+//
+// A student may sign in with a bare ID — `stu_penny_ward` — because a child of
+// five has no mailbox and inventing one for them produced an address that could
+// never receive the reset link it existed to carry.
+//
+// Everybody else must give a real address, and the difference is not
+// pedantry: **the identifier is the only route back into a locked account.**
+// Staff and parents reset their own password through a link; a child cannot, so
+// theirs is a job for the front desk. Letting a receptionist be created as
+// `desk` would quietly move them into the group who need somebody else to let
+// them back in, and nothing at the moment of creation would say so.
+func validateIdentifierFor(role, identifier string) (string, error) {
+	if role == "Student" {
+		return auth.ValidateLoginID(identifier)
+	}
+	return auth.ValidateEmail(identifier)
+}
+
 func accountRow(d *sql.DB, id string) (map[string]any, error) {
 	var m = map[string]any{}
 	var email, role, name, lang, theme string
@@ -89,7 +109,15 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 			httpx.Error(w, http.StatusBadRequest, "display_name is required", nil)
 			return
 		}
-		email, err := auth.ValidateEmail(in.Email)
+		ok := false
+		for _, rl := range accountRoles {
+			ok = ok || rl == in.Role
+		}
+		if !ok {
+			httpx.Error(w, http.StatusBadRequest, "role must be one of "+strings.Join(accountRoles, ", "), nil)
+			return
+		}
+		email, err := validateIdentifierFor(in.Role, in.Email)
 		if err != nil {
 			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 			return
@@ -97,14 +125,6 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		in.Email = email
 		if err := auth.ValidatePassword(in.Password); err != nil {
 			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
-			return
-		}
-		ok := false
-		for _, rl := range accountRoles {
-			ok = ok || rl == in.Role
-		}
-		if !ok {
-			httpx.Error(w, http.StatusBadRequest, "role must be one of "+strings.Join(accountRoles, ", "), nil)
 			return
 		}
 		hash, err := auth.HashPassword(in.Password)
@@ -115,7 +135,7 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		id := newID("usr")
 		if _, err := d.Exec(`INSERT INTO user_account (user_account_id, email, password_hash, role, display_name)
 			VALUES (?,?,?,?,?)`, id, in.Email, hash, in.Role, in.DisplayName); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "could not create account (email must be unique)", err)
+			httpx.Error(w, http.StatusBadRequest, "could not create account (that sign-in ID or email is already taken)", err)
 			return
 		}
 		row, _ := accountRow(d, id)
@@ -149,14 +169,24 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		}
 		id := r.PathValue("id")
 		if in.Email != nil {
-			email, err := auth.ValidateEmail(*in.Email)
+			/* Which rule applies is a fact about the account, and a PATCH body
+			   does not carry the role — so it is read, not taken on trust. A
+			   caller cannot turn a receptionist into an ID-holder by claiming
+			   to be editing a student. */
+			var role string
+			if err := d.QueryRow(`SELECT role FROM user_account WHERE user_account_id = ?`, id).
+				Scan(&role); err != nil {
+				httpx.Error(w, http.StatusNotFound, "not found", nil)
+				return
+			}
+			email, err := validateIdentifierFor(role, *in.Email)
 			if err != nil {
 				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
 			if _, err := d.Exec(`UPDATE user_account SET email = ? WHERE user_account_id = ?`,
 				email, id); err != nil {
-				httpx.Error(w, http.StatusBadRequest, "email must be unique", err)
+				httpx.Error(w, http.StatusBadRequest, "that sign-in ID or email is already taken", err)
 				return
 			}
 		}

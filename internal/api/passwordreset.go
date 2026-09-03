@@ -45,6 +45,16 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 		if email == "" || !resetLimiter.Allow(email) {
 			return
 		}
+		// A child signs in with an ID — `stu_penny_ward` — which is not an
+		// address and never will be. Matching it here and then handing it to
+		// the SMTP sender would fail one layer down, log a real identifier as
+		// a bounce, and still leave the child locked out. There is no reset
+		// link that can reach them; the office changes the password instead.
+		// The reply is the same as for an unknown address, so this does not
+		// become a way to ask which identifiers are children's.
+		if !auth.LooksLikeEmail(email) {
+			return
+		}
 
 		var accountID, displayName, role string
 		err := d.QueryRow(`SELECT user_account_id, display_name, role FROM user_account

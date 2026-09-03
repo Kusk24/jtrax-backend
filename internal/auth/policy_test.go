@@ -96,3 +96,66 @@ func TestNormalizeEmailMatchesWhatSignInLooksUp(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateLoginID(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"a child's id", "stu_penny_ward", "stu_penny_ward"},
+		{"upper-cased", "STU_Penny_Ward", "stu_penny_ward"},
+		{"padded", "  stu_penny_ward \n", "stu_penny_ward"},
+		{"disambiguated", "stu_john_smith_2", "stu_john_smith_2"},
+		{"dots and dashes", "stu.penny-ward", "stu.penny-ward"},
+		{"shortest allowed", "abc", "abc"},
+		// An address is still an identifier: everyone who has a mailbox keeps
+		// signing in with it, and the same function has to accept both.
+		{"an address", "Head@JCA.ac.th", "head@jca.ac.th"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := auth.ValidateLoginID(tc.in)
+			if err != nil {
+				t.Fatalf("ValidateLoginID(%q) = %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("ValidateLoginID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct{ name, in string }{
+		{"empty", ""},
+		{"two characters", "ab"},
+		{"a space", "stu penny"},
+		{"leading dot", ".penny"},
+		{"leading underscore", "_penny"},
+		{"punctuation", "stu_penny!"},
+		{"a slash, which a URL would eat", "stu/penny"},
+		{"longer than the column deserves", strings.Repeat("a", 65)},
+		// The important one: anything with an @ is judged as an address, so a
+		// half-written address cannot slip through by being called an ID.
+		{"half an address", "penny@student"},
+		{"an @ and nothing else", "penny@"},
+		{"a bare domain", "@jca.ac.th"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := auth.ValidateLoginID(tc.in); err == nil {
+				t.Errorf("ValidateLoginID(%q) was accepted as %q", tc.in, got)
+			}
+		})
+	}
+}
+
+// The distinction the reset endpoint turns on: it must not hand an ID to the
+// mail sender, because there is no mailbox on the other end of one.
+func TestLooksLikeEmailSeparatesIdsFromAddresses(t *testing.T) {
+	for _, in := range []string{"head@jca.ac.th", "penny.ward@gmail.com"} {
+		if !auth.LooksLikeEmail(in) {
+			t.Errorf("LooksLikeEmail(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"stu_penny_ward", "stu_john_smith_2", "", "penny@student"} {
+		if auth.LooksLikeEmail(in) {
+			t.Errorf("LooksLikeEmail(%q) = true — a reset link would be posted into the void", in)
+		}
+	}
+}
