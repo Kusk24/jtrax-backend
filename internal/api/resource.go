@@ -83,6 +83,14 @@ type Resource struct {
 	AfterWrite func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
+	// AfterCommit runs once the row is committed and reloaded, OUTSIDE the
+	// write transaction — unlike AfterWrite, which is part of it. It is for a
+	// consequence that reaches beyond the database: a check-in becoming a
+	// notification, which itself writes rows and sends email and so must not run
+	// inside the row's own transaction on a single-writer database. It must
+	// never fail the request; a notification that did not send is no reason to
+	// tell the caller their check-in was rejected, so its errors are its own.
+	AfterCommit func(d *sql.DB, id *auth.Identity, row map[string]any, created bool)
 }
 
 // inTx runs a write and its consequence as one unit. Resources with no hook
@@ -363,6 +371,9 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "created but could not reload", err)
 			return
 		}
+		if rs.AfterCommit != nil {
+			rs.AfterCommit(d, id, created, true)
+		}
 		httpx.JSON(w, http.StatusCreated, created)
 	}
 }
@@ -442,6 +453,9 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "updated but could not reload", err)
 			return
+		}
+		if rs.AfterCommit != nil {
+			rs.AfterCommit(d, id, updated, false)
 		}
 		httpx.JSON(w, http.StatusOK, updated)
 	}
