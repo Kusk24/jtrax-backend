@@ -7,6 +7,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 )
 
 // NewHandler builds the full API handler (CORS applied by the caller), reading
@@ -61,7 +62,15 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
 	mountPeopleCascade(mux, d)
-	for _, rs := range Registry() {
+
+	// Notifications: the inbox and settings endpoints, plus the same service
+	// wired onto the attendance and announcement resources so a check-in or a
+	// new announcement turns into a notification through the existing writes.
+	notifier := notify.New(d, sender, mailCfg)
+	mountNotifications(mux, d, notifier)
+	resources := Registry()
+	attachNotificationHooks(resources, d, notifier)
+	for _, rs := range resources {
 		rs.Mount(mux, d)
 	}
 	return mux
