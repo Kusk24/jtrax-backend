@@ -8,18 +8,26 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/ocr"
 )
 
 // NewHandler builds the full API handler (CORS applied by the caller), reading
-// the mail configuration from the environment.
+// the mail and OCR configuration from the environment.
 func NewHandler(d *sql.DB) http.Handler {
 	cfg := mail.FromEnv()
-	return NewHandlerWithMail(d, cfg, mail.New(cfg))
+	return NewHandlerWith(d, cfg, mail.New(cfg), ocr.New(ocr.FromEnv()))
 }
 
-// NewHandlerWithMail is the injectable form: tests pass a Sender that captures
-// messages instead of delivering them.
+// NewHandlerWithMail keeps the older two-dependency form working for tests that
+// only care about mail; form scanning is off, which is a supported state.
 func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http.Handler {
+	return NewHandlerWith(d, mailCfg, sender, nil)
+}
+
+// NewHandlerWith is the injectable form: tests pass a Sender that captures
+// messages instead of delivering them, and an OCR provider that returns a fixed
+// reading instead of calling a paid API.
+func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -62,6 +70,9 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
 	mountPeopleCascade(mux, d)
+	// Reads a photographed paper form and hands the fields back for staff to
+	// confirm. Writes nothing, so it sits outside the registry.
+	mountRegistrationScan(mux, d, scanner)
 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a
