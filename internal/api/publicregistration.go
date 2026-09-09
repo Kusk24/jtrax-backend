@@ -29,6 +29,8 @@ import (
 	"math"
 	"net/http"
 	"net/mail"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +56,8 @@ const publicTournamentSelect = `
 	       COALESCE(t.venue_name,''), COALESCE(t.venue_address,''),
 	       COALESCE(t.registration_deadline,''),
 	       COALESCE(t.regular_fee, t.early_bird_fee, 0),
+	       COALESCE(t.early_bird_fee, 0), COALESCE(t.early_bird_deadline, ''),
+	       EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = t.tournament_id),
 	       t.student_discount_pct, t.max_participants,
 	       (SELECT COUNT(*) FROM tournament_registration r
 	         WHERE r.tournament_id = t.tournament_id
@@ -69,8 +73,17 @@ type publicTournament struct {
 	VenueName    string  `json:"venueName"`
 	VenueAddress string  `json:"venueAddress"`
 	Deadline     string  `json:"registrationDeadline"`
-	Fee          float64 `json:"fee"`
-	StudentFee   float64 `json:"studentFee"`
+	/* Fee is what an outside participant pays if they register right now —
+	   the early-bird price while its window is open, the regular price after.
+	   Students pay StudentFee (the discount off the regular price) either
+	   way: the two discounts are for different people and never stack. */
+	Fee             float64 `json:"fee"`
+	RegularFee      float64 `json:"regularFee"`
+	EarlyBirdFee    float64 `json:"earlyBirdFee,omitempty"`
+	EarlyBirdUntil  string  `json:"earlyBirdUntil,omitempty"`
+	EarlyBirdActive bool    `json:"earlyBirdActive"`
+	HasRegulation   bool    `json:"hasRegulation"`
+	StudentFee      float64 `json:"studentFee"`
 	DiscountPct  int     `json:"studentDiscountPct"`
 	Capacity     *int    `json:"capacity"`
 	Taken        int     `json:"taken"`
@@ -85,9 +98,15 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	var t publicTournament
 	var capacity sql.NullInt64
 	if err := sc.Scan(&t.ID, &t.Name, &t.Status, &t.StartDate, &t.EndDate,
-		&t.VenueName, &t.VenueAddress, &t.Deadline, &t.Fee, &t.DiscountPct,
-		&capacity, &t.Taken); err != nil {
+		&t.VenueName, &t.VenueAddress, &t.Deadline, &t.RegularFee,
+		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation,
+		&t.DiscountPct, &capacity, &t.Taken); err != nil {
 		return nil, err
+	}
+	t.EarlyBirdActive = t.EarlyBirdFee > 0 && t.EarlyBirdUntil != "" && todayISO() <= t.EarlyBirdUntil
+	t.Fee = t.RegularFee
+	if t.EarlyBirdActive {
+		t.Fee = t.EarlyBirdFee
 	}
 	if capacity.Valid {
 		n := int(capacity.Int64)
@@ -98,7 +117,7 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 		}
 		t.SpotsLeft = &left
 	}
-	t.StudentFee = discounted(t.Fee, t.DiscountPct)
+	t.StudentFee = discounted(t.RegularFee, t.DiscountPct)
 	t.Open, t.ClosedReason = registrationOpen(t.Deadline, t.Capacity, t.Taken)
 	return &t, nil
 }
@@ -217,6 +236,9 @@ type registerInput struct {
 	DateOfBirth string `json:"dateOfBirth"`
 	CategoryID  string `json:"categoryId"`
 	IsStudent   bool   `json:"isStudent"`
+	/* Required when IsStudent: the discount is only quoted against a student
+	   id the academy can actually find. */
+	StudentID string `json:"studentId"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -227,6 +249,7 @@ func (in *registerInput) validate() string {
 	in.Phone = strings.TrimSpace(in.Phone)
 	in.DateOfBirth = strings.TrimSpace(in.DateOfBirth)
 	in.CategoryID = strings.TrimSpace(in.CategoryID)
+	in.StudentID = strings.TrimSpace(in.StudentID)
 
 	switch {
 	case len([]rune(in.Name)) < 2 || len([]rune(in.Name)) > maxNameLen:
@@ -244,7 +267,34 @@ func (in *registerInput) validate() string {
 			return "that date of birth does not look right"
 		}
 	}
+	if in.IsStudent && (in.StudentID == "" || len(in.StudentID) > 40) {
+		return "please give the JCA student ID so we can apply the discount"
+	}
 	return ""
+}
+
+// categoryAgeLimit reads the age out of a category's name — "U8 Boys" means
+// under 8 — so the age rule lives in the name the organiser already wrote
+// rather than in a column nobody fills. 0 means the name carries no age.
+var categoryAgePattern = regexp.MustCompile(`(?i)\bU\s?(\d{1,2})\b`)
+
+func categoryAgeLimit(name string) int {
+	m := categoryAgePattern.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// ageOn is completed years on a date — the tournament's start day, because
+// that is the day the age matters.
+func ageOn(dob, on time.Time) int {
+	years := on.Year() - dob.Year()
+	if on.YearDay() < dob.YearDay() {
+		years--
+	}
+	return years
 }
 
 // handlePublicRegister takes one entry.
@@ -298,38 +348,79 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
 		if in.CategoryID != "" {
-			var n int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM tournament_category
-			                       WHERE tournament_category_id = ? AND tournament_id = ?`,
-				in.CategoryID, tournamentID).Scan(&n); err != nil {
+			var catName string
+			err := tx.QueryRow(`SELECT name FROM tournament_category
+			                    WHERE tournament_category_id = ? AND tournament_id = ?`,
+				in.CategoryID, tournamentID).Scan(&catName)
+			if errors.Is(err, sql.ErrNoRows) {
+				httpx.Error(w, http.StatusBadRequest, "that category is not part of this tournament", nil)
+				return
+			}
+			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 				return
 			}
-			if n == 0 {
-				httpx.Error(w, http.StatusBadRequest, "that category is not part of this tournament", nil)
-				return
+			// The age rule lives in the category's name: "U8" is under 8 on
+			// the tournament's start day. The page disables ineligible
+			// categories, but the page is a courtesy — this is the rule.
+			if limit := categoryAgeLimit(catName); limit > 0 {
+				if in.DateOfBirth == "" {
+					httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
+					return
+				}
+				dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
+				on := time.Now()
+				if t.StartDate != "" {
+					if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
+						on = parsed
+					}
+				}
+				if ageOn(dob, on) >= limit {
+					httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
+					return
+				}
 			}
 			categoryID = in.CategoryID
 		}
 
-		// The student lookup, whose result never reaches the reply. NULL when
-		// no account carries this address, which is the ordinary case.
+		// The student link. A claimed discount now has to survive a lookup:
+		// the given student ID must name a real student, or the registration
+		// is refused with something the parent can act on. Without a claim,
+		// the old quiet email match still ties the entry to a student for
+		// staff, and never changes the price.
 		var studentID any
-		var matched string
-		err = tx.QueryRow(`SELECT s.student_id FROM student s
-		                   JOIN user_account u ON u.user_account_id = s.user_account_id
-		                   WHERE lower(trim(u.email)) = ?`, in.Email).Scan(&matched)
-		if err == nil {
-			studentID = matched
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
-			return
+		if in.IsStudent {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`,
+				in.StudentID).Scan(&n); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				return
+			}
+			if n == 0 {
+				httpx.Error(w, http.StatusBadRequest,
+					"we could not find that JCA student ID — check it, or untick the student box", nil)
+				return
+			}
+			studentID = in.StudentID
+		} else {
+			var matched string
+			err = tx.QueryRow(`SELECT s.student_id FROM student s
+			                   JOIN user_account u ON u.user_account_id = s.user_account_id
+			                   WHERE lower(trim(u.email)) = ?`, in.Email).Scan(&matched)
+			if err == nil {
+				studentID = matched
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				return
+			}
 		}
 
-		// Quoted on the claim, not on the match — see the package comment.
+		// Two prices for two audiences, never stacked: a verified student
+		// pays the discounted regular fee; an outsider pays the early-bird
+		// price while its window is open and the regular price after.
 		fee := t.Fee
 		if in.IsStudent {
-			fee = discounted(t.Fee, t.DiscountPct)
+			fee = discounted(t.RegularFee, t.DiscountPct)
 		}
 
 		regID := newID("treg")

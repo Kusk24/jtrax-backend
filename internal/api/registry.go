@@ -358,6 +358,9 @@ func Registry() []*Resource {
 				{Name: "organizer_name", Kind: "text"},
 				{Name: "registration_deadline", Kind: "text"},
 				{Name: "early_bird_fee", Kind: "real"},
+				// The day early bird ends — without it the fee above was
+				// never chargeable (see 0029).
+				{Name: "early_bird_deadline", Kind: "text"},
 				{Name: "regular_fee", Kind: "real"},
 				{Name: "max_participants", Kind: "int"},
 				{Name: "registration_website_url", Kind: "text"},
