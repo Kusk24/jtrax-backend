@@ -38,11 +38,20 @@ var Channels = []string{ChannelInApp, ChannelEmail, ChannelWebPush, ChannelMobil
 // Event types. The academy will extend this list; the schema stores type as a
 // string precisely so new ones need no migration.
 const (
-	TypeCheckIn      = "check_in"
-	TypeCheckOut     = "check_out"
-	TypeCreditExpiry = "credit_expiry"
-	TypeAnnouncement = "announcement"
+	TypeCheckIn        = "check_in"
+	TypeCheckOut       = "check_out"
+	TypeCreditDeducted = "credit_deducted"
+	TypeLowCredit      = "low_credit"
+	TypeCreditExpiry   = "credit_expiry"
+	TypeAnnouncement   = "announcement"
+	TypePayment        = "payment_received"
 )
+
+// DefaultEnabled says whether a person receives this type without ever having
+// touched their settings. Everything defaults on except the low-credit nudge,
+// which the academy decided is opt-in — a parent asks for it, it is not
+// assumed.
+func DefaultEnabled(typ string) bool { return typ != TypeLowCredit }
 
 // Text is one string in both supported languages. The sender picks per
 // recipient from user_account.language_preference, so a family that reads Thai
@@ -94,6 +103,13 @@ func newID(prefix string) string {
 // returns an error only if the inbox write itself failed — a failed email is
 // recorded on the delivery row, not bubbled up, because the event still
 // happened and the recipient can still see it in-app.
+//
+// Two gates run before anything is written. The academy's own switch: the
+// admin can turn a whole type off for the school, and a switched-off type
+// sends nobody anything. Then each recipient's: the in-app row for a type is
+// that person's master toggle, so someone who turned "check-in alerts" off —
+// or never turned an opt-in type on — is skipped entirely, not sent a
+// notification their settings say they did not want.
 func (s *Service) Send(recipients []string, msg Message) error {
 	if len(recipients) == 0 {
 		return nil
@@ -106,10 +122,17 @@ func (s *Service) Send(recipients []string, msg Message) error {
 	}
 	defer tx.Rollback()
 
+	if !typeEnabledForSchool(tx, msg.Type) {
+		return nil
+	}
+
 	type emailJob struct{ deliveryID, notifID, addr, subject, body string }
 	var emails []emailJob
 
 	for _, uid := range recipients {
+		if !prefEnabled(tx, uid, msg.Type, ChannelInApp) {
+			continue
+		}
 		if msg.DedupeKey != "" && s.alreadySent(tx, uid, msg.Type, msg.DedupeKey) {
 			continue
 		}
@@ -130,7 +153,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 			status := "pending"
 			switch {
 			case ch == ChannelInApp:
-				// The inbox always receives it; that is the point of an inbox.
+				// Already through the recipient gate above, so it lands.
 				status = "sent"
 			case !prefEnabled(tx, uid, msg.Type, ch):
 				status = "skipped_by_preference"
@@ -232,21 +255,36 @@ func sqlNow(tx *sql.Tx) string {
 	return now
 }
 
-// prefEnabled reads the per-user override for (type, channel); an absent row is
-// the default, which is on. Only choices that differ from the default are ever
-// stored, so silence means "yes".
+// prefEnabled reads the per-user override for (type, channel); an absent row
+// means the type's default — on for everything except the opt-in types (see
+// DefaultEnabled). Only explicit choices are ever stored, so silence means
+// "whatever the default says".
 func prefEnabled(tx *sql.Tx, uid, typ, channel string) bool {
 	var enabled int
 	err := tx.QueryRow(
 		`SELECT enabled FROM notification_setting WHERE user_account_id = ? AND type = ? AND channel = ?`,
 		uid, typ, channel).Scan(&enabled)
 	if err == sql.ErrNoRows {
-		return true
+		return DefaultEnabled(typ)
 	}
+	if err != nil {
+		return DefaultEnabled(typ)
+	}
+	return enabled != 0
+}
+
+// typeEnabledForSchool is the admin's switch: `notify_<type>` in
+// system_configuration, and only an explicit "off" turns a type off — an
+// absent key is on, so a new type works before anyone visits Settings.
+func typeEnabledForSchool(tx *sql.Tx, typ string) bool {
+	var value string
+	err := tx.QueryRow(
+		`SELECT config_value FROM system_configuration WHERE config_key = ?`,
+		"notify_"+typ).Scan(&value)
 	if err != nil {
 		return true
 	}
-	return enabled != 0
+	return value != "off"
 }
 
 func hasSubscription(tx *sql.Tx, uid, channel string) bool {
