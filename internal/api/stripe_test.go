@@ -243,3 +243,21 @@ func TestStripeWebhookRefusesWhatItShould(t *testing.T) {
 		t.Fatalf("refused webhooks still granted %d credit rows", credits)
 	}
 }
+
+func TestStripeWebhookSendsTheReceipt(t *testing.T) {
+	d := newDB(t)
+	srv := newStripeServer(t, d)
+	c := &client{t: t, srv: srv}
+	c.login("admin@jca.ac.th")
+	payID := pendingPayment(t, c, 12000)
+
+	payload := completedEvent("cs_r", payID, 1200000)
+	if got := postWebhook(t, srv, payload, stripepay.Sign(payload, webhookSecret, time.Now())); got != 200 {
+		t.Fatalf("webhook: %d", got)
+	}
+	// The guardian's inbox holds the payment receipt — the webhook writes SQL
+	// directly, so this is the path the resource hook cannot cover.
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "payment_received"); got != 1 {
+		t.Fatalf("payment_received after webhook: %d, want 1", got)
+	}
+}
