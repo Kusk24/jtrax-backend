@@ -66,6 +66,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	crDeps := mountChessResults(mux, d)
 	mountTournamentResults(mux, d, crDeps)
 	mountPublicRegistration(mux, d)
+	mountTournamentRegulation(mux, d)
 	mountRegistrationQueue(mux, d)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern
 	// than `/students/{id}`, so the two coexist either way, but keeping the

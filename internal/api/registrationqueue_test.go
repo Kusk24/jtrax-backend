@@ -24,11 +24,20 @@ func TestRegistrationQueueIsStaffOnly(t *testing.T) {
 
 func TestRegistrationQueueShowsTheStudentMatch(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 25})
-	// One claim the academy can corroborate, one it cannot.
+
+	// A discount claim now has to name a student the academy can find, so the
+	// unverifiable claim never reaches the queue at all — it is refused at the
+	// door rather than left for staff to catch.
+	if status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
+		entry(map[string]any{"email": "nobody@example.com", "isStudent": true})); status != 400 {
+		t.Fatalf("unverifiable claim: want 400, got %d", status)
+	}
+
+	// What does reach it: a verified student, and an ordinary outsider.
 	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "penny@jca.ac.th", "isStudent": true}))
+		entry(map[string]any{"email": "penny@jca.ac.th", "isStudent": true, "studentId": "stu_penny"}))
 	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "nobody@example.com", "isStudent": true}))
+		entry(map[string]any{"email": "nobody@example.com"}))
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
@@ -40,27 +49,29 @@ func TestRegistrationQueueShowsTheStudentMatch(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("want 2 entries, got %d", len(list))
 	}
-	matched := map[string]string{}
+	type seen struct {
+		claimed bool
+		matched string
+	}
+	rows := map[string]seen{}
 	for _, raw := range list {
 		e := raw.(map[string]any)
-		matched[e["contactEmail"].(string)], _ = e["matchedStudentName"].(string)
-		if e["claimedStudent"] != true {
-			t.Fatalf("%v: claim not recorded", e["contactEmail"])
-		}
+		name, _ := e["matchedStudentName"].(string)
+		rows[e["contactEmail"].(string)] = seen{e["claimedStudent"] == true, name}
 	}
-	// The whole reason this endpoint exists: staff can tell the two apart.
-	if matched["penny@jca.ac.th"] != "Penny" {
-		t.Fatalf("a real student was not matched: %q", matched["penny@jca.ac.th"])
+	// Staff still see which entry is a pupil's and which is not.
+	if got := rows["penny@jca.ac.th"]; !got.claimed || got.matched != "Penny" {
+		t.Fatalf("verified student: claimed=%v matched=%q", got.claimed, got.matched)
 	}
-	if matched["nobody@example.com"] != "" {
-		t.Fatalf("a stranger was matched to %q", matched["nobody@example.com"])
+	if got := rows["nobody@example.com"]; got.claimed || got.matched != "" {
+		t.Fatalf("outsider: claimed=%v matched=%q", got.claimed, got.matched)
 	}
 }
 
 func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 	_, reg, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true}))
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
 	if reg["feeQuoted"] != float64(400) {
 		t.Fatalf("setup: want a 400 quote, got %v", reg["feeQuoted"])
 	}
@@ -82,18 +93,19 @@ func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
 	}
 }
 
-// Staff are the authority on whether a claimed discount was genuine, so they
-// can correct the fee at the moment they approve.
+// Staff remain the authority on the price even when the student ID checked
+// out — a pupil who has since left is still a real id — so they can correct
+// the fee at the moment they approve.
 func TestApprovalCanOverrideTheClaimedDiscount(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true}))
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
 	regID := firstRegistrationID(t, staff, id)
 
-	// The claim did not hold up: charge the full fee.
+	// The discount should not have applied: charge the full fee.
 	if status, out, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/approve",
 		map[string]any{"fee": 500}); status != 200 {
 		t.Fatalf("approve with override: %d (%v)", status, out)
