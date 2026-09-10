@@ -10,6 +10,7 @@ package api
 
 import (
 	"database/sql"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -157,9 +158,10 @@ type settingInput struct {
 	Enabled bool   `json:"enabled"`
 }
 
-// handlePutSettings upserts one override for the caller. The in-app channel
-// cannot be switched off: the inbox is the record of what happened, and hiding
-// it would lose events silently rather than quietly.
+// handlePutSettings upserts one override for the caller. The in-app row for a
+// type is that person's master toggle — most alert types are in-app only, so
+// "Check-in Alerts: off" has to mean off, and the opt-in types (low credit)
+// are turned on the same way.
 func handlePutSettings(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
@@ -173,10 +175,6 @@ func handlePutSettings(d *sql.DB) http.HandlerFunc {
 		}
 		if !validType(in.Type) || !validChannel(in.Channel) {
 			httpx.Error(w, http.StatusBadRequest, "unknown type or channel", nil)
-			return
-		}
-		if in.Channel == notify.ChannelInApp && !in.Enabled {
-			httpx.Error(w, http.StatusBadRequest, "the in-app inbox cannot be turned off", nil)
 			return
 		}
 		enabled := 0
@@ -354,6 +352,8 @@ func attachNotificationHooks(resources []*Resource, d *sql.DB, svc *notify.Servi
 			rs.AfterCommit = attendanceHook(svc)
 		case "announcements":
 			rs.AfterCommit = announcementHook(d, svc)
+		case "payments":
+			rs.AfterCommit = paymentHook(svc)
 		}
 	}
 }
@@ -375,13 +375,7 @@ func attendanceHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[strin
 		name := studentDisplayName(d, studentID)
 
 		if rowStr(row, "check_out_time") != "" {
-			svc.Send(recipients, notify.Message{
-				Type:      notify.TypeCheckOut,
-				Title:     notify.Text{EN: "Checked out", TH: "เช็คเอาท์แล้ว"},
-				Body:      notify.Text{EN: name + " has left class.", TH: name + " ออกจากคลาสแล้ว"},
-				Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
-				DedupeKey: "checkout:" + attID,
-			})
+			sendCheckoutNotifications(d, svc, recipients, attID, studentID, name)
 			return
 		}
 		if rowStr(row, "check_in_time") != "" {
@@ -483,7 +477,8 @@ func rowStr(row map[string]any, key string) string {
 
 func validType(t string) bool {
 	switch t {
-	case notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement:
+	case notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditDeducted, notify.TypeLowCredit,
+		notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment:
 		return true
 	}
 	return false
@@ -503,4 +498,188 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// ---- credit deduction on check-out ---------------------------------------
+
+// sendCheckoutNotifications tells the parents what the class actually cost.
+//
+// Credits are deducted at check-out, so the check-out notice is the deduction
+// notice: class time, credits used, credits left. A check-out that charged
+// nothing — a session with no readable length, or a student with no enrolment
+// to charge — falls back to the plain "has left class", because inventing a
+// zero-credit receipt would read as a free class rather than a gap.
+//
+// If the balance this leaves is at or under the academy's low-credit line, a
+// second, separate notification nudges the parent to top up. That one is
+// opt-in (see notify.DefaultEnabled) and held to once a day per student.
+func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []string, attID, studentID, name string) {
+	var used, remaining float64
+	var enrolmentID, start, end string
+	err := d.QueryRow(
+		`SELECT -ct.amount, ct.enrollment_id, cs.start_time, cs.end_time
+		   FROM credit_transaction ct
+		   JOIN attendance a ON a.attendance_id = ct.attendance_id
+		   JOIN class_session cs ON cs.session_id = a.session_id
+		  WHERE ct.attendance_id = ? AND ct.transaction_type = 'consumption'`,
+		attID).Scan(&used, &enrolmentID, &start, &end)
+	if err != nil {
+		svc.Send(recipients, notify.Message{
+			Type:      notify.TypeCheckOut,
+			Title:     notify.Text{EN: "Checked out", TH: "เช็คเอาท์แล้ว"},
+			Body:      notify.Text{EN: name + " has left class.", TH: name + " ออกจากคลาสแล้ว"},
+			Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
+			DedupeKey: "checkout:" + attID,
+		})
+		return
+	}
+	d.QueryRow(
+		`SELECT COALESCE(SUM(amount),0) FROM credit_transaction WHERE enrollment_id = ?`,
+		enrolmentID).Scan(&remaining)
+
+	when := start + " – " + end
+	svc.Send(recipients, notify.Message{
+		Type:  notify.TypeCreditDeducted,
+		Title: notify.Text{EN: "Class credit deducted", TH: "หักเครดิตคลาสเรียนแล้ว"},
+		Body: notify.Text{
+			EN: name + " has completed their chess class. Class time: " + when +
+				". Credit used: " + fmtCreditsShort(used) + ". Remaining credit: " + fmtCreditsShort(remaining) + ".",
+			TH: name + " เรียนจบคลาสแล้ว เวลาเรียน " + when +
+				" ใช้ไป " + fmtCreditsShort(used) + " เครดิต คงเหลือ " + fmtCreditsShort(remaining) + " เครดิต",
+		},
+		Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
+		DedupeKey: "credit_deducted:" + attID,
+	})
+
+	if remaining <= lowCreditLine(d) {
+		svc.Send(recipients, notify.Message{
+			Type:  notify.TypeLowCredit,
+			Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
+			Body: notify.Text{
+				EN: name + " has " + fmtCreditsShort(remaining) + " credits remaining. " +
+					"Consider purchasing additional credits to continue their classes without interruption.",
+				TH: name + " เหลือเครดิต " + fmtCreditsShort(remaining) + " เครดิต " +
+					"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
+			},
+			Data:      map[string]any{"studentId": studentID},
+			DedupeKey: "low_credit:" + studentID + ":" + today(),
+		})
+	}
+}
+
+// lowCreditLine is the academy's own threshold, the same
+// `credit_rule_low_credit` the console's Settings screen edits. Default 3,
+// matching the console's.
+func lowCreditLine(d *sql.DB) float64 {
+	var raw string
+	if err := d.QueryRow(
+		`SELECT config_value FROM system_configuration WHERE config_key = 'credit_rule_low_credit'`,
+	).Scan(&raw); err == nil {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v >= 0 {
+			return v
+		}
+	}
+	return 3
+}
+
+// fmtCreditsShort writes a credit count the way a person would: whole numbers
+// bare, fractions to at most two places — 13.499999999999998 is the right
+// number and the wrong thing to put in a sentence.
+func fmtCreditsShort(v float64) string {
+	r := math.Round(v*100) / 100
+	if r == math.Trunc(r) {
+		return strconv.FormatInt(int64(r), 10)
+	}
+	return strconv.FormatFloat(r, 'f', -1, 64)
+}
+
+// ---- payment received ----------------------------------------------------
+
+// paymentHook notifies the guardian when a payment lands as Paid — whether
+// the desk recorded it Paid outright, marked a pending one Paid later, or the
+// Stripe webhook settled it (which calls notifyPaymentPaid itself, since it
+// writes SQL directly rather than through the resource). The dedupe key is the
+// payment, so edits to a settled row never re-notify.
+func paymentHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[string]any, bool) {
+	return func(d *sql.DB, _ *auth.Identity, row map[string]any, _ bool) {
+		if rowStr(row, "status") != "Paid" {
+			return
+		}
+		notifyPaymentPaid(d, svc, rowStr(row, "payment_id"))
+	}
+}
+
+// notifyPaymentPaid sends the PDF's "Payment Successful" message: the amount,
+// the credits it bought, and the balance they leave. In-app and email both —
+// a receipt is the one notification the academy wants in writing.
+func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
+	if paymentID == "" {
+		return
+	}
+	var studentID, enrolmentID sql.NullString
+	var amount float64
+	if err := d.QueryRow(
+		`SELECT student_id, enrollment_id, final_amount FROM payment WHERE payment_id = ?`,
+		paymentID).Scan(&studentID, &enrolmentID, &amount); err != nil {
+		return
+	}
+	if !studentID.Valid || studentID.String == "" {
+		return
+	}
+	recipients := parentAccountsOf(d, studentID.String)
+	if len(recipients) == 0 {
+		return
+	}
+	name := studentDisplayName(d, studentID.String)
+
+	var credits, balance float64
+	d.QueryRow(
+		`SELECT COALESCE(SUM(amount),0) FROM credit_transaction
+		  WHERE payment_id = ? AND transaction_type = 'purchase'`, paymentID).Scan(&credits)
+	if enrolmentID.Valid && enrolmentID.String != "" {
+		d.QueryRow(
+			`SELECT COALESCE(SUM(amount),0) FROM credit_transaction WHERE enrollment_id = ?`,
+			enrolmentID.String).Scan(&balance)
+	}
+
+	amt := fmtBaht(amount)
+	en := "Your payment of " + amt + " was successful."
+	th := "การชำระเงิน " + amt + " ของคุณสำเร็จแล้ว"
+	if credits > 0 {
+		en += " " + fmtCreditsShort(credits) + " credits have been added to " + name +
+			"'s account. Current balance: " + fmtCreditsShort(balance) + " credits."
+		th += " เพิ่ม " + fmtCreditsShort(credits) + " เครดิตให้ " + name +
+			" แล้ว ยอดคงเหลือ " + fmtCreditsShort(balance) + " เครดิต"
+	}
+	svc.Send(recipients, notify.Message{
+		Type:      notify.TypePayment,
+		Title:     notify.Text{EN: "Payment successful", TH: "ชำระเงินสำเร็จ"},
+		Body:      notify.Text{EN: en, TH: th},
+		Data:      map[string]any{"paymentId": paymentID, "studentId": studentID.String},
+		DedupeKey: "payment_received:" + paymentID,
+	})
+}
+
+// fmtBaht writes an amount with a thousands separator and the ISO code —
+// "12,000 THB". Whole satang are the norm at the till, so decimals only
+// appear when the amount has them.
+func fmtBaht(v float64) string {
+	whole := int64(math.Trunc(math.Abs(v)))
+	frac := math.Round((math.Abs(v)-float64(whole))*100) / 100
+	digits := strconv.FormatInt(whole, 10)
+	var out []byte
+	for i, c := range []byte(digits) {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	text := string(out)
+	if frac > 0 {
+		text += strconv.FormatFloat(frac, 'f', 2, 64)[1:]
+	}
+	if v < 0 {
+		text = "-" + text
+	}
+	return text + " THB"
 }

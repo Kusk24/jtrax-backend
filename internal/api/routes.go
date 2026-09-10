@@ -74,17 +74,18 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Reads a photographed paper form and hands the fields back for staff to
 	// confirm. Writes nothing, so it sits outside the registry.
 	mountRegistrationScan(mux, d, scanner)
-	// Card payments: a checkout link for a pending payment, and the webhook
-	// that settles it. Off — including the webhook route — until the Stripe
-	// keys are in the environment.
-	stripeCfg := stripepay.FromEnv()
-	mountStripe(mux, d, stripepay.New(stripeCfg), stripeCfg)
 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a
 	// new announcement turns into a notification through the existing writes.
 	notifier := notify.New(d, sender, mailCfg)
 	mountNotifications(mux, d, notifier)
+	// Card payments: a checkout link for a pending payment, and the webhook
+	// that settles it — and, through the notifier, sends the receipt. Off —
+	// including the webhook route — until the Stripe keys are in the
+	// environment.
+	stripeCfg := stripepay.FromEnv()
+	mountStripe(mux, d, stripepay.New(stripeCfg), stripeCfg, notifier)
 	resources := Registry()
 	attachNotificationHooks(resources, d, notifier)
 	for _, rs := range resources {

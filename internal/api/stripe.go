@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -26,13 +27,13 @@ const minSatang = 1000
 // switched off: the link endpoint says so, and the webhook route is not
 // registered at all — an unverifiable webhook is better refused by 404 than
 // accepted by accident.
-func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg stripepay.Config) {
+func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/payments/{id}/stripe-link", handleStripeLink(d, client, cfg))
 	if client != nil && cfg.WebhookSecret != "" {
 		// Unauthenticated by nature — Stripe is not a signed-in user — so it
 		// carries the standard unauthenticated-route budget on top of the
 		// signature check.
-		mux.HandleFunc("POST /api/v1/stripe/webhook", httpx.RateLimit(120, handleStripeWebhook(d, cfg.WebhookSecret)))
+		mux.HandleFunc("POST /api/v1/stripe/webhook", httpx.RateLimit(120, handleStripeWebhook(d, cfg.WebhookSecret, svc)))
 	}
 
 	// Where Checkout sends the parent afterwards. Plain pages with no session,
@@ -162,7 +163,7 @@ type stripeEvent struct {
 // because it will. The idempotency guard is the UPDATE's `status = 'Pending'`:
 // whichever delivery flips the row grants the credits, every other one changes
 // nothing and answers 200.
-func handleStripeWebhook(d *sql.DB, secret string) http.HandlerFunc {
+func handleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 512*1024))
 		if err != nil {
@@ -246,6 +247,10 @@ func handleStripeWebhook(d *sql.DB, secret string) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not commit", err)
 			return
 		}
+		// The webhook writes SQL directly rather than through the payments
+		// resource, so the resource's hook never sees it — the receipt is
+		// sent here, after the commit, same as every notification.
+		notifyPaymentPaid(d, svc, paymentID)
 		httpx.JSON(w, http.StatusOK, map[string]string{"received": "ok"})
 	}
 }
