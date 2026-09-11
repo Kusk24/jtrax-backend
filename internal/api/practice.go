@@ -72,20 +72,23 @@ func currentStreak(d *sql.DB, studentID string, today time.Time) (int, error) {
 
 const dayLayout = "2006-01-02"
 
-// recordPractice writes (or tops up) today's practice row for a pupil.
+// addPracticeMinutes records a solve against today's practice row.
 //
-// Called from the puzzle grader when the day's set is finished, never from a
-// request body: the numbers are what the server just watched happen.
-func recordPractice(d *sql.DB, studentID, day string, puzzles, minutes, points int) error {
+// Called from the puzzle grader, never from a request body: the numbers are
+// what the server just watched happen. Puzzles and points are absolute counts
+// for the day, but minutes **accumulate** — each solve adds the time that
+// puzzle was open, so three puzzles is the sum of three sittings rather than
+// the last one.
+func addPracticeMinutes(d *sql.DB, studentID, day string, puzzles, addMinutes, points int) error {
 	_, err := d.Exec(`
 		INSERT INTO practice_activity
 		  (activity_id, student_id, activity_date, minutes_practiced, puzzles_completed, points_earned, streak_count)
 		VALUES (?,?,?,?,?,?,0)
 		ON CONFLICT(student_id, activity_date) DO UPDATE SET
 		  puzzles_completed = excluded.puzzles_completed,
-		  minutes_practiced = excluded.minutes_practiced,
+		  minutes_practiced = practice_activity.minutes_practiced + excluded.minutes_practiced,
 		  points_earned     = excluded.points_earned`,
-		newID("act"), studentID, day, minutes, puzzles, points)
+		newID("act"), studentID, day, addMinutes, puzzles, points)
 	return err
 }
 

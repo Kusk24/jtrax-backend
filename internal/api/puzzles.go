@@ -35,6 +35,12 @@ const defaultRating = 800
 // pointsPerPuzzle is the score a solved puzzle is worth on the practice record.
 const pointsPerPuzzle = 10
 
+// maxPuzzleMinutes caps what one puzzle can contribute to a day's practice
+// time. A child who opens a puzzle and goes to dinner should not come back
+// having "practised" for three hours, and the tab left open overnight is the
+// ordinary case rather than the strange one.
+const maxPuzzleMinutes = 15
+
 type puzzleView struct {
 	PuzzleID string `json:"puzzleId"`
 	FEN      string `json:"fen"`
@@ -259,10 +265,11 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 			if err := d.QueryRow(`SELECT COALESCE(SUM(solved),0) FROM puzzle_attempt
 			                      WHERE student_id = ? AND assigned_on = ?`,
 				studentID, today()).Scan(&solvedToday); err == nil {
-				// Minutes stay 0: nothing here measures how long a pupil sat
-				// with a puzzle, and inventing ten of them would put a number
-				// in front of a parent that no one counted.
-				if err := recordPractice(d, studentID, today(), solvedToday, 0, solvedToday*pointsPerPuzzle); err != nil {
+				// Measured, not guessed: the time this puzzle was open, added
+				// to what the day already had. The browser used to post a flat
+				// ten minutes whatever happened.
+				if err := addPracticeMinutes(d, studentID, today(), solvedToday,
+					minutesOnPuzzle(d, studentID, puzzleID), solvedToday*pointsPerPuzzle); err != nil {
 					log.Printf("puzzles: recording practice for %s: %v", studentID, err)
 				}
 			}
@@ -281,8 +288,62 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 	}
 }
 
+// handlePuzzleOpen stamps when a pupil started looking at a puzzle.
+//
+// The server writes its own clock, so the pupil supplies the moment but not
+// the time. Only the first open counts: coming back to a puzzle after a wrong
+// answer continues the same sitting rather than starting a new one.
+func handlePuzzleOpen(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		studentID, ok := studentOf(w, id)
+		if !ok {
+			return
+		}
+		// Scoped to today's set, so this cannot stamp a puzzle the pupil was
+		// never given.
+		res, err := d.Exec(`UPDATE puzzle_attempt SET opened_at = datetime('now')
+		                    WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?
+		                      AND opened_at IS NULL`,
+			studentID, r.PathValue("id"), today())
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not record", err)
+			return
+		}
+		n, _ := res.RowsAffected()
+		httpx.JSON(w, http.StatusOK, map[string]any{"started": n > 0})
+	}
+}
+
+// minutesOnPuzzle is how long the pupil had this puzzle open, in whole
+// minutes, capped. Zero when it was never opened through the app.
+func minutesOnPuzzle(d *sql.DB, studentID, puzzleID string) int {
+	var opened sql.NullString
+	if err := d.QueryRow(`SELECT opened_at FROM puzzle_attempt
+	                      WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
+		studentID, puzzleID, today()).Scan(&opened); err != nil || !opened.Valid || opened.String == "" {
+		return 0
+	}
+	start, err := time.Parse(sqliteTimeLayout, opened.String)
+	if err != nil {
+		return 0
+	}
+	mins := int(time.Since(start).Minutes())
+	if mins < 0 {
+		return 0
+	}
+	if mins > maxPuzzleMinutes {
+		return maxPuzzleMinutes
+	}
+	return mins
+}
+
 func mountPuzzles(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d))
+	mux.HandleFunc("POST /api/v1/puzzles/{id}/open", handlePuzzleOpen(d))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/attempt", handlePuzzleAttempt(d))
 }
 

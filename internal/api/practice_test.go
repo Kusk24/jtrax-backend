@@ -191,3 +191,118 @@ func TestOnlyAStudentHasAPracticeSummary(t *testing.T) {
 		}
 	}
 }
+
+// Practice minutes are measured, not posted.
+//
+// The browser used to send a flat 10 whatever happened; removing it left 0,
+// which was honest and useless. The server stamps when a puzzle is opened and
+// counts to the solve.
+func TestPracticeMinutesAreMeasuredFromWhenThePuzzleWasOpened(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	if _, err := d.Exec(`DELETE FROM practice_activity WHERE student_id = 'stu_penny'`); err != nil {
+		t.Fatal(err)
+	}
+	penny := &client{t: t, srv: srv}
+	penny.login("penny@jca.ac.th")
+
+	set := dailySet(t, penny)
+	id, _ := set[0]["puzzleId"].(string)
+
+	// Opening stamps the clock; opening again does not restart it.
+	if status, obj, _ := penny.do("POST", "/api/v1/puzzles/"+id+"/open", nil); status != 200 || obj["started"] != true {
+		t.Fatalf("first open: status %d, %v", status, obj)
+	}
+	if _, obj, _ := penny.do("POST", "/api/v1/puzzles/"+id+"/open", nil); obj["started"] != false {
+		t.Errorf("a second open must not restart the sitting, got %v", obj["started"])
+	}
+
+	// Pretend the pupil spent six minutes on it.
+	if _, err := d.Exec(`UPDATE puzzle_attempt SET opened_at = datetime('now','-6 minutes')
+	                     WHERE student_id='stu_penny' AND puzzle_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	solveFirstMove(t, d, penny, id)
+
+	var mins int
+	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
+	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+		t.Fatal(err)
+	}
+	if mins != 6 {
+		t.Fatalf("minutes_practiced = %d, want 6", mins)
+	}
+}
+
+// A tab left open overnight is the ordinary case, not the strange one.
+func TestAnAbandonedPuzzleCannotLogHours(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	if _, err := d.Exec(`DELETE FROM practice_activity WHERE student_id = 'stu_penny'`); err != nil {
+		t.Fatal(err)
+	}
+	penny := &client{t: t, srv: srv}
+	penny.login("penny@jca.ac.th")
+	set := dailySet(t, penny)
+	id, _ := set[0]["puzzleId"].(string)
+	penny.do("POST", "/api/v1/puzzles/"+id+"/open", nil)
+	if _, err := d.Exec(`UPDATE puzzle_attempt SET opened_at = datetime('now','-9 hours')
+	                     WHERE student_id='stu_penny' AND puzzle_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	solveFirstMove(t, d, penny, id)
+
+	var mins int
+	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
+	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+		t.Fatal(err)
+	}
+	if mins != 15 {
+		t.Fatalf("minutes_practiced = %d, want the %d-minute cap", mins, 15)
+	}
+}
+
+// A puzzle solved without ever being opened through the app contributes no
+// time — it must not fall back to a guess.
+func TestAPuzzleNeverOpenedContributesNoMinutes(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	if _, err := d.Exec(`DELETE FROM practice_activity WHERE student_id = 'stu_penny'`); err != nil {
+		t.Fatal(err)
+	}
+	penny := &client{t: t, srv: srv}
+	penny.login("penny@jca.ac.th")
+	set := dailySet(t, penny)
+	id, _ := set[0]["puzzleId"].(string)
+	solveFirstMove(t, d, penny, id) // no /open call
+
+	var mins, puzzles int
+	if err := d.QueryRow(`SELECT minutes_practiced, puzzles_completed FROM practice_activity
+	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins, &puzzles); err != nil {
+		t.Fatal(err)
+	}
+	if mins != 0 || puzzles != 1 {
+		t.Fatalf("minutes = %d, puzzles = %d; want 0 and 1", mins, puzzles)
+	}
+}
+
+// solveFirstMove plays the first move of a puzzle's stored solution.
+func solveFirstMove(t *testing.T, d *sql.DB, c *client, puzzleID string) {
+	t.Helper()
+	var solution string
+	if err := d.QueryRow(`SELECT moves FROM puzzle WHERE puzzle_id = ?`, puzzleID).Scan(&solution); err != nil {
+		t.Fatal(err)
+	}
+	first := solution
+	for i, ch := range solution {
+		if ch == ' ' {
+			first = solution[:i]
+			break
+		}
+	}
+	status, obj, _ := c.do("POST", "/api/v1/puzzles/"+puzzleID+"/attempt",
+		map[string]any{"move": first, "played": []string{}})
+	if status != 200 || obj["correct"] != true {
+		t.Fatalf("solving %s: status %d, %v", puzzleID, status, obj)
+	}
+}
