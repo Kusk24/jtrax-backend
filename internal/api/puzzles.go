@@ -9,6 +9,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -30,6 +31,9 @@ const ratingBand = 250
 // defaultRating is used for a pupil with no FIDE rating yet, which is most of
 // them — a beginner-friendly floor rather than the middle of the distribution.
 const defaultRating = 800
+
+// pointsPerPuzzle is the score a solved puzzle is worth on the practice record.
+const pointsPerPuzzle = 10
 
 type puzzleView struct {
 	PuzzleID string `json:"puzzleId"`
@@ -106,7 +110,27 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 			v.Wrong = wrong
 			out = append(out, v)
 		}
-		httpx.JSON(w, http.StatusOK, out)
+
+		// How many the pupil has never been set. Zero with a short set means the
+		// bank is spent for them, which the portal has to be able to say — a
+		// silently empty daily challenge reads as a broken app, and with sixty
+		// seeded puzzles this arrives on about the twentieth day.
+		var unseen int
+		if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle
+		                      WHERE puzzle_id NOT IN
+		                        (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)`,
+			studentID).Scan(&unseen); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			return
+		}
+
+		httpx.JSON(w, http.StatusOK, map[string]any{
+			"puzzles": out,
+			// True only when there is nothing left to give, not merely when
+			// today's set is short for some other reason.
+			"exhausted": len(out) < dailyCount && unseen == 0,
+			"unseen":    unseen,
+		})
 	}
 }
 
@@ -130,14 +154,20 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 		target = int(rating.Float64)
 	}
 
-	// Prefer puzzles near the pupil's rating that they have never been set
-	// before; fall back to anything unseen, then to anything at all, so a small
-	// puzzle table still fills a set rather than returning a short day.
+	// Never a puzzle this pupil has been set before — repeating one they have
+	// already solved is worth nothing, and repeating one they failed teaches
+	// them the answer rather than the idea.
+	//
+	// Within the band first, so a beginner is not handed a club player's fork
+	// merely because the bank is thin there; then nearest by rating, so the
+	// set still fills when the band is empty. `ratingBand` was declared for
+	// this and then never used — the query ordered by distance alone, which
+	// silently widened to the whole table.
 	rows, err := d.Query(`
 		SELECT puzzle_id FROM puzzle
 		WHERE puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
-		ORDER BY ABS(rating - ?) LIMIT ?`,
-		studentID, target, dailyCount-have)
+		ORDER BY (ABS(rating - ?) > ?), ABS(rating - ?) LIMIT ?`,
+		studentID, target, ratingBand, target, dailyCount-have)
 	if err != nil {
 		return err
 	}
@@ -220,6 +250,22 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 			d.Exec(`UPDATE puzzle_attempt SET solved = 1, solved_at = datetime('now')
 			        WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
 				studentID, puzzleID, today())
+
+			// The practice record is written here, from what the server just
+			// graded, rather than posted by the browser afterwards. The portal
+			// used to send its own `streak_count`, which made a child's flame a
+			// number their device chose.
+			var solvedToday int
+			if err := d.QueryRow(`SELECT COALESCE(SUM(solved),0) FROM puzzle_attempt
+			                      WHERE student_id = ? AND assigned_on = ?`,
+				studentID, today()).Scan(&solvedToday); err == nil {
+				// Minutes stay 0: nothing here measures how long a pupil sat
+				// with a puzzle, and inventing ten of them would put a number
+				// in front of a parent that no one counted.
+				if err := recordPractice(d, studentID, today(), solvedToday, 0, solvedToday*pointsPerPuzzle); err != nil {
+					log.Printf("puzzles: recording practice for %s: %v", studentID, err)
+				}
+			}
 		} else if !verdict.Correct {
 			d.Exec(`UPDATE puzzle_attempt SET wrong_moves = wrong_moves + 1
 			        WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
