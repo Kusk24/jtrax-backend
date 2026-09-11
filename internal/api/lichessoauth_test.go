@@ -502,3 +502,65 @@ func TestCallbackStillRefusesAnUnvalidatedOrigin(t *testing.T) {
 		t.Error("the attacker-supplied origin was reflected into the page")
 	}
 }
+
+/* ---- the phone ---- */
+
+// A native app has no origin. The grant has to be able to land back in the app
+// itself, which means the app's own scheme is a legitimate return target — and
+// a scheme with no host at all is exactly the shape the old string-trimming
+// allowlist could not hold.
+//
+// MOBILE_URL is set before the server is built, because that is when the
+// allowlist is read.
+func TestThePhoneCanBeReturnedTo(t *testing.T) {
+	t.Setenv("MOBILE_URL", "jtraxmobileapp://")
+	base, _ := newOAuthServer(t)
+	penny := asStudent(t, base, "penny@jca.ac.th")
+
+	deepLink := "jtraxmobileapp:///student/profile"
+	state, _ := startFlow(t, penny, map[string]string{"returnTo": deepLink})
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := noRedirect.Get(base.srv.URL + "/api/v1/lichess/oauth/callback?code=good&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	loc := res.Header.Get("Location")
+	if !strings.HasPrefix(loc, deepLink) {
+		t.Fatalf("did not return into the app: %q", loc)
+	}
+	// Only the outcome rides on the redirect. A token on a custom scheme would
+	// be readable by any app that claimed the same scheme.
+	if !strings.Contains(loc, "lichess=connected") {
+		t.Errorf("no outcome on the return: %q", loc)
+	}
+	for _, secret := range []string{"code=", "token", "access"} {
+		if strings.Contains(loc, secret) {
+			t.Errorf("the redirect carries %q: %q", secret, loc)
+		}
+	}
+}
+
+// Another app's scheme is not this app's scheme.
+func TestAnotherAppsSchemeIsStillRefused(t *testing.T) {
+	t.Setenv("MOBILE_URL", "jtraxmobileapp://")
+	base, _ := newOAuthServer(t)
+	penny := asStudent(t, base, "penny@jca.ac.th")
+	state, _ := startFlow(t, penny, map[string]string{"returnTo": "evilapp:///student/profile"})
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := noRedirect.Get(base.srv.URL + "/api/v1/lichess/oauth/callback?code=good&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("redirected into another app: %q", loc)
+	}
+}
