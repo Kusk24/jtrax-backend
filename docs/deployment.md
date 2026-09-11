@@ -202,6 +202,7 @@ code dependency:
 | `MAIL_FROM` | must be an address the provider let you verify |
 | `APP_URL` | public web-app URL — the link is `<APP_URL>/reset-password?token=…` |
 | `ADMIN_URL` | public admin-console URL, used for staff accounts |
+| `MOBILE_URL` | the phone app's scheme, `jtraxmobileapp://`. Only used to let a Lichess grant return into the app; leave it unset and the phone still links an account, it just ends on the outcome page instead of back in the app |
 
 **Leaving `SMTP_HOST` or `MAIL_FROM` unset is not an error.** The endpoint still
 answers normally and writes the reset link to the log instead, marked

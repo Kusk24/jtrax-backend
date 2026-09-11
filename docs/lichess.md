@@ -188,7 +188,7 @@ Reasons surfaced to players: `noPlayAccess`, `tokenExpired`, `challengeFailed`,
 | `LICHESS_TOKEN_KEY` | 32 bytes, base64 or hex. Without it play access is off. |
 | `PUBLIC_API_URL` | This server's own public URL — the OAuth `redirect_uri` is built from it and must match byte-for-byte between authorize and exchange. |
 | `LICHESS_CLIENT_ID` | Shown on Lichess's consent screen. Defaults to `jtrax.app`. |
-| `APP_URL`, `ADMIN_URL` | The only origins a callback may redirect back to. |
+| `APP_URL`, `ADMIN_URL`, `MOBILE_URL` | The only origins a callback may redirect back to. `MOBILE_URL` is the phone app's own scheme (`jtraxmobileapp://`) — a native app has no origin, so the callback returns into the app itself. Each is reduced to `scheme://host` before comparing, so a trailing slash or a path in the configured value does not stop it matching. |
 
 ## Things that bite
 
