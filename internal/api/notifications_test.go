@@ -324,3 +324,63 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// The targeted send: the desk previews who a credit-expiry reminder would
+// reach, narrows it to chosen students, and cannot widen it past the window.
+func TestCreditExpiryPreviewAndTargeting(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+
+	// Both children have a lot expiring next week; both belong to Sandy.
+	for _, ins := range []struct{ id, enr string }{
+		{"ctx_pen", "enr_penny"}, {"ctx_uri", "enr_uri"},
+	} {
+		if _, err := d.Exec(
+			`INSERT INTO credit_transaction (credit_transaction_id, enrollment_id, transaction_type, amount, expiry_date, transaction_date)
+			 VALUES (?,?,'purchase',10, date('now','+6 days'), date('now'))`, ins.id, ins.enr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	// The preview names both students and Sandy behind each, and sends nothing.
+	status, obj, _ := admin.do("POST", "/api/v1/notifications/credit-expiry?days=14",
+		map[string]any{"dry_run": true})
+	if status != 200 {
+		t.Fatalf("dry run: status %d", status)
+	}
+	targets, _ := obj["targets"].([]any)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets in the preview, got %v", obj["targets"])
+	}
+	first, _ := targets[0].(map[string]any)
+	if parents, _ := first["parents"].([]any); len(parents) != 1 || parents[0] != "Sandy Jones" {
+		t.Fatalf("preview should name the parent, got %v", first["parents"])
+	}
+	if first["expires"] == nil || first["expires"] == "" {
+		t.Fatalf("preview should carry the soonest expiry, got %v", first["expires"])
+	}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 0 {
+		t.Fatalf("dry run must not send, inbox has %d", got)
+	}
+
+	// Narrowed to Penny: one reminder arrives, not two, and the id outside the
+	// window is refused as skipped rather than silently sent to.
+	status, obj, _ = admin.do("POST", "/api/v1/notifications/credit-expiry?days=14",
+		map[string]any{"student_ids": []string{"stu_penny", "stu_nobody"}})
+	if status != 200 {
+		t.Fatalf("targeted send: status %d", status)
+	}
+	if n, _ := obj["students_notified"].(float64); n != 1 {
+		t.Fatalf("expected exactly 1 student notified, got %v", obj["students_notified"])
+	}
+	skipped, _ := obj["skipped"].([]any)
+	if len(skipped) != 1 || skipped[0] != "stu_nobody" {
+		t.Fatalf("the ineligible id should come back skipped, got %v", obj["skipped"])
+	}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 1 {
+		t.Fatalf("only Penny's reminder should have arrived, got %d", got)
+	}
+}
