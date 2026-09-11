@@ -424,9 +424,14 @@ func Registry() []*Resource {
 				{Name: "minutes_practiced", Kind: "int"},
 				{Name: "puzzles_completed", Kind: "int"},
 				{Name: "points_earned", Kind: "int"},
-				{Name: "streak_count", Kind: "int"},
+				// `streak_count` is deliberately not writable: the streak is
+				// derived from these dates now (see practice.go), so a stored
+				// number could only disagree with the truth.
 			},
-			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Student"},
+			// Pupils read their own practice but no longer write it — the
+			// server records a solve when it grades one. The portal used to
+			// post its own row, including the streak it thought it had.
+			ReadRoles: []string{"Parent", "Student"}, WriteRoles: nil,
 			Scope: map[string]ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),

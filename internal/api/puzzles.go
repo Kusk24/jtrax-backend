@@ -9,6 +9,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -30,6 +31,15 @@ const ratingBand = 250
 // defaultRating is used for a pupil with no FIDE rating yet, which is most of
 // them — a beginner-friendly floor rather than the middle of the distribution.
 const defaultRating = 800
+
+// pointsPerPuzzle is the score a solved puzzle is worth on the practice record.
+const pointsPerPuzzle = 10
+
+// maxPuzzleMinutes caps what one puzzle can contribute to a day's practice
+// time. A child who opens a puzzle and goes to dinner should not come back
+// having "practised" for three hours, and the tab left open overnight is the
+// ordinary case rather than the strange one.
+const maxPuzzleMinutes = 15
 
 type puzzleView struct {
 	PuzzleID string `json:"puzzleId"`
@@ -106,7 +116,27 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 			v.Wrong = wrong
 			out = append(out, v)
 		}
-		httpx.JSON(w, http.StatusOK, out)
+
+		// How many the pupil has never been set. Zero with a short set means the
+		// bank is spent for them, which the portal has to be able to say — a
+		// silently empty daily challenge reads as a broken app, and with sixty
+		// seeded puzzles this arrives on about the twentieth day.
+		var unseen int
+		if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle
+		                      WHERE puzzle_id NOT IN
+		                        (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)`,
+			studentID).Scan(&unseen); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			return
+		}
+
+		httpx.JSON(w, http.StatusOK, map[string]any{
+			"puzzles": out,
+			// True only when there is nothing left to give, not merely when
+			// today's set is short for some other reason.
+			"exhausted": len(out) < dailyCount && unseen == 0,
+			"unseen":    unseen,
+		})
 	}
 }
 
@@ -130,14 +160,20 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 		target = int(rating.Float64)
 	}
 
-	// Prefer puzzles near the pupil's rating that they have never been set
-	// before; fall back to anything unseen, then to anything at all, so a small
-	// puzzle table still fills a set rather than returning a short day.
+	// Never a puzzle this pupil has been set before — repeating one they have
+	// already solved is worth nothing, and repeating one they failed teaches
+	// them the answer rather than the idea.
+	//
+	// Within the band first, so a beginner is not handed a club player's fork
+	// merely because the bank is thin there; then nearest by rating, so the
+	// set still fills when the band is empty. `ratingBand` was declared for
+	// this and then never used — the query ordered by distance alone, which
+	// silently widened to the whole table.
 	rows, err := d.Query(`
 		SELECT puzzle_id FROM puzzle
 		WHERE puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
-		ORDER BY ABS(rating - ?) LIMIT ?`,
-		studentID, target, dailyCount-have)
+		ORDER BY (ABS(rating - ?) > ?), ABS(rating - ?) LIMIT ?`,
+		studentID, target, ratingBand, target, dailyCount-have)
 	if err != nil {
 		return err
 	}
@@ -220,6 +256,23 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 			d.Exec(`UPDATE puzzle_attempt SET solved = 1, solved_at = datetime('now')
 			        WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
 				studentID, puzzleID, today())
+
+			// The practice record is written here, from what the server just
+			// graded, rather than posted by the browser afterwards. The portal
+			// used to send its own `streak_count`, which made a child's flame a
+			// number their device chose.
+			var solvedToday int
+			if err := d.QueryRow(`SELECT COALESCE(SUM(solved),0) FROM puzzle_attempt
+			                      WHERE student_id = ? AND assigned_on = ?`,
+				studentID, today()).Scan(&solvedToday); err == nil {
+				// Measured, not guessed: the time this puzzle was open, added
+				// to what the day already had. The browser used to post a flat
+				// ten minutes whatever happened.
+				if err := addPracticeMinutes(d, studentID, today(), solvedToday,
+					minutesOnPuzzle(d, studentID, puzzleID), solvedToday*pointsPerPuzzle); err != nil {
+					log.Printf("puzzles: recording practice for %s: %v", studentID, err)
+				}
+			}
 		} else if !verdict.Correct {
 			d.Exec(`UPDATE puzzle_attempt SET wrong_moves = wrong_moves + 1
 			        WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
@@ -235,8 +288,62 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 	}
 }
 
+// handlePuzzleOpen stamps when a pupil started looking at a puzzle.
+//
+// The server writes its own clock, so the pupil supplies the moment but not
+// the time. Only the first open counts: coming back to a puzzle after a wrong
+// answer continues the same sitting rather than starting a new one.
+func handlePuzzleOpen(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		studentID, ok := studentOf(w, id)
+		if !ok {
+			return
+		}
+		// Scoped to today's set, so this cannot stamp a puzzle the pupil was
+		// never given.
+		res, err := d.Exec(`UPDATE puzzle_attempt SET opened_at = datetime('now')
+		                    WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?
+		                      AND opened_at IS NULL`,
+			studentID, r.PathValue("id"), today())
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not record", err)
+			return
+		}
+		n, _ := res.RowsAffected()
+		httpx.JSON(w, http.StatusOK, map[string]any{"started": n > 0})
+	}
+}
+
+// minutesOnPuzzle is how long the pupil had this puzzle open, in whole
+// minutes, capped. Zero when it was never opened through the app.
+func minutesOnPuzzle(d *sql.DB, studentID, puzzleID string) int {
+	var opened sql.NullString
+	if err := d.QueryRow(`SELECT opened_at FROM puzzle_attempt
+	                      WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?`,
+		studentID, puzzleID, today()).Scan(&opened); err != nil || !opened.Valid || opened.String == "" {
+		return 0
+	}
+	start, err := time.Parse(sqliteTimeLayout, opened.String)
+	if err != nil {
+		return 0
+	}
+	mins := int(time.Since(start).Minutes())
+	if mins < 0 {
+		return 0
+	}
+	if mins > maxPuzzleMinutes {
+		return maxPuzzleMinutes
+	}
+	return mins
+}
+
 func mountPuzzles(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d))
+	mux.HandleFunc("POST /api/v1/puzzles/{id}/open", handlePuzzleOpen(d))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/attempt", handlePuzzleAttempt(d))
 }
 

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -9,11 +10,26 @@ import (
 // dailySet fetches the signed-in pupil's puzzles for today.
 func dailySet(t *testing.T, c *client) []map[string]any {
 	t.Helper()
-	status, _, list := c.do("GET", "/api/v1/puzzles/daily", nil)
+	set, _ := dailyReply(t, c)
+	return set
+}
+
+// dailyReply also returns the envelope, which carries whether the pupil has
+// run out of puzzles they have never been set.
+func dailyReply(t *testing.T, c *client) ([]map[string]any, map[string]any) {
+	t.Helper()
+	status, obj, _ := c.do("GET", "/api/v1/puzzles/daily", nil)
 	if status != 200 {
 		t.Fatalf("daily puzzles: status %d", status)
 	}
-	return list
+	raw, _ := obj["puzzles"].([]any)
+	set := make([]map[string]any, 0, len(raw))
+	for _, row := range raw {
+		if m, ok := row.(map[string]any); ok {
+			set = append(set, m)
+		}
+	}
+	return set, obj
 }
 
 func TestPupilIsSetThreePuzzles(t *testing.T) {
@@ -267,5 +283,63 @@ func TestSigningInIsRequiredForPuzzles(t *testing.T) {
 	}
 	if status, _, _ := anon.do("POST", "/api/v1/puzzles/x/attempt", map[string]any{"move": "e2e4"}); status != 401 {
 		t.Errorf("anonymous attempt: status %d, want 401", status)
+	}
+}
+
+// A pupil is never set the same puzzle twice, and is told when that means
+// there is nothing left rather than being handed a silently empty day.
+func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	pupil := &client{t: t, srv: srv}
+	pupil.login("penny@jca.ac.th")
+
+	// Walk far enough to empty the seeded bank, back-dating each day's set so
+	// the next request counts as a new day.
+	seen := map[string]bool{}
+	var last map[string]any
+	for day := 0; day < 40; day++ {
+		set, obj := dailyReply(t, pupil)
+		last = obj
+		for _, p := range set {
+			id, _ := p["puzzleId"].(string)
+			if seen[id] {
+				t.Fatalf("puzzle %s was set twice (day %d)", id, day)
+			}
+			seen[id] = true
+		}
+		if len(set) == 0 {
+			break
+		}
+		if _, err := d.Exec(
+			`UPDATE puzzle_attempt SET assigned_on = date('now', ?)
+			  WHERE student_id = 'stu_penny' AND assigned_on = date('now')`,
+			fmt.Sprintf("-%d days", day+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(seen) == 0 {
+		t.Fatal("no puzzles were ever set")
+	}
+	if exhausted, _ := last["exhausted"].(bool); !exhausted {
+		t.Errorf("the bank is spent but exhausted = %v (unseen = %v)", last["exhausted"], last["unseen"])
+	}
+	if n, _ := last["unseen"].(float64); n != 0 {
+		t.Errorf("unseen = %v, want 0 once every puzzle has been set", last["unseen"])
+	}
+}
+
+// Puzzles come from inside the pupil's rating band while the band has any
+// left. Penny has no FIDE rating, so she is treated as 800.
+func TestPuzzlesComeFromTheRatingBandFirst(t *testing.T) {
+	pupil := &client{t: t, srv: newServer(t)}
+	pupil.login("penny@jca.ac.th")
+
+	for _, p := range dailySet(t, pupil) {
+		r, _ := p["rating"].(float64)
+		if diff := r - 800; diff > 250 || diff < -250 {
+			t.Errorf("puzzle rated %v is outside the ±250 band around 800", r)
+		}
 	}
 }

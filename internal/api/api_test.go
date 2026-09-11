@@ -191,15 +191,24 @@ func TestParentRegistersOwnChildOnly(t *testing.T) {
 	}
 }
 
+// A pupil reads their own practice and writes none of it.
+//
+// This used to assert the opposite — a student could POST their own practice
+// row, which is how the portal reported a streak it had made up. The record is
+// written by the grader now, so a child claiming practice is a 403 whether the
+// row is theirs or somebody else's.
 func TestStudentLogsPracticeForSelfOnly(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("penny@jca.ac.th")
+	if status, _, _ := c.do("GET", "/api/v1/practice-activities", nil); status != 200 {
+		t.Fatalf("own practice read: want 200, got %d", status)
+	}
 	status, _, _ := c.do("POST", "/api/v1/practice-activities", map[string]any{
 		"student_id": "stu_penny", "activity_date": "2026-05-11",
 		"minutes_practiced": 20, "puzzles_completed": 3,
 	})
-	if status != 201 {
-		t.Fatalf("own practice: want 201, got %d", status)
+	if status != 403 {
+		t.Fatalf("a pupil must not be able to claim practice: want 403, got %d", status)
 	}
 	status, _, _ = c.do("POST", "/api/v1/practice-activities", map[string]any{
 		"student_id": "stu_uri", "activity_date": "2026-05-11",

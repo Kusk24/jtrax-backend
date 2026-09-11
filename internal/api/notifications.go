@@ -10,6 +10,8 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -264,6 +266,14 @@ func handleUnregisterPush(d *sql.DB) http.HandlerFunc {
 // handleCreditExpiry notifies the parents of students whose credits expire
 // within `days` (default 14). It is manual and permission-gated to staff — the
 // academy wants a person to decide when this goes out, not a schedule.
+//
+// The optional JSON body refines the decision without moving the authority:
+// `{"dry_run": true}` answers "who would this reach" — each affected student
+// with their parents' names and the soonest expiry — and sends nothing;
+// `{"student_ids": [...]}` narrows a real send to those students. The list can
+// only shrink the eligible set: an id outside the expiry window is reported
+// back under `skipped`, never sent to, so the caller cannot make this warn a
+// family whose credits are fine.
 func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
@@ -281,27 +291,46 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			}
 		}
 
+		var req struct {
+			DryRun     bool     `json:"dry_run"`
+			StudentIDs []string `json:"student_ids"`
+		}
+		if r.Body != nil {
+			// An empty or absent body keeps the old behaviour: send to everyone.
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		}
+		if len(req.StudentIDs) > 500 {
+			httpx.Error(w, http.StatusUnprocessableEntity, "too many student ids", nil)
+			return
+		}
+		chosen := map[string]bool{}
+		for _, sid := range req.StudentIDs {
+			chosen[sid] = true
+		}
+
 		// Enrollments with credit expiring in the window, and the student behind
-		// them. Grouped so a student with several expiring lots is notified once.
+		// them. Grouped so a student with several expiring lots is notified once,
+		// about the soonest of them.
 		rows, err := d.Query(
-			`SELECT DISTINCT e.student_id, COALESCE(s.name,'')
+			`SELECT e.student_id, COALESCE(s.name,''), MIN(date(ct.expiry_date))
 			   FROM credit_transaction ct
 			   JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
 			   JOIN student s ON s.student_id = e.student_id
 			  WHERE ct.expiry_date IS NOT NULL
 			    AND date(ct.expiry_date) >= date('now')
-			    AND date(ct.expiry_date) <= date('now', '+' || ? || ' days')`, days)
+			    AND date(ct.expiry_date) <= date('now', '+' || ? || ' days')
+			  GROUP BY e.student_id, s.name`, days)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not find expiring credits", err)
 			return
 		}
 		defer rows.Close()
 
-		type target struct{ studentID, studentName string }
+		type target struct{ studentID, studentName, expires string }
 		var targets []target
 		for rows.Next() {
 			var t target
-			if err := rows.Scan(&t.studentID, &t.studentName); err != nil {
+			if err := rows.Scan(&t.studentID, &t.studentName, &t.expires); err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not read expiring credits", err)
 				return
 			}
@@ -309,8 +338,39 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 		}
 		rows.Close()
 
+		if req.DryRun {
+			list := []map[string]any{}
+			for _, t := range targets {
+				list = append(list, map[string]any{
+					"student_id":   t.studentID,
+					"student_name": t.studentName,
+					"parents":      parentNamesOf(d, t.studentID),
+					"expires":      t.expires,
+				})
+			}
+			httpx.JSON(w, http.StatusOK, map[string]any{"targets": list, "within_days": days})
+			return
+		}
+
+		// The selection can only narrow. Anything asked for that is not in the
+		// eligible set goes back as skipped, so the desk sees the refusal
+		// rather than believing a family was warned.
+		eligible := map[string]bool{}
+		for _, t := range targets {
+			eligible[t.studentID] = true
+		}
+		skipped := []string{}
+		for _, sid := range req.StudentIDs {
+			if !eligible[sid] {
+				skipped = append(skipped, sid)
+			}
+		}
+
 		sent := 0
 		for _, t := range targets {
+			if len(chosen) > 0 && !chosen[t.studentID] {
+				continue
+			}
 			recipients := parentAccountsOf(d, t.studentID)
 			if len(recipients) == 0 {
 				continue
@@ -335,7 +395,7 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			}
 			sent++
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "within_days": days})
+		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "within_days": days, "skipped": skipped})
 	}
 }
 
@@ -438,6 +498,28 @@ func parentAccountsOf(d *sql.DB, studentID string) []string {
 		}
 	}
 	return ids
+}
+
+// parentNamesOf is the display half of parentAccountsOf: the same join, but
+// returning names for a person to read in the send preview rather than
+// account ids to deliver to.
+func parentNamesOf(d *sql.DB, studentID string) []string {
+	rows, err := d.Query(
+		`SELECT p.name FROM student_parent sp
+		   JOIN parent p ON p.parent_id = sp.parent_id
+		  WHERE sp.student_id = ?`, studentID)
+	if err != nil {
+		return []string{}
+	}
+	defer rows.Close()
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func allStudentAndParentAccounts(d *sql.DB) []string {
