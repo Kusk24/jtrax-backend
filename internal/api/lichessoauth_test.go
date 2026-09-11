@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -430,5 +431,74 @@ func TestPlayStatusSaysWhenTheServerCannotDoRatedPlay(t *testing.T) {
 	}
 	if obj["configured"] != false {
 		t.Fatalf("want configured=false so the portal can say why, got %v", obj["configured"])
+	}
+}
+
+// What a pupil sees when APP_URL does not match the portal they started from.
+//
+// This happened in production: the grant succeeded, and the child was left
+// looking at `{"lichess":"taken"}`. The redirect is refused on purpose — we
+// will not send a browser to an unvalidated origin — but the page that
+// replaces it has to be readable by the person in front of it.
+func TestCallbackWithNoSafeReturnRendersAReadablePage(t *testing.T) {
+	base, _ := newOAuthServer(t)
+	penny := asStudent(t, base, "penny@jca.ac.th")
+
+	// The portal is served from somewhere APP_URL does not name, which is
+	// exactly the misconfiguration: returnTo is dropped at start time.
+	state, _ := startFlow(t, penny, map[string]string{"returnTo": "https://not-the-app.test/student"})
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := noRedirect.Get(base.srv.URL + "/api/v1/lichess/oauth/callback?code=good&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	page := string(body)
+
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("a browser lands here, so it must be a page: got %q", ct)
+	}
+	if strings.Contains(page, `{"lichess"`) {
+		t.Error("the raw outcome word was handed to the reader")
+	}
+	// The grant itself worked, so it should say so — in both of the academy's
+	// languages, since the server cannot know which one the pupil reads.
+	if !strings.Contains(page, "Lichess account is connected") {
+		t.Errorf("no plain-English outcome in the page: %s", page)
+	}
+	if !strings.Contains(page, "เชื่อมบัญชี Lichess") {
+		t.Errorf("no Thai outcome in the page: %s", page)
+	}
+	// And a way back, built from the origin the server does trust.
+	if !strings.Contains(page, "https://portal.test") {
+		t.Errorf("no link home: %s", page)
+	}
+}
+
+// The refusal to redirect anywhere unvalidated is the security property, and
+// it must survive the nicer page.
+func TestCallbackStillRefusesAnUnvalidatedOrigin(t *testing.T) {
+	base, _ := newOAuthServer(t)
+	penny := asStudent(t, base, "penny@jca.ac.th")
+	state, _ := startFlow(t, penny, map[string]string{"returnTo": "https://evil.test/steal"})
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := noRedirect.Get(base.srv.URL + "/api/v1/lichess/oauth/callback?code=good&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("redirected to an unvalidated origin: %q", loc)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if strings.Contains(string(body), "evil.test") {
+		t.Error("the attacker-supplied origin was reflected into the page")
 	}
 }

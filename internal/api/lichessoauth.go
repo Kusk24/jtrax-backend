@@ -29,6 +29,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"net/url"
@@ -185,6 +186,14 @@ func handleLichessOAuthStart(o *lichessOAuth) http.HandlerFunc {
 		}
 
 		returnTo := o.safeReturn(in.ReturnTo)
+		// Rejecting it here is what strands the pupil later: the callback has
+		// nothing to redirect to and falls back to a plain page. Silent until
+		// now, which made an APP_URL that does not match the portal's origin
+		// invisible until someone watched a child finish the grant.
+		if in.ReturnTo != "" && returnTo == "" {
+			log.Printf("lichess: returnTo %q is not an allowed origin (allowed=%v) — "+
+				"set APP_URL to the portal's own origin", in.ReturnTo, o.returnAllowed)
+		}
 		if _, err := o.db.Exec(`
 			INSERT INTO lichess_oauth_state (state, code_verifier, student_id, started_by, return_to)
 			VALUES (?, ?, ?, ?, ?)`,
@@ -448,13 +457,44 @@ func (o *lichessOAuth) startedByStudent(studentID, accountID string) bool {
 	return n > 0
 }
 
-// finish sends the browser home with an outcome it can render.
+// outcomeText is what each outcome means to the person reading it, for the
+// fallback page. The portal has its own copy of these for the normal path;
+// this exists because the fallback is shown when we cannot reach the portal,
+// and a child must never be handed the raw outcome word.
+var outcomeText = map[string]struct{ en, th string }{
+	"connected": {
+		"Your Lichess account is connected. You can close this page and go back to JTrax.",
+		"เชื่อมบัญชี Lichess เรียบร้อยแล้ว ปิดหน้านี้แล้วกลับไปที่ JTrax ได้เลย",
+	},
+	"declined": {
+		"You cancelled on Lichess, so nothing changed. You can close this page.",
+		"คุณยกเลิกที่ Lichess จึงไม่มีการเปลี่ยนแปลงใด ๆ ปิดหน้านี้ได้เลย",
+	},
+	"taken": {
+		"That Lichess account is already connected to another student. Ask the academy to unlink it first.",
+		"บัญชี Lichess นี้ถูกเชื่อมกับนักเรียนคนอื่นแล้ว กรุณาแจ้งสถาบันให้ยกเลิกการเชื่อมก่อน",
+	},
+	"failed": {
+		"Lichess could not be reached. Nothing changed — please try again.",
+		"ติดต่อ Lichess ไม่สำเร็จ ไม่มีการเปลี่ยนแปลงใด ๆ กรุณาลองใหม่อีกครั้ง",
+	},
+}
+
+// finish sends the browser home with an outcome the portal can render.
+//
+// The callback is a page a child is looking at, never a fetch, so both paths
+// here have to be readable. When there is nowhere safe to redirect — APP_URL
+// unset, or not matching the origin the pupil started from — this used to
+// answer `{"lichess":"taken"}`, which is a developer's output shown to a
+// twelve-year-old. It renders a plain page instead, and still refuses to
+// redirect anywhere unvalidated.
 func (o *lichessOAuth) finish(w http.ResponseWriter, r *http.Request, returnTo, outcome string) {
 	target := o.safeReturn(returnTo)
 	if target == "" {
-		// Nowhere safe to go: say it in plain text rather than redirect
-		// somewhere unvalidated.
-		httpx.JSON(w, http.StatusOK, map[string]any{"lichess": outcome})
+		log.Printf("lichess: no safe return for outcome %q (returnTo=%q, allowed=%v) — "+
+			"set APP_URL to the portal's own origin so pupils land back in the app",
+			outcome, returnTo, o.returnAllowed)
+		o.outcomePage(w, outcome)
 		return
 	}
 	sep := "?"
@@ -462,6 +502,33 @@ func (o *lichessOAuth) finish(w http.ResponseWriter, r *http.Request, returnTo, 
 		sep = "&"
 	}
 	http.Redirect(w, r, target+sep+"lichess="+url.QueryEscape(outcome), http.StatusSeeOther)
+}
+
+// outcomePage is the fallback: one sentence, in both of the academy's
+// languages, plus a way back if we know of one.
+func (o *lichessOAuth) outcomePage(w http.ResponseWriter, outcome string) {
+	text, ok := outcomeText[outcome]
+	if !ok {
+		text = outcomeText["failed"]
+	}
+	home := ""
+	if len(o.returnAllowed) > 0 && o.returnAllowed[0] != "" {
+		home = `<p style="margin-top:22px"><a href="` + html.EscapeString(o.returnAllowed[0]) +
+			`" style="color:#1b4fa0">Back to JTrax · กลับไปที่ JTrax</a></p>`
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// 200, not an error status: the grant itself resolved. What failed is only
+	// our ability to hand the pupil back to the page they came from.
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
+		`<title>JCA Chess Academy · Lichess</title>` +
+		`<body style="font-family:system-ui,sans-serif;display:flex;min-height:90vh;align-items:center;` +
+		`justify-content:center;text-align:center;padding:24px;color:#14213a">` +
+		`<div style="max-width:30em">` +
+		`<p style="font-size:19px;line-height:1.5">` + html.EscapeString(text.en) + `</p>` +
+		`<p style="font-size:17px;line-height:1.6;color:#5b6472">` + html.EscapeString(text.th) + `</p>` +
+		home + `</div>`))
 }
 
 /* ---- status ---- */
