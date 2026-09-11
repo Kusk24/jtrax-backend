@@ -252,6 +252,26 @@ func (o *lichessOAuth) authorizeFor(id *auth.Identity, want string) (string, err
 }
 
 // safeReturn keeps redirects inside the academy's own portals.
+// originOf reduces a configured URL to the `scheme://host` that safeReturn
+// compares against.
+//
+// Both sides are normalised the same way, which is the point. The old code
+// trimmed one trailing slash off the configured value and compared the string:
+// that left `APP_URL=https://portal/app` unable to match anything, and would
+// have turned a phone's `jtraxmobileapp://` — a scheme with no host at all —
+// into `jtraxmobileapp:/`, matching nothing either.
+func originOf(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 func (o *lichessOAuth) safeReturn(want string) string {
 	if want == "" {
 		return ""
@@ -654,9 +674,14 @@ func lichessOAuthFromEnv(d *sql.DB) *lichessOAuth {
 		o.clientID = "jtrax.app"
 	}
 
-	for _, v := range []string{os.Getenv("APP_URL"), os.Getenv("ADMIN_URL")} {
-		if v = strings.TrimSuffix(strings.TrimSpace(v), "/"); v != "" {
-			o.returnAllowed = append(o.returnAllowed, v)
+	// MOBILE_URL is the phone app's own scheme (`jtraxmobileapp://`). A native
+	// app has no origin to come back to, so the callback has to be allowed to
+	// redirect into the app itself — and only the outcome word rides on that
+	// redirect, never a token, so the scheme is a name to land on rather than
+	// anything worth intercepting.
+	for _, v := range []string{os.Getenv("APP_URL"), os.Getenv("ADMIN_URL"), os.Getenv("MOBILE_URL")} {
+		if allowed := originOf(v); allowed != "" {
+			o.returnAllowed = append(o.returnAllowed, allowed)
 		}
 	}
 	if o.box == nil || o.redirectURI == "" {
