@@ -61,6 +61,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)
 	mountPractice(mux, d)
+	mountHistory(mux, d)
 	mountLine(mux, d)
 	mountLichess(mux, d)
 	// Chess-results first: the public results route refreshes through its deps.
