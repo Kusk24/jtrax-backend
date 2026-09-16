@@ -60,6 +60,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	relay := mountGameRooms(mux, d)
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)
+	mountFreePlay(mux, d)
 	mountPractice(mux, d)
 	mountHistory(mux, d)
 	mountLine(mux, d)

@@ -92,7 +92,7 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 		rows, err := d.Query(`
 			SELECT p.puzzle_id, p.fen, p.rating, p.themes, p.moves, a.solved, a.wrong_moves
 			FROM puzzle_attempt a JOIN puzzle p ON p.puzzle_id = a.puzzle_id
-			WHERE a.student_id = ? AND a.assigned_on = ?
+			WHERE a.student_id = ? AND a.assigned_on = ? AND a.source = 'daily'
 			ORDER BY p.rating, p.puzzle_id`, studentID, day)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
@@ -143,7 +143,8 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 // assignDaily fills today's set if it is not already there.
 func assignDaily(d *sql.DB, studentID, day string) error {
 	var have int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle_attempt WHERE student_id = ? AND assigned_on = ?`,
+	if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle_attempt
+	                      WHERE student_id = ? AND assigned_on = ? AND source = 'daily'`,
 		studentID, day).Scan(&have); err != nil {
 		return err
 	}
