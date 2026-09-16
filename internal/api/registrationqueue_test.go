@@ -68,7 +68,11 @@ func TestRegistrationQueueShowsTheStudentMatch(t *testing.T) {
 	}
 }
 
-func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
+// Nothing is approved any more, so the thing approval used to do at the door
+// has to happen at the door: an entry arrives admitted, and the fee it was
+// quoted is the fee it is charged. A quote that never became a charge would
+// leave every public entry owing nothing on the desk's own roster.
+func TestAnEntryIsAdmittedAndChargedWithoutAnybodyDeciding(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 	_, reg, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
 		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
@@ -78,25 +82,39 @@ func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
-	regID := firstRegistrationID(t, staff, id)
-
-	if status, out, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/approve", nil); status != 200 {
-		t.Fatalf("approve: %d (%v)", status, out)
-	}
 	e := firstRegistration(t, staff, id)
+
+	// No staff call in between — this is the state it landed in.
 	if e["status"] != "Approved" {
-		t.Fatalf("want Approved, got %v", e["status"])
+		t.Fatalf("want Approved on arrival, got %v", e["status"])
 	}
-	// The quote becomes the charge, so the tournament's revenue is real.
 	if e["feeCharged"] != float64(400) {
 		t.Fatalf("want 400 charged, got %v", e["feeCharged"])
 	}
 }
 
-// Staff remain the authority on the price even when the student ID checked
-// out — a pupil who has since left is still a real id — so they can correct
-// the fee at the moment they approve.
-func TestApprovalCanOverrideTheClaimedDiscount(t *testing.T) {
+// The approve and reject endpoints are gone, not merely unused by the console.
+// A build of the console left running against a new server must not be able to
+// put a row back into a state nothing can resolve.
+func TestTheApprovalEndpointsAreGone(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	regID := firstRegistrationID(t, staff, id)
+
+	for _, verb := range []string{"approve", "reject"} {
+		if status, _, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/"+verb, nil); status != 404 {
+			t.Errorf("%s: want 404, got %d", verb, status)
+		}
+	}
+}
+
+// Staff remain the authority on the price — a pupil who has since left is
+// still a real id — but they correct it on the row now rather than at a
+// decision that no longer exists.
+func TestStaffCanStillCorrectTheFee(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
 		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
@@ -105,18 +123,18 @@ func TestApprovalCanOverrideTheClaimedDiscount(t *testing.T) {
 	staff.login("admin@jca.ac.th")
 	regID := firstRegistrationID(t, staff, id)
 
-	// The discount should not have applied: charge the full fee.
-	if status, out, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/approve",
-		map[string]any{"fee": 500}); status != 200 {
-		t.Fatalf("approve with override: %d (%v)", status, out)
+	if status, out, _ := staff.do("PATCH", "/api/v1/tournament-registrations/"+regID,
+		map[string]any{"fee_charged": 500}); status != 200 {
+		t.Fatalf("correcting the fee: %d (%v)", status, out)
 	}
-	if e := firstRegistration(t, staff, id); e["feeCharged"] != float64(500) {
-		t.Fatalf("want the override charged, got %v", e["feeCharged"])
+	if got := firstRegistration(t, staff, id)["feeCharged"]; got != float64(500) {
+		t.Fatalf("want 500 after correction, got %v", got)
 	}
 }
 
-// Two people working the same queue must not silently undo each other.
-func TestARegistrationCannotBeDecidedTwice(t *testing.T) {
+// And withdrawing is how somebody comes back out of a tournament, since
+// rejecting them is no longer a thing that can happen.
+func TestStaffCanWithdrawAnEntry(t *testing.T) {
 	pub, id := openEvent(t, nil)
 	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
 
@@ -124,32 +142,12 @@ func TestARegistrationCannotBeDecidedTwice(t *testing.T) {
 	staff.login("admin@jca.ac.th")
 	regID := firstRegistrationID(t, staff, id)
 
-	if status, _, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/approve", nil); status != 200 {
-		t.Fatalf("first approve should succeed")
+	if status, out, _ := staff.do("PATCH", "/api/v1/tournament-registrations/"+regID,
+		map[string]any{"status": "Withdrawn"}); status != 200 {
+		t.Fatalf("withdrawing: %d (%v)", status, out)
 	}
-	if status, _, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/reject", nil); status != 409 {
-		t.Fatalf("second decision: want 409, got %d", status)
-	}
-}
-
-// Approving past the limit would let the desk walk through the capacity rule
-// the public path enforces, and find out on the day.
-func TestApprovalStopsAtCapacity(t *testing.T) {
-	pub, id := openEvent(t, map[string]any{"max_participants": 1})
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
-
-	staff := &client{t: t, srv: pub.srv}
-	staff.login("admin@jca.ac.th")
-	regID := firstRegistrationID(t, staff, id)
-	staff.do("POST", "/api/v1/tournaments/registrations/"+regID+"/approve", nil)
-
-	// A second entry added directly by staff, then approved past the limit.
-	_, extra, _ := staff.do("POST", "/api/v1/tournament-registrations", map[string]any{
-		"tournament_id": id, "participant_name": "Walk-in", "status": "Pending",
-	})
-	second := extra["tournament_registration_id"].(string)
-	if status, _, _ := staff.do("POST", "/api/v1/tournaments/registrations/"+second+"/approve", nil); status != 409 {
-		t.Fatalf("approving past capacity: want 409, got %d", status)
+	if got := firstRegistration(t, staff, id)["status"]; got != "Withdrawn" {
+		t.Fatalf("want Withdrawn, got %v", got)
 	}
 }
 

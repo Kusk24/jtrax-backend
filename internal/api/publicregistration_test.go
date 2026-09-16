@@ -53,10 +53,14 @@ func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 	if status != 201 {
 		t.Fatalf("register: want 201, got %d (%v)", status, out)
 	}
-	// Pending, not Approved: a stranger's submission is a request, and the desk
-	// still has to say yes.
-	if out["status"] != "Pending" {
-		t.Fatalf("want Pending, got %v", out["status"])
+	// Approved on arrival: the academy takes every entry, so there is no queue
+	// left for a submission to wait in.
+	if out["status"] != "Approved" {
+		t.Fatalf("want Approved, got %v", out["status"])
+	}
+	// And the portal is told not to promise a confirmation that never comes.
+	if out["needsApproval"] != false {
+		t.Fatalf("want needsApproval false, got %v", out["needsApproval"])
 	}
 	if out["feeQuoted"] != float64(500) {
 		t.Fatalf("want the full fee, got %v", out["feeQuoted"])

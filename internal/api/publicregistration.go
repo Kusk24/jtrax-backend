@@ -2,15 +2,28 @@
 //
 // Everything here is unauthenticated, which makes it the widest door in the
 // product and the only place where a row is created by somebody the academy has
-// never met. Four things hold that door:
+// never met. Three things hold that door:
 //
 //   - a tournament is closed until an organiser opens it (public_registration),
 //     exactly like results_public;
-//   - every submission lands as Pending and a member of staff approves it, so
-//     nothing a stranger types becomes a participant on its own;
 //   - the deadline and the capacity are enforced inside the write transaction,
 //     not read beforehand and hoped about;
 //   - it is rate-limited, and one email may hold one live place per event.
+//
+// # The fourth used to be approval, and is gone on purpose
+//
+// A submission used to land as Pending and wait for a member of staff, so
+// nothing a stranger typed became a participant on its own. The academy takes
+// every entry, so that queue was a step that only ever ended one way — and an
+// unworked queue is worse than none, because a place nobody has confirmed is
+// indistinguishable from a place nobody has looked at.
+//
+// What it cost is real and worth naming: a stranger's submission is now a
+// participant immediately. What replaces it is validation at the door rather
+// than judgement behind it — the category must belong to this event, the age
+// rule in the category's name is enforced against the given date of birth, and
+// a claimed student discount must name a student that exists. The desk's
+// remaining power is to correct a fee or withdraw an entry, not to admit one.
 //
 // # Why the discount is claimed rather than detected
 //
@@ -18,9 +31,9 @@
 // that claim alone. The server does look their email up against the academy's
 // own records, but it never says so in the reply: if the discount appeared only
 // for addresses that matched, this endpoint would be a way to test whether a
-// given child is a pupil here, one guess at a time. The match is passed to the
-// approval queue instead, where it belongs — staff see "claimed, and we found a
-// matching student" or "claimed, no match" and decide.
+// given child is a pupil here, one guess at a time. The match is surfaced only
+// in the staff roster, where "claimed, and we found a matching student" versus
+// "claimed, no match" is a thing the desk can act on afterwards.
 package api
 
 import (
@@ -414,15 +427,20 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		}
 
 		regID := newID("treg")
+		// fee_charged is set here because approving used to set it, and there
+		// is no approving any more. A quote that never becomes a charge would
+		// leave every public entry owing nothing on the desk's own roster —
+		// the two columns still differ in meaning, and staff may still correct
+		// fee_charged afterwards, but its starting value is what we quoted.
 		_, err = tx.Exec(`INSERT INTO tournament_registration (
 			tournament_registration_id, tournament_id, student_id, participant_name,
 			participant_date_of_birth, tournament_category_id, registered_at,
-			status, source, contact_email, contact_phone, fee_quoted,
+			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
 			student_discount_applied
-		) VALUES (?,?,?,?,?,?,?,'Pending','Public',?,?,?,?)`,
+		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?)`,
 			regID, tournamentID, studentID, in.Name,
 			nullIfEmpty(in.DateOfBirth), categoryID, sqliteNow(),
-			in.Email, in.Phone, fee, boolToInt(in.IsStudent))
+			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent))
 		if err != nil {
 			// The partial unique indexes are the last word on duplicates, and
 			// they are reached rather than pre-checked so that two simultaneous
@@ -442,11 +460,13 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 
 		httpx.JSON(w, http.StatusCreated, map[string]any{
 			"registered": true,
-			"status":     "Pending",
+			"status":     "Approved",
 			"feeQuoted":  fee,
-			// Said plainly so nobody turns up on the day assuming a place: the
-			// desk still has to confirm it.
-			"needsApproval": true,
+			// Kept, and false, rather than dropped: a portal still running the
+			// previous build reads this to decide whether to say "we will
+			// confirm your place". Removing the key would leave it undefined,
+			// which is falsey by accident rather than on purpose.
+			"needsApproval": false,
 		})
 	}
 }
