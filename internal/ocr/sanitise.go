@@ -97,3 +97,67 @@ func keepKnownCourses(in []string) []string {
 	}
 	return out
 }
+
+// SanitiseIDCard is Sanitise for an identity document.
+//
+// One rule the form reader does not need: a Buddhist-era year. Thai cards print
+// 2540 where the entry form means 1997, and the prompt asks for the conversion —
+// but a model that answers 2540-05-02 anyway would otherwise produce a child
+// aged minus five hundred, which every age check then refuses for a reason
+// nobody could act on. Converting here rather than trusting the prompt costs a
+// subtraction and removes a whole class of unexplainable rejection.
+func SanitiseIDCard(c *IDCard) *IDCard {
+	if c == nil {
+		return nil
+	}
+	for _, p := range []*Field{&c.FirstName, &c.LastName, &c.DateOfBirth} {
+		clean(p)
+	}
+
+	c.DateOfBirth.Value = toCommonEra(c.DateOfBirth.Value)
+	if c.DateOfBirth.Value != "" && !isISODate(c.DateOfBirth.Value) {
+		c.DateOfBirth.Confidence = 0
+	}
+
+	switch strings.ToLower(strings.TrimSpace(c.DocumentType)) {
+	case "thai-id", "thai id", "thaiid":
+		c.DocumentType = "thai-id"
+	case "passport":
+		c.DocumentType = "passport"
+	default:
+		// Not a rejection: an entrant holding something we did not classify
+		// still enters. The console just does not claim to know what it saw.
+		c.DocumentType = ""
+	}
+	return c
+}
+
+// toCommonEra rewrites a Buddhist-era year in an otherwise ISO date.
+//
+// Only touches years that cannot be a common-era birth date anyway — 2500 BE is
+// 1957 CE, and nobody entering a junior chess tournament was born in 2500 CE —
+// so a date the model already converted is left exactly as it is.
+func toCommonEra(iso string) string {
+	if !isISODate(iso) {
+		return iso
+	}
+	year := 0
+	for _, ch := range iso[:4] {
+		year = year*10 + int(ch-'0')
+	}
+	if year < 2500 {
+		return iso
+	}
+	converted := year - 543
+	return itoa4(converted) + iso[4:]
+}
+
+// itoa4 formats a four-digit year without pulling in strconv for one call.
+func itoa4(n int) string {
+	return string([]byte{
+		byte('0' + n/1000%10),
+		byte('0' + n/100%10),
+		byte('0' + n/10%10),
+		byte('0' + n%10),
+	})
+}

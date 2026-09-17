@@ -408,6 +408,18 @@ func Registry() []*Resource {
 				{Name: "contact_phone", Kind: "text"},
 				{Name: "fee_quoted", Kind: "real"},
 				{Name: "student_discount_applied", Kind: "bool"},
+				// Called across the hall and printed on the pairing card.
+				{Name: "nickname", Kind: "text"},
+				// As claimed on the entry form. Kept alongside the date of
+				// birth rather than derived from it: the interesting case for
+				// an age-limited group is when the two disagree.
+				{Name: "participant_age", Kind: "int"},
+			},
+			// terms_accepted_at is readable and not writable. It is a record of
+			// consent, and a consent record staff can set by hand is one that
+			// cannot be relied on for the question it exists to answer.
+			Derived: []Derived{
+				{Name: "terms_accepted_at", Expr: "terms_accepted_at"},
 			},
 			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Parent"},
 			Scope: map[string]ScopeFn{
