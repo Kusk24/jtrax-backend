@@ -109,3 +109,70 @@ func TestNewFromConfig(t *testing.T) {
 		t.Error("no provider configured should be nil, not a broken provider")
 	}
 }
+
+/* An identity document, which the form reader's rules do not cover. */
+
+func TestIDCardConvertsABuddhistEraYear(t *testing.T) {
+	// A Thai card prints 2540 where the entry form means 1997. The prompt asks
+	// for the conversion; a model that answers in BE anyway would otherwise
+	// produce a child aged minus five hundred, and every age check would refuse
+	// the entry for a reason nobody could act on.
+	got := SanitiseIDCard(&IDCard{
+		DateOfBirth: Field{Value: "2540-05-02", Confidence: 0.9},
+	})
+	if got.DateOfBirth.Value != "1997-05-02" {
+		t.Fatalf("dateOfBirth = %q, want 1997-05-02", got.DateOfBirth.Value)
+	}
+	// Converting is not a reason to doubt the characters that were read.
+	if got.DateOfBirth.Confidence != 0.9 {
+		t.Errorf("confidence = %v, want it untouched", got.DateOfBirth.Confidence)
+	}
+}
+
+func TestIDCardLeavesACommonEraYearAlone(t *testing.T) {
+	// The ordinary case once the model has done what it was asked.
+	for _, in := range []string{"1997-05-02", "2016-01-31", "2018-12-01"} {
+		got := SanitiseIDCard(&IDCard{DateOfBirth: Field{Value: in, Confidence: 1}})
+		if got.DateOfBirth.Value != in {
+			t.Errorf("%s became %s", in, got.DateOfBirth.Value)
+		}
+	}
+}
+
+func TestIDCardDistrustsADateItCannotParse(t *testing.T) {
+	// Kept, so the entrant can see and correct it — but not shown as read.
+	got := SanitiseIDCard(&IDCard{
+		DateOfBirth: Field{Value: "02/05/2540", Confidence: 0.8},
+	})
+	if got.DateOfBirth.Value != "02/05/2540" {
+		t.Errorf("an unparseable date should be kept, got %q", got.DateOfBirth.Value)
+	}
+	if got.DateOfBirth.Confidence != 0 {
+		t.Errorf("confidence = %v, want 0", got.DateOfBirth.Confidence)
+	}
+}
+
+func TestIDCardOnlyClaimsADocumentTypeItKnows(t *testing.T) {
+	for in, want := range map[string]string{
+		"thai-id": "thai-id", "Thai ID": "thai-id", "passport": "passport",
+		"PASSPORT": "passport", "driving licence": "", "": "",
+	} {
+		got := SanitiseIDCard(&IDCard{DocumentType: in})
+		if got.DocumentType != want {
+			t.Errorf("documentType %q = %q, want %q", in, got.DocumentType, want)
+		}
+	}
+}
+
+func TestIDCardDoesNotReportConfidenceInNothing(t *testing.T) {
+	got := SanitiseIDCard(&IDCard{
+		FirstName: Field{Value: "   ", Confidence: 0.95},
+		LastName:  Field{Value: " Jaidee ", Confidence: 1.4},
+	})
+	if got.FirstName.Confidence != 0 {
+		t.Errorf("an empty answer is not a confident reading of nothing: %v", got.FirstName)
+	}
+	if got.LastName.Value != "Jaidee" || got.LastName.Confidence != 1 {
+		t.Errorf("lastName = %+v, want trimmed and clamped", got.LastName)
+	}
+}

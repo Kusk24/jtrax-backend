@@ -73,7 +73,7 @@ func linkedResultsFor(d *sql.DB, tournamentID string) (*linkedResults, error) {
 //
 // A chessfest runs OPEN, U18, U12, U10 and U08 on one day, and the arbiter
 // publishes each as its own chess-results event — so the group is the unit that
-// has a link, not the tournament. See migration 0033.
+// has a link, not the tournament. See migration 0037.
 func linkedResultsForCategory(d *sql.DB, categoryID string) (*linkedResults, error) {
 	var crID sql.NullInt64
 	if err := d.QueryRow(`SELECT chess_results_id FROM tournament_category

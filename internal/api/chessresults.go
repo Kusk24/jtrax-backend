@@ -680,7 +680,7 @@ func mountChessResults(mux *http.ServeMux, d *sql.DB) *chessResultsDeps {
 
 	// Per age group. A chessfest runs OPEN, U18, U12, U10 and U08 on one day
 	// and the arbiter publishes each as its own event, so the group is what
-	// carries a link — see migration 0033. Mounted under /categories/ rather
+	// carries a link — see migration 0037. Mounted under /categories/ rather
 	// than nested beneath a tournament id: a category id is unique on its own,
 	// and a route carrying both would let the two disagree.
 	mux.HandleFunc("GET "+t+"/categories/{categoryId}/chess-results", handleGetCategoryLink(deps))

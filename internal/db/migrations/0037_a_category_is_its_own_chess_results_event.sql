@@ -1,4 +1,4 @@
--- 0033 — each age group is its own chess-results.com event.
+-- 0037 — each age group is its own chess-results.com event.
 --
 -- 0015 put chess_results_id on the tournament, on the assumption that one of
 -- the academy's tournaments is one event over there. It is not. A JCA chessfest
