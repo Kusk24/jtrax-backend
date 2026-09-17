@@ -677,5 +677,14 @@ func mountChessResults(mux *http.ServeMux, d *sql.DB) *chessResultsDeps {
 	mux.HandleFunc("POST "+t+"/{id}/chess-results", httpx.RateLimit(10, handleLinkChessResults(deps)))
 	mux.HandleFunc("DELETE "+t+"/{id}/chess-results", handleUnlinkChessResults(deps))
 	mux.HandleFunc("POST "+t+"/{id}/chess-results/refresh", httpx.RateLimit(10, handleRefreshTournamentResults(deps)))
+
+	// Per age group. A chessfest runs OPEN, U18, U12, U10 and U08 on one day
+	// and the arbiter publishes each as its own event, so the group is what
+	// carries a link — see migration 0033. Mounted under /categories/ rather
+	// than nested beneath a tournament id: a category id is unique on its own,
+	// and a route carrying both would let the two disagree.
+	mux.HandleFunc("GET "+t+"/categories/{categoryId}/chess-results", handleGetCategoryLink(deps))
+	mux.HandleFunc("POST "+t+"/categories/{categoryId}/chess-results", httpx.RateLimit(10, handleLinkCategory(deps)))
+	mux.HandleFunc("DELETE "+t+"/categories/{categoryId}/chess-results", handleUnlinkCategory(deps))
 	return deps
 }
