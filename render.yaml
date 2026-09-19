@@ -71,3 +71,15 @@ services:
       # e.g. https://jtrax-backend.onrender.com
       - key: PUBLIC_API_URL
         sync: false
+
+      # Registration-form scanning. Without OCR_PROVIDER the scan endpoint
+      # answers 503 and the console says so, which is a supported state: staff
+      # type the form in instead. Set both to switch it on.
+      #   gemini: key from https://aistudio.google.com/apikey
+      # The free tier's terms allow Google to use what is sent to improve their
+      # products, and what is sent is a photograph of a child's identity
+      # details. A paid key changes that; see "docs/JTrax - OCR setup.pdf".
+      - key: OCR_PROVIDER
+        sync: false
+      - key: OCR_API_KEY
+        sync: false
