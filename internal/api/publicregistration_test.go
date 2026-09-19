@@ -2,9 +2,12 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,10 +49,54 @@ func entry(over map[string]any) map[string]any {
 	return body
 }
 
+/* A one-pixel JPEG — real magic bytes, so http.DetectContentType reads it as
+   image/jpeg the same way a phone photo would, without shipping an actual
+   photo into the test suite. */
+var testIDPhoto = []byte{
+	0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+	0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+	0x00, 0xFF, 0xD9,
+}
+
+// register submits a public registration the only way the endpoint accepts
+// since 0036: multipart/form-data, with an ID photo required alongside the
+// fields `entry` already builds. `client.do` posts JSON and cannot express
+// this, so this is `TestRegulationLifecycle`'s own hand-built-request pattern,
+// generalised to carry fields plus a file and decode the reply the same way
+// `do` does.
+func register(t *testing.T, c *client, tournamentID string, fields map[string]any, attachDocument bool) (int, map[string]any) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if b, ok := v.(bool); ok {
+			mw.WriteField(k, strconv.FormatBool(b))
+			continue
+		}
+		mw.WriteField(k, fmt.Sprint(v))
+	}
+	if attachDocument {
+		fw, _ := mw.CreateFormFile("idDocument", "id.jpg")
+		fw.Write(testIDPhoto)
+	}
+	mw.Close()
+	req, _ := http.NewRequest(
+		"POST", c.srv.URL+"/api/v1/public/tournaments/"+tournamentID+"/register", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(res.Body).Decode(&out)
+	return res.StatusCode, out
+}
+
 func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
-	status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, out := register(t, pub, id, entry(nil), true)
 	if status != 201 {
 		t.Fatalf("register: want 201, got %d (%v)", status, out)
 	}
@@ -68,7 +115,7 @@ func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 func TestPublicRegistrationIsClosedUntilOpened(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"public_registration": false})
 
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, _ := register(t, pub, id, entry(nil), true)
 	if status != 404 {
 		t.Fatalf("closed event: want 404, got %d", status)
 	}
@@ -82,19 +129,18 @@ func TestPublicRegistrationAppliesTheStudentDiscount(t *testing.T) {
 
 	// The claim alone is no longer enough — the discount needs an ID the
 	// academy can find.
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true}))
+	status, _ := register(t, pub, id, entry(map[string]any{"isStudent": true}), true)
 	if status != 400 {
 		t.Fatalf("claim without an ID: want 400, got %d", status)
 	}
-	status, _, _ = pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_nobody"}))
+	status, _ = register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_nobody"}), true)
 	if status != 400 {
 		t.Fatalf("claim with a made-up ID: want 400, got %d", status)
 	}
 
-	status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+	status, out := register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 	if status != 201 {
 		t.Fatalf("register: %d (%v)", status, out)
 	}
@@ -114,10 +160,8 @@ func TestPublicRegistrationRevealsNothingAboutWhoIsAStudent(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 
 	// penny@jca.ac.th is a seeded student account; the other address is not.
-	_, known, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "penny@jca.ac.th"}))
-	_, unknown, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "nobody@example.com"}))
+	_, known := register(t, pub, id, entry(map[string]any{"email": "penny@jca.ac.th"}), true)
+	_, unknown := register(t, pub, id, entry(map[string]any{"email": "nobody@example.com"}), true)
 
 	for _, k := range []string{"status", "feeQuoted", "needsApproval", "registered"} {
 		if known[k] != unknown[k] {
@@ -130,11 +174,10 @@ func TestPublicRegistrationRevealsNothingAboutWhoIsAStudent(t *testing.T) {
 func TestPublicRegistrationRefusesTheSameEmailTwice(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); status != 201 {
+	if status, out := register(t, pub, id, entry(nil), true); status != 201 {
 		t.Fatalf("first: %d (%v)", status, out)
 	}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"name": "Somebody Else"}))
+	status, _ := register(t, pub, id, entry(map[string]any{"name": "Somebody Else"}), true)
 	if status != 409 {
 		t.Fatalf("duplicate email: want 409, got %d", status)
 	}
@@ -143,11 +186,10 @@ func TestPublicRegistrationRefusesTheSameEmailTwice(t *testing.T) {
 func TestPublicRegistrationStopsAtCapacity(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"max_participants": 1})
 
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); status != 201 {
+	if status, out := register(t, pub, id, entry(nil), true); status != 201 {
 		t.Fatalf("first: %d (%v)", status, out)
 	}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "second@example.com"}))
+	status, _ := register(t, pub, id, entry(map[string]any{"email": "second@example.com"}), true)
 	if status != 409 {
 		t.Fatalf("full event: want 409, got %d", status)
 	}
@@ -156,7 +198,7 @@ func TestPublicRegistrationStopsAtCapacity(t *testing.T) {
 func TestPublicRegistrationStopsAfterTheDeadline(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"registration_deadline": "2020-01-01"})
 
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, _ := register(t, pub, id, entry(nil), true)
 	if status != 409 {
 		t.Fatalf("past deadline: want 409, got %d", status)
 	}
@@ -180,8 +222,8 @@ func TestPublicRegistrationRefusesAForeignCategory(t *testing.T) {
 	})
 
 	pub := &client{t: t, srv: srv}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+mine+"/register",
-		entry(map[string]any{"categoryId": cat["tournament_category_id"]}))
+	status, _ := register(t, pub, mine,
+		entry(map[string]any{"categoryId": cat["tournament_category_id"]}), true)
 	if status != 400 {
 		t.Fatalf("foreign category: want 400, got %d", status)
 	}
@@ -200,7 +242,7 @@ func TestPublicRegistrationValidatesTheBoundary(t *testing.T) {
 		{"not an email", entry(map[string]any{"email": "not-an-address"})},
 		{"impossible birthday", entry(map[string]any{"dateOfBirth": "31/02/2018"})},
 	} {
-		status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", tc.body)
+		status, _ := register(t, pub, id, tc.body, true)
 		if status != 400 {
 			t.Errorf("%s: want 400, got %d", tc.name, status)
 		}
@@ -251,7 +293,7 @@ func TestEarlyBirdWindow(t *testing.T) {
 		if tour["earlyBirdActive"] != true || tour["fee"] != float64(300) {
 			t.Fatalf("window open: %v / %v", tour["earlyBirdActive"], tour["fee"])
 		}
-		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+		status, out := register(t, pub, id, entry(nil), true)
 		if status != 201 || out["feeQuoted"] != float64(300) {
 			t.Fatalf("outsider in the window: %d, fee %v", status, out["feeQuoted"])
 		}
@@ -263,8 +305,8 @@ func TestEarlyBirdWindow(t *testing.T) {
 		pub, id := openEvent(t, map[string]any{
 			"early_bird_fee": 300, "early_bird_deadline": future, "student_discount_pct": 20,
 		})
-		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-			entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+		status, out := register(t, pub, id,
+			entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 		if status != 201 || out["feeQuoted"] != float64(400) {
 			t.Fatalf("student in the window: %d, fee %v", status, out["feeQuoted"])
 		}
@@ -294,27 +336,29 @@ func TestCategoryAgeRule(t *testing.T) {
 		t.Fatalf("create category: %d (%v)", status, cat)
 	}
 	catID := cat["tournament_category_id"].(string)
-	register := func(dob string) int {
+	// Named apart from the package-level register() it calls, or this
+	// shadows it for the rest of the test.
+	registerAt := func(dob string) int {
 		body := entry(map[string]any{"categoryId": catID})
 		if dob != "" {
 			body["dateOfBirth"] = dob
 		}
 		// A fresh email per attempt so the duplicate guard stays out of the way.
 		body["email"] = dob + "x@example.com"
-		s, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body)
+		s, _ := register(t, pub, id, body, true)
 		return s
 	}
 
 	// No date of birth: the category needs one.
-	if got := register(""); got != 400 {
+	if got := registerAt(""); got != 400 {
 		t.Fatalf("age category without DOB: want 400, got %d", got)
 	}
 	// Nine on the start day — too old for under-8.
-	if got := register("2017-06-15"); got != 400 {
+	if got := registerAt("2017-06-15"); got != 400 {
 		t.Fatalf("nine-year-old in U8: want 400, got %d", got)
 	}
 	// Seven on the start day — allowed.
-	if got := register("2019-06-15"); got != 201 {
+	if got := registerAt("2019-06-15"); got != 201 {
 		t.Fatalf("seven-year-old in U8: want 201, got %d", got)
 	}
 }
@@ -387,5 +431,65 @@ func TestRegulationLifecycle(t *testing.T) {
 	// …but staff still see it.
 	if status, _, _ := staff.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
 		t.Fatalf("private regulation, staff: want 200, got %d", status)
+	}
+}
+
+// A venue's map link is stored once, at tournament creation (see 0037), and
+// read back exactly as given rather than recomputed — so a stranger reading
+// the public listing sees the same link the desk set.
+func TestPublicTournamentCarriesTheVenueMapLink(t *testing.T) {
+	mapURL := "https://www.google.com/maps/search/?api=1&query=Wellington+College+Bangkok"
+	pub, id := openEvent(t, map[string]any{"venue_map_url": mapURL})
+
+	status, out, _ := pub.do("GET", "/api/v1/public/tournaments/"+id, nil)
+	if status != 200 {
+		t.Fatalf("get: %d (%v)", status, out)
+	}
+	tour, _ := out["tournament"].(map[string]any)
+	if tour["venueMapUrl"] != mapURL {
+		t.Fatalf("want venueMapUrl %q, got %v", mapURL, tour["venueMapUrl"])
+	}
+}
+
+// The ID photo is not optional paperwork — see 0036 — so a registration
+// submitted without one must be refused outright rather than stored with
+// nothing for the desk to check a face against.
+func TestPublicRegistrationRequiresTheIDDocument(t *testing.T) {
+	pub, id := openEvent(t, nil)
+
+	status, out := register(t, pub, id, entry(nil), false)
+	if status != 400 {
+		t.Fatalf("no attachment: want 400, got %d (%v)", status, out)
+	}
+}
+
+// A stranger's national ID or passport photo exists so staff can check a face
+// at the desk, and for nobody else — there is no version of "public when the
+// tournament is public" that is right for this file (see 0036).
+func TestRegistrationDocumentIsStaffOnly(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	status, reg := register(t, pub, id, entry(nil), true)
+	if status != 201 {
+		t.Fatalf("register: want 201, got %d (%v)", status, reg)
+	}
+
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	regID := firstRegistrationID(t, staff, id)
+
+	if res, err := http.Get(pub.srv.URL + "/api/v1/tournaments/registrations/" + regID + "/document"); err != nil {
+		t.Fatal(err)
+	} else if res.StatusCode != 401 && res.StatusCode != 403 {
+		t.Fatalf("anonymous read: want 401/403, got %d", res.StatusCode)
+	}
+
+	parent := &client{t: t, srv: pub.srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status != 403 {
+		t.Fatalf("parent read: want 403, got %d", status)
+	}
+
+	if status, _, _ := staff.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status != 200 {
+		t.Fatalf("staff read: want 200, got %d", status)
 	}
 }

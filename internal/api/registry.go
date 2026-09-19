@@ -259,7 +259,11 @@ func Registry() []*Resource {
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "credit_amount", Kind: "real", Required: true},
 				{Name: "standard_price", Kind: "real", Required: true},
-				{Name: "validity_days", Kind: "int", Required: true},
+				// Optional since 0035: a package the office never wants to
+				// expire — a founding rate, a free trial — has nothing
+				// truthful to put here. Absent reads as "never", the same as
+				// 0 always has downstream (grantPurchasedCredits, expiryFrom).
+				{Name: "validity_days", Kind: "int"},
 				// Set when the academy stops selling this package. Payments
 				// point at it and a receipt has to keep saying what it bought,
 				// so the row stays and only the till forgets. See 0021.
@@ -355,6 +359,11 @@ func Registry() []*Resource {
 				{Name: "end_date", Kind: "text"},
 				{Name: "venue_name", Kind: "text"},
 				{Name: "venue_address", Kind: "text"},
+				// A Google Maps search link built from venue_name at creation
+				// time — see 0037. Not derived on read, so it survives the
+				// venue name later being edited to something the link no
+				// longer matches without silently drifting.
+				{Name: "venue_map_url", Kind: "text"},
 				{Name: "organizer_name", Kind: "text"},
 				{Name: "registration_deadline", Kind: "text"},
 				{Name: "early_bird_fee", Kind: "real"},
