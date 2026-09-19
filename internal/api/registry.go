@@ -287,6 +287,10 @@ func Registry() []*Resource {
 				{Name: "status", Kind: "text", Enum: payStatus},
 				{Name: "payment_date", Kind: "text", Required: true},
 				{Name: "reference_number", Kind: "text"},
+				// Set when the money is a tournament entry fee rather than a
+				// credit package. The portal reads it to tell a family which
+				// of their registrations is still owed for.
+				{Name: "tournament_registration_id", Kind: "text"},
 			},
 			ReadRoles: []string{"Parent", "Student"},
 			Scope: map[string]ScopeFn{
@@ -373,12 +377,20 @@ func Registry() []*Resource {
 				// anyone with the link.
 				{Name: "public_registration", Kind: "bool"},
 				{Name: "student_discount_pct", Kind: "int"},
+				// Which reductions a JCA student gets at this event — the
+				// discount above, the early-bird price, both or neither (0035).
+				{Name: "student_gets_discount", Kind: "bool"},
+				{Name: "student_gets_early_bird", Kind: "bool"},
 				// The chess-results.com event this tournament is published as,
 				// when the standings are somebody else's to author. Read here so
 				// the console's list can say which events follow an arbiter.
 				{Name: "chess_results_id", Kind: "int"},
 			},
 			ReadRoles: everyone,
+			// What a JCA student is charged today, from the same rule the
+			// server charges by — so the portals show a price rather than
+			// work one out (see pricing.go).
+			Decorate: withStudentFee,
 		},
 		{
 			Name: "tournament-categories", Table: "tournament_category", IDCol: "tournament_category_id", IDPrefix: "tcat",
@@ -408,13 +420,22 @@ func Registry() []*Resource {
 				{Name: "contact_phone", Kind: "text"},
 				{Name: "fee_quoted", Kind: "real"},
 				{Name: "student_discount_applied", Kind: "bool"},
+				// What the family said about their own child. Medical notes are
+				// for the day; remarks are a request for the office.
+				{Name: "medical_notes", Kind: "text"},
+				{Name: "remarks", Kind: "text"},
 			},
-			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Parent"},
+			// Staff write here; a parent enters their child through
+			// `tournaments/{id}/entries`, which prices the entry itself. This
+			// door used to take the fee and status from the parent's own
+			// request, so a family could register at a price they chose.
+			ReadRoles: []string{"Parent", "Student"},
 			Scope: map[string]ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
-			Own: ownChild,
+			Check:      checkRegistrationNotes,
+			AfterWrite: syncRegistrationPayment,
 		},
 		{
 			Name: "practice-activities", Table: "practice_activity", IDCol: "activity_id", IDPrefix: "act",

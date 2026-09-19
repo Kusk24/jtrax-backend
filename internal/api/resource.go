@@ -91,6 +91,10 @@ type Resource struct {
 	// never fail the request; a notification that did not send is no reason to
 	// tell the caller their check-in was rejected, so its errors are its own.
 	AfterCommit func(d *sql.DB, id *auth.Identity, row map[string]any, created bool)
+	// Decorate adds read-only fields worked out in Go rather than SQL — a
+	// price, say, whose rule must be the same function that charges it. It
+	// runs on every row read, so it must be cheap and must not query.
+	Decorate func(row map[string]any)
 }
 
 // inTx runs a write and its consequence as one unit. Resources with no hook
@@ -196,6 +200,9 @@ func (rs *Resource) scanRows(rows *sql.Rows) ([]map[string]any, error) {
 		m := map[string]any{}
 		for i, c := range cols {
 			m[c] = vals[i]
+		}
+		if rs.Decorate != nil {
+			rs.Decorate(m)
 		}
 		out = append(out, m)
 	}

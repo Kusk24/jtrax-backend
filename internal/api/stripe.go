@@ -29,6 +29,12 @@ const minSatang = 1000
 // accepted by accident.
 func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/payments/{id}/stripe-link", handleStripeLink(d, client, cfg))
+	// The parent portal's door to the same thing, for a tournament entry fee.
+	// Authenticated, so it sits outside the unauthenticated budget, but it
+	// spends a Stripe API call per request and opens a payment row on first
+	// ask — a tighter budget than a read deserves.
+	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/stripe-link",
+		httpx.RateLimit(20, handleRegistrationStripeLink(d, client, cfg)))
 	if client != nil && cfg.WebhookSecret != "" {
 		// Unauthenticated by nature — Stripe is not a signed-in user — so it
 		// carries the standard unauthenticated-route budget on top of the
@@ -67,7 +73,8 @@ func returnBase(cfg stripepay.Config) string {
 
 // handleStripeLink answers with a card-payment URL for one pending payment,
 // at the desk's request. Who may ask is decided here; what the link is, and
-// whether one already exists, is `checkoutLink`.
+// whether one already exists, is `checkoutLink` — a parent paying their own
+// child's tournament fee reaches the same code by a different door.
 func handleStripeLink(d *sql.DB, client *stripepay.Client, cfg stripepay.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)

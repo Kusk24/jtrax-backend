@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,5 +260,147 @@ func TestStripeWebhookSendsTheReceipt(t *testing.T) {
 	// directly, so this is the path the resource hook cannot cover.
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "payment_received"); got != 1 {
 		t.Fatalf("payment_received after webhook: %d, want 1", got)
+	}
+}
+
+// priceWellington has staff set the seeded tournament's regular fee, with no
+// discount, so a student's entry costs exactly `fee`.
+func priceWellington(t *testing.T, srv *httptest.Server, fee float64) {
+	t.Helper()
+	staff := &client{t: t, srv: srv}
+	staff.login("admin@jca.ac.th")
+	status, obj, _ := staff.do("PATCH", "/api/v1/tournaments/trn_wellington", map[string]any{
+		"regular_fee": fee, "student_discount_pct": 0,
+	})
+	if status != 200 {
+		t.Fatalf("pricing the tournament: %d (%v)", status, obj)
+	}
+}
+
+// registerPenny has her parent enter Penny in the seeded tournament, priced at
+// `fee`, and returns the registration id.
+func registerPenny(t *testing.T, c *client, fee float64) string {
+	t.Helper()
+	priceWellington(t, c.srv, fee)
+	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+		"student_id": "stu_penny",
+	})
+	if status != 201 {
+		t.Fatalf("registering: %d (%v)", status, obj)
+	}
+	return obj["tournament_registration_id"].(string)
+}
+
+// The parent portal's payment step used to charge nothing at all: it asked for
+// a method, discarded it, and showed a confirmation. A parent asking to pay
+// their own child's entry fee must now come back with a real Checkout URL, and
+// asking twice must come back with the same one.
+func TestParentPaysTournamentFeeByCard(t *testing.T) {
+	d := newDB(t)
+	srv := newStripeServer(t, d)
+	c := &client{t: t, srv: srv}
+	c.login("sandy01234@gmail.com") // Penny's parent
+
+	regID := registerPenny(t, c, 4500)
+	status, obj, _ := c.do("POST", "/api/v1/tournament-registrations/"+regID+"/stripe-link", nil)
+	if status != 200 || obj["url"] != "https://checkout.stripe.test/cs_1" {
+		t.Fatalf("paying an entry fee: %d (%v)", status, obj)
+	}
+
+	// The same registration, asked again — one payment, one session, one
+	// charge. A second URL here is a family billed twice.
+	status, again, _ := c.do("POST", "/api/v1/tournament-registrations/"+regID+"/stripe-link", nil)
+	if status != 200 || again["url"] != obj["url"] {
+		t.Fatalf("second ask: %d (%v), want the first link back", status, again)
+	}
+
+	// And the money is an ordinary payment row, so the desk can reconcile it.
+	var n int
+	var amount float64
+	var className, payStatus string
+	if err := d.QueryRow(
+		`SELECT COUNT(*), MAX(final_amount), MAX(class_name), MAX(status)
+		   FROM payment WHERE tournament_registration_id = ?`, regID).
+		Scan(&n, &amount, &className, &payStatus); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || amount != 4500 || payStatus != "Pending" || className == "" {
+		t.Fatalf("payment behind the registration: n=%d amount=%v class=%q status=%q",
+			n, amount, className, payStatus)
+	}
+}
+
+// Another family's registration is not a thing this parent may pay for — and
+// not a thing they may learn exists either, so it reads as missing.
+func TestParentCannotPayAnotherFamilysRegistration(t *testing.T) {
+	d := newDB(t)
+	srv := newStripeServer(t, d)
+
+	owner := &client{t: t, srv: srv}
+	owner.login("sandy01234@gmail.com")
+	regID := registerPenny(t, owner, 4500)
+
+	staff := &client{t: t, srv: srv}
+	staff.login("admin@jca.ac.th")
+	status, _, _ := staff.do("POST", "/api/v1/tournament-registrations/"+regID+"/stripe-link", nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("staff on the parent door: got %d, want 403", status)
+	}
+}
+
+// A free event has nothing to collect, and a registration that does not exist
+// must not open a payment row on the way to finding that out.
+func TestTournamentLinkRefusesWhatCannotBePaid(t *testing.T) {
+	d := newDB(t)
+	srv := newStripeServer(t, d)
+	c := &client{t: t, srv: srv}
+	c.login("sandy01234@gmail.com")
+
+	status, _, _ := c.do("POST", "/api/v1/tournament-registrations/treg_nope/stripe-link", nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("unknown registration: got %d, want 404", status)
+	}
+
+	free := registerPenny(t, c, 0)
+	status, _, _ = c.do("POST", "/api/v1/tournament-registrations/"+free+"/stripe-link", nil)
+	if status != http.StatusConflict {
+		t.Fatalf("free event: got %d, want 409", status)
+	}
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM payment WHERE tournament_registration_id = ?`, free).Scan(&n)
+	if n != 0 {
+		t.Fatalf("a free registration opened %d payment rows", n)
+	}
+}
+
+// The registration form's two free-text boxes had nowhere to go until 0033, so
+// a parent typing an allergy into them was telling the browser. They must land
+// on the row, and must not be a place to park a payload.
+func TestRegistrationKeepsWhatTheFamilyWrote(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("sandy01234@gmail.com")
+
+	// Refused before the row exists, so an oversized note cannot be a way to
+	// take a place without paying for one either.
+	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+		"student_id":    "stu_penny",
+		"medical_notes": strings.Repeat("x", 2001),
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("an oversized note: got %d, want 400", status)
+	}
+
+	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+		"student_id":    "stu_penny",
+		"medical_notes": "Asthma — inhaler in her bag.",
+		"remarks":       "Please seat her near the door.",
+	})
+	if status != 201 {
+		t.Fatalf("registering with notes: %d (%v)", status, obj)
+	}
+	status, row, _ := c.do("GET", "/api/v1/tournament-registrations/"+obj["tournament_registration_id"].(string), nil)
+	if status != 200 || row["medical_notes"] != "Asthma — inhaler in her bag." ||
+		row["remarks"] != "Please seat her near the door." {
+		t.Fatalf("notes came back as %d %v / %v", status, row["medical_notes"], row["remarks"])
 	}
 }
