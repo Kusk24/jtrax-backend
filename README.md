@@ -10,13 +10,19 @@ are identical either way. Standard library `net/http` only; no web framework.
 ## Run
 
 ```sh
-go run ./cmd/server        # http://localhost:8790/health
+PORT=8790 go run ./cmd/server        # http://localhost:8790/health
 ```
 
 That creates `jtrax.db` in the working directory, applies the migrations, and
 seeds the development dataset (Sandy and her children Penny and Uri, Ms.
 Serene, the Beginner/Intermediate classes, the Wellington tournament). Every
 seeded account signs in with `jtrax-dev-1234`.
+
+**Set `PORT`.** The server's own default is `8080`, but `jtrax-admin` and
+`jtrax-web-app` both call `8790` unless `JTRAX_API_URL` says otherwise. Start it
+without `PORT` and the two halves come up healthy, log nothing unusual, and
+never reach each other — `curl localhost:8080/health` returns `{"status":"ok"}`
+while every console page reports the backend unreachable.
 
 Requires Go 1.25+. Configuration is entirely environment-driven — copy
 `.env.example` to `.env` to override anything.
