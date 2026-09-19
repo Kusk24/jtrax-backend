@@ -317,9 +317,9 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			   JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
 			   JOIN student s ON s.student_id = e.student_id
 			  WHERE ct.expiry_date IS NOT NULL
-			    AND date(ct.expiry_date) >= date('now')
-			    AND date(ct.expiry_date) <= date('now', '+' || ? || ' days')
-			  GROUP BY e.student_id, s.name`, days)
+			    AND date(ct.expiry_date) >= ?
+			    AND date(ct.expiry_date) <= date(?, '+' || ? || ' days')
+			  GROUP BY e.student_id, s.name`, today(), today(), days)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not find expiring credits", err)
 			return

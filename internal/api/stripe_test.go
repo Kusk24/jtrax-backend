@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
@@ -187,7 +188,7 @@ func TestStripeWebhookSettlesOnceAndGrantsCreditsOnce(t *testing.T) {
 	if n != 1 || amount != 20 {
 		t.Fatalf("credits granted %d times, total %.1f; want once, 20", n, amount)
 	}
-	want := time.Now().AddDate(0, 0, 120).Format("2006-01-02")
+	want := academytime.Now().AddDate(0, 0, 120).Format(academytime.DayLayout)
 	if expiry != want {
 		t.Fatalf("credit expiry %s, want %s (120-day package)", expiry, want)
 	}

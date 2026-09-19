@@ -105,7 +105,7 @@ func withStudentFee(row map[string]any) {
 		p.Regular = p.EarlyBird
 	}
 	p.EarlyBirdUntil, _ = row["early_bird_deadline"].(string)
-	row["student_fee"] = p.StudentFee(todayISO())
+	row["student_fee"] = p.StudentFee(today())
 }
 
 // num reads a number out of a scanned row, which holds int64 or float64

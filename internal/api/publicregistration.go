@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -107,9 +108,9 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	}
 	t.price.Regular, t.price.EarlyBird = t.RegularFee, t.EarlyBirdFee
 	t.price.EarlyBirdUntil, t.price.DiscountPct = t.EarlyBirdUntil, t.DiscountPct
-	today := todayISO()
-	t.EarlyBirdActive = t.price.earlyBirdOpen(today)
-	t.Fee = t.price.OutsiderFee(today)
+	day := today()
+	t.EarlyBirdActive = t.price.earlyBirdOpen(day)
+	t.Fee = t.price.OutsiderFee(day)
 	if capacity.Valid {
 		n := int(capacity.Int64)
 		t.Capacity = &n
@@ -119,7 +120,7 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 		}
 		t.SpotsLeft = &left
 	}
-	t.StudentFee = t.price.StudentFee(today)
+	t.StudentFee = t.price.StudentFee(day)
 	t.Open, t.ClosedReason = registrationOpen(t.Deadline, t.Capacity, t.Taken)
 	return &t, nil
 }
@@ -128,7 +129,7 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 // which of the two reasons applies. The reason is shown to the public, so it is
 // a fact about the event rather than about anybody who registered.
 func registrationOpen(deadline string, capacity *int, taken int) (bool, string) {
-	if deadline != "" && todayISO() > deadline {
+	if deadline != "" && today() > deadline {
 		return false, "deadline"
 	}
 	if capacity != nil && taken >= *capacity {
@@ -136,11 +137,6 @@ func registrationOpen(deadline string, capacity *int, taken int) (bool, string) 
 	}
 	return true, ""
 }
-
-// todayISO is the date the deadline is compared against. Dates in this schema
-// are stored as plain YYYY-MM-DD with no zone, so the comparison is a string
-// one and the boundary is local midnight — the same day the poster says.
-func todayISO() string { return time.Now().Format("2006-01-02") }
 
 // handlePublicTournamentList serves every event currently open to the public.
 func handlePublicTournamentList(d *sql.DB) http.HandlerFunc {
@@ -362,7 +358,7 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 					return
 				}
 				dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
-				on := time.Now()
+				on := academytime.Now()
 				if t.StartDate != "" {
 					if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
 						on = parsed

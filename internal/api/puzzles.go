@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/puzzle"
@@ -65,7 +66,12 @@ func studentOf(w http.ResponseWriter, id *auth.Identity) (string, bool) {
 	return id.StudentID, true
 }
 
-func today() string { return time.Now().Format("2006-01-02") }
+// today is the academy's calendar day (see internal/academytime), not the
+// server's: on a host set to UTC the two disagree for the first seven hours of
+// every Bangkok morning. Dates in this schema are plain YYYY-MM-DD with no
+// zone, so a deadline or a daily set compares against this as a string, and
+// the boundary is Bangkok midnight — the same day the poster says.
+func today() string { return academytime.Today() }
 
 // handleDailyPuzzles returns the pupil's set for today, creating it on first
 // request.

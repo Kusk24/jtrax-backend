@@ -101,7 +101,7 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		}
 		// Quoted and charged are the same number: nobody reviews a family's
 		// own entry, so the quote is the charge from the start.
-		fee := price.StudentFee(todayISO())
+		fee := price.StudentFee(today())
 
 		regID := newID("treg")
 		_, err = tx.Exec(`

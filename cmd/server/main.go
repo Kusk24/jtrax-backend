@@ -12,8 +12,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -114,7 +114,7 @@ func importRoster(d *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	written, err := db.ImportRoster(d, roster, password, time.Now())
+	written, err := db.ImportRoster(d, roster, password, academytime.Now())
 	if err != nil {
 		return err
 	}
