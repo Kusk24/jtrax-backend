@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
@@ -43,7 +44,15 @@ func currentStreak(d *sql.DB, studentID string, today time.Time) (int, error) {
 	streak := 0
 	// The day the next row has to be to continue the run. It starts at today
 	// and is allowed to slip once, by streakGraceDays, before the first hit.
-	want := today
+	//
+	// As a calendar day, at midnight like the rows it is compared with. Kept
+	// as the moment it was called, the gap to yesterday's row read as one day
+	// or two depending on the hour — before 07:00 in Bangkok a streak that had
+	// already lapsed was still counted.
+	want, err := time.Parse(dayLayout, today.Format(dayLayout))
+	if err != nil {
+		return 0, err
+	}
 	first := true
 	for rows.Next() {
 		var raw string
@@ -114,7 +123,7 @@ func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		now := time.Now()
+		now := academytime.Now()
 		streak, err := currentStreak(d, studentID, now)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not read practice", err)

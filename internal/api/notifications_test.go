@@ -116,7 +116,7 @@ func TestCreditExpiryIsStaffOnly(t *testing.T) {
 	// Give Penny a credit lot expiring next week; the seed's lots are all past.
 	if _, err := d.Exec(
 		`INSERT INTO credit_transaction (credit_transaction_id, enrollment_id, transaction_type, amount, expiry_date, transaction_date)
-		 VALUES ('ctx_soon','enr_penny','purchase',10, date('now','+7 days'), date('now'))`); err != nil {
+		 VALUES ('ctx_soon','enr_penny','purchase',10, ?, ?)`, academyDay(7), academyDay(0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -337,7 +337,7 @@ func TestCreditExpiryPreviewAndTargeting(t *testing.T) {
 	} {
 		if _, err := d.Exec(
 			`INSERT INTO credit_transaction (credit_transaction_id, enrollment_id, transaction_type, amount, expiry_date, transaction_date)
-			 VALUES (?,?,'purchase',10, date('now','+6 days'), date('now'))`, ins.id, ins.enr); err != nil {
+			 VALUES (?,?,'purchase',10, ?, ?)`, ins.id, ins.enr, academyDay(6), academyDay(0)); err != nil {
 			t.Fatal(err)
 		}
 	}

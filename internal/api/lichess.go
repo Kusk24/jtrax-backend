@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/lichess"
@@ -263,7 +264,7 @@ func (l *lichessDeps) storeRatings(studentID string, u lichess.User) error {
 // too, and that path has no lichessDeps to hand.
 func storeLichessRatings(db *sql.DB, studentID string, u lichess.User) error {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	day := time.Now().UTC().Format("2006-01-02")
+	day := academytime.Today()
 	tx, err := db.Begin()
 	if err != nil {
 		return err

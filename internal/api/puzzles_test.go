@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -312,9 +311,9 @@ func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 			break
 		}
 		if _, err := d.Exec(
-			`UPDATE puzzle_attempt SET assigned_on = date('now', ?)
-			  WHERE student_id = 'stu_penny' AND assigned_on = date('now')`,
-			fmt.Sprintf("-%d days", day+1)); err != nil {
+			`UPDATE puzzle_attempt SET assigned_on = ?
+			  WHERE student_id = 'stu_penny' AND assigned_on = ?`,
+			academyDay(-(day + 1)), academyDay(0)); err != nil {
 			t.Fatal(err)
 		}
 	}

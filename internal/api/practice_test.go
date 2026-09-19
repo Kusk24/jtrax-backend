@@ -4,7 +4,16 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 )
+
+// academyDay is the academy's calendar day `offset` days from today — the
+// same clock the server dates practice and puzzles by. SQLite's date('now') is
+// UTC, which for the first seven hours of a Bangkok morning is yesterday.
+func academyDay(offset int) string {
+	return academytime.Now().AddDate(0, 0, offset).Format(academytime.DayLayout)
+}
 
 // practised writes a practice row `back` days ago.
 func practised(t *testing.T, d *sql.DB, studentID string, back, puzzles int) {
@@ -12,9 +21,9 @@ func practised(t *testing.T, d *sql.DB, studentID string, back, puzzles int) {
 	if _, err := d.Exec(
 		`INSERT OR REPLACE INTO practice_activity
 		   (activity_id, student_id, activity_date, minutes_practiced, puzzles_completed, points_earned, streak_count)
-		 VALUES (?,?,date('now', ?),0,?,0,0)`,
+		 VALUES (?,?,?,0,?,0,0)`,
 		fmt.Sprintf("act_%s_%d", studentID, back), studentID,
-		fmt.Sprintf("-%d days", back), puzzles); err != nil {
+		academyDay(-back), puzzles); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -172,7 +181,7 @@ func TestSolvingAPuzzleRecordsPracticeOnTheServer(t *testing.T) {
 	}
 	var n int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM practice_activity
-	                      WHERE student_id = 'stu_penny' AND activity_date = date('now')`).Scan(&n); err != nil {
+	                      WHERE student_id = 'stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -226,7 +235,7 @@ func TestPracticeMinutesAreMeasuredFromWhenThePuzzleWasOpened(t *testing.T) {
 
 	var mins int
 	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 6 {
@@ -254,7 +263,7 @@ func TestAnAbandonedPuzzleCannotLogHours(t *testing.T) {
 
 	var mins int
 	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 15 {
@@ -278,7 +287,7 @@ func TestAPuzzleNeverOpenedContributesNoMinutes(t *testing.T) {
 
 	var mins, puzzles int
 	if err := d.QueryRow(`SELECT minutes_practiced, puzzles_completed FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins, &puzzles); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins, &puzzles); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 0 || puzzles != 1 {
