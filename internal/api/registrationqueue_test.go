@@ -8,7 +8,7 @@ import (
 
 func TestRegistrationQueueIsStaffOnly(t *testing.T) {
 	pub, id := openEvent(t, nil)
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	register(t, pub, id, entry(nil), true)
 
 	// No session at all.
 	if status, _, _ := pub.do("GET", "/api/v1/tournaments/"+id+"/registrations", nil); status != 401 {
@@ -28,16 +28,16 @@ func TestRegistrationQueueShowsTheStudentMatch(t *testing.T) {
 	// A discount claim now has to name a student the academy can find, so the
 	// unverifiable claim never reaches the queue at all — it is refused at the
 	// door rather than left for staff to catch.
-	if status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "nobody@example.com", "isStudent": true})); status != 400 {
+	if status, _ := register(t, pub, id,
+		entry(map[string]any{"email": "nobody@example.com", "isStudent": true}), true); status != 400 {
 		t.Fatalf("unverifiable claim: want 400, got %d", status)
 	}
 
 	// What does reach it: a verified student, and an ordinary outsider.
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "penny@jca.ac.th", "isStudent": true, "studentId": "stu_penny"}))
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "nobody@example.com"}))
+	register(t, pub, id,
+		entry(map[string]any{"email": "penny@jca.ac.th", "isStudent": true, "studentId": "stu_penny"}), true)
+	register(t, pub, id,
+		entry(map[string]any{"email": "nobody@example.com"}), true)
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
@@ -70,8 +70,8 @@ func TestRegistrationQueueShowsTheStudentMatch(t *testing.T) {
 
 func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
-	_, reg, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+	_, reg := register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 	if reg["feeQuoted"] != float64(400) {
 		t.Fatalf("setup: want a 400 quote, got %v", reg["feeQuoted"])
 	}
@@ -98,8 +98,8 @@ func TestApprovalAdmitsAndChargesTheQuotedFee(t *testing.T) {
 // the fee at the moment they approve.
 func TestApprovalCanOverrideTheClaimedDiscount(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+	register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
@@ -118,7 +118,7 @@ func TestApprovalCanOverrideTheClaimedDiscount(t *testing.T) {
 // Two people working the same queue must not silently undo each other.
 func TestARegistrationCannotBeDecidedTwice(t *testing.T) {
 	pub, id := openEvent(t, nil)
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	register(t, pub, id, entry(nil), true)
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
@@ -136,7 +136,7 @@ func TestARegistrationCannotBeDecidedTwice(t *testing.T) {
 // the public path enforces, and find out on the day.
 func TestApprovalStopsAtCapacity(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"max_participants": 1})
-	pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	register(t, pub, id, entry(nil), true)
 
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")

@@ -26,6 +26,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/mail"
@@ -47,13 +48,17 @@ const (
 	maxPhoneLen = 32
 )
 
+// A phone photo of an ID card or passport page is a couple of megabytes; ten
+// is generous and still bounds what one request can make the server hold.
+const maxIDDocumentBytes = 10 << 20
+
 // publicTournamentSelect is the shape of an open event as the public sees it.
 // Deliberately narrow: no organiser contact, no internal ids beyond the one
 // needed to register, nothing about who else has signed up beyond a count.
 const publicTournamentSelect = `
 	SELECT t.tournament_id, t.name, t.tournament_status,
 	       COALESCE(t.start_date,''), COALESCE(t.end_date,''),
-	       COALESCE(t.venue_name,''), COALESCE(t.venue_address,''),
+	       COALESCE(t.venue_name,''), COALESCE(t.venue_address,''), COALESCE(t.venue_map_url,''),
 	       COALESCE(t.registration_deadline,''),
 	       COALESCE(t.regular_fee, t.early_bird_fee, 0),
 	       COALESCE(t.early_bird_fee, 0), COALESCE(t.early_bird_deadline, ''),
@@ -72,6 +77,7 @@ type publicTournament struct {
 	EndDate      string  `json:"endDate"`
 	VenueName    string  `json:"venueName"`
 	VenueAddress string  `json:"venueAddress"`
+	VenueMapURL  string  `json:"venueMapUrl,omitempty"`
 	Deadline     string  `json:"registrationDeadline"`
 	/* Fee is what an outside participant pays if they register right now —
 	   the early-bird price while its window is open, the regular price after.
@@ -98,7 +104,7 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	var t publicTournament
 	var capacity sql.NullInt64
 	if err := sc.Scan(&t.ID, &t.Name, &t.Status, &t.StartDate, &t.EndDate,
-		&t.VenueName, &t.VenueAddress, &t.Deadline, &t.RegularFee,
+		&t.VenueName, &t.VenueAddress, &t.VenueMapURL, &t.Deadline, &t.RegularFee,
 		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation,
 		&t.DiscountPct, &capacity, &t.Taken); err != nil {
 		return nil, err
@@ -256,6 +262,8 @@ func (in *registerInput) validate() string {
 		return "please give the player's full name"
 	case in.Email == "" || len(in.Email) > maxEmailLen:
 		return "please give an email address"
+	case in.Phone == "":
+		return "please give a contact phone number"
 	case len(in.Phone) > maxPhoneLen:
 		return "that phone number is too long"
 	}
@@ -307,12 +315,27 @@ func ageOn(dob, on time.Time) int {
 func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
-		var in registerInput
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxIDDocumentBytes)
+		if err := r.ParseMultipartForm(maxIDDocumentBytes); err != nil {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "the file is too large (10 MB max)", nil)
 			return
 		}
+		in := registerInput{
+			Name:        r.FormValue("name"),
+			Email:       r.FormValue("email"),
+			Phone:       r.FormValue("phone"),
+			DateOfBirth: r.FormValue("dateOfBirth"),
+			CategoryID:  r.FormValue("categoryId"),
+			IsStudent:   r.FormValue("isStudent") == "true",
+			StudentID:   r.FormValue("studentId"),
+		}
 		if msg := in.validate(); msg != "" {
+			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			return
+		}
+		idFilename, idMime, idBytes, msg := readIDDocument(r)
+		if msg != "" {
 			httpx.Error(w, http.StatusBadRequest, msg, nil)
 			return
 		}
@@ -445,6 +468,17 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
 		}
+		// The document exists to be checked against a face at the venue, so it
+		// is tied to the registration it arrived with rather than stored under
+		// a name or email the desk would have to match by hand later.
+		if _, err := tx.Exec(
+			`INSERT INTO tournament_registration_document
+			        (tournament_registration_id, filename, content_type, bytes, uploaded_at)
+			 VALUES (?,?,?,?, datetime('now'))`,
+			regID, idFilename, idMime, idBytes); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
 		if err := tx.Commit(); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
@@ -459,6 +493,31 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			"needsApproval": true,
 		})
 	}
+}
+
+// readIDDocument pulls the required identification photo out of the
+// multipart form. The field name is "idDocument"; a message means refuse the
+// whole registration rather than write a row with nothing to check a face
+// against — an ID photo the desk never gets is not optional paperwork, it is
+// the one thing this field exists for.
+func readIDDocument(r *http.Request) (filename, mime string, data []byte, msg string) {
+	file, header, err := r.FormFile("idDocument")
+	if err != nil {
+		return "", "", nil, "please attach a photo of the player's ID card or passport"
+	}
+	defer file.Close()
+	data, err = io.ReadAll(file)
+	if err != nil {
+		return "", "", nil, "could not read the attached file"
+	}
+	// Sniffed from the bytes, never trusted from the request — same rule as
+	// the regulation upload, and the same accepted shapes: a photo of a card,
+	// or a scanned page.
+	mime = http.DetectContentType(data)
+	if !regulationTypes[mime] {
+		return "", "", nil, "the ID document must be a photo (JPEG, PNG, WebP) or a PDF"
+	}
+	return safeFilename(header.Filename), mime, data, ""
 }
 
 func nullIfEmpty(s string) any {
