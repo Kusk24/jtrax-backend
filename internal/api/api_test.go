@@ -172,22 +172,29 @@ func TestParentSeesOnlyOwnChildren(t *testing.T) {
 	}
 }
 
+// A parent enters through their own door, which prices the entry; the generic
+// resource, which would take a fee from the request, is staff's alone.
 func TestParentRegistersOwnChildOnly(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("sandy01234@gmail.com")
-	status, _, _ := c.do("POST", "/api/v1/tournament-registrations", map[string]any{
-		"tournament_id": "trn_wellington", "student_id": "stu_penny",
-		"participant_name": "Penny", "fee_charged": 300,
+	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+		"student_id": "stu_penny",
 	})
 	if status != 201 {
 		t.Fatalf("register own child: want 201, got %d", status)
 	}
+	status, _, _ = c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+		"student_id": "stu_missing",
+	})
+	if status != 404 {
+		t.Fatalf("register foreign child: want 404, got %d", status)
+	}
 	status, _, _ = c.do("POST", "/api/v1/tournament-registrations", map[string]any{
-		"tournament_id": "trn_wellington", "student_id": "stu_missing",
-		"participant_name": "Nope",
+		"tournament_id": "trn_wellington", "student_id": "stu_penny",
+		"participant_name": "Penny",
 	})
 	if status != 403 {
-		t.Fatalf("register foreign child: want 403, got %d", status)
+		t.Fatalf("parent on the staff door: want 403, got %d", status)
 	}
 }
 

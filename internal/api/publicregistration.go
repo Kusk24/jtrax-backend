@@ -26,7 +26,6 @@ package api
 import (
 	"database/sql"
 	"errors"
-	"math"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -58,7 +57,8 @@ const publicTournamentSelect = `
 	       COALESCE(t.regular_fee, t.early_bird_fee, 0),
 	       COALESCE(t.early_bird_fee, 0), COALESCE(t.early_bird_deadline, ''),
 	       EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = t.tournament_id),
-	       t.student_discount_pct, t.max_participants,
+	       t.student_discount_pct, t.student_gets_discount, t.student_gets_early_bird,
+	       t.max_participants,
 	       (SELECT COUNT(*) FROM tournament_registration r
 	         WHERE r.tournament_id = t.tournament_id
 	           AND r.status IN ('Pending','Approved'))
@@ -75,8 +75,8 @@ type publicTournament struct {
 	Deadline     string  `json:"registrationDeadline"`
 	/* Fee is what an outside participant pays if they register right now —
 	   the early-bird price while its window is open, the regular price after.
-	   Students pay StudentFee (the discount off the regular price) either
-	   way: the two discounts are for different people and never stack. */
+	   Students pay StudentFee, by whichever reductions the organiser chose
+	   for this event (see pricing.go). */
 	Fee             float64 `json:"fee"`
 	RegularFee      float64 `json:"regularFee"`
 	EarlyBirdFee    float64 `json:"earlyBirdFee,omitempty"`
@@ -86,6 +86,7 @@ type publicTournament struct {
 	StudentFee      float64 `json:"studentFee"`
 	DiscountPct  int     `json:"studentDiscountPct"`
 	Capacity     *int    `json:"capacity"`
+	price        tournamentPrice
 	Taken        int     `json:"taken"`
 	SpotsLeft    *int    `json:"spotsLeft"`
 	Open         bool    `json:"open"`
@@ -100,14 +101,15 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	if err := sc.Scan(&t.ID, &t.Name, &t.Status, &t.StartDate, &t.EndDate,
 		&t.VenueName, &t.VenueAddress, &t.Deadline, &t.RegularFee,
 		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation,
-		&t.DiscountPct, &capacity, &t.Taken); err != nil {
+		&t.DiscountPct, &t.price.StudentDiscount, &t.price.StudentEarlyBird,
+		&capacity, &t.Taken); err != nil {
 		return nil, err
 	}
-	t.EarlyBirdActive = t.EarlyBirdFee > 0 && t.EarlyBirdUntil != "" && todayISO() <= t.EarlyBirdUntil
-	t.Fee = t.RegularFee
-	if t.EarlyBirdActive {
-		t.Fee = t.EarlyBirdFee
-	}
+	t.price.Regular, t.price.EarlyBird = t.RegularFee, t.EarlyBirdFee
+	t.price.EarlyBirdUntil, t.price.DiscountPct = t.EarlyBirdUntil, t.DiscountPct
+	today := todayISO()
+	t.EarlyBirdActive = t.price.earlyBirdOpen(today)
+	t.Fee = t.price.OutsiderFee(today)
 	if capacity.Valid {
 		n := int(capacity.Int64)
 		t.Capacity = &n
@@ -117,18 +119,9 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 		}
 		t.SpotsLeft = &left
 	}
-	t.StudentFee = discounted(t.RegularFee, t.DiscountPct)
+	t.StudentFee = t.price.StudentFee(today)
 	t.Open, t.ClosedReason = registrationOpen(t.Deadline, t.Capacity, t.Taken)
 	return &t, nil
-}
-
-// discounted applies a percentage off, rounded to the nearest whole unit of
-// currency. Fees here are whole baht; half a baht is not a price anybody quotes.
-func discounted(fee float64, pct int) float64 {
-	if pct <= 0 || fee <= 0 {
-		return fee
-	}
-	return math.Round(fee * float64(100-pct) / 100)
 }
 
 // registrationOpen reports whether entries are still being taken, and if not,
@@ -415,12 +408,13 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		// Two prices for two audiences, never stacked: a verified student
-		// pays the discounted regular fee; an outsider pays the early-bird
-		// price while its window is open and the regular price after.
+		// A verified student pays by whichever reductions the organiser
+		// chose; an outsider pays the early-bird price while its window is
+		// open and the regular price after. Both come from pricing.go, the
+		// same rule the parent portal is charged by.
 		fee := t.Fee
 		if in.IsStudent {
-			fee = discounted(t.RegularFee, t.DiscountPct)
+			fee = t.StudentFee
 		}
 
 		regID := newID("treg")

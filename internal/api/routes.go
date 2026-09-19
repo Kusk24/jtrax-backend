@@ -71,6 +71,11 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mountPublicRegistration(mux, d)
 	mountTournamentRegulation(mux, d)
 	mountRegistrationQueue(mux, d)
+	// A parent's own entry, priced by the server, and the desk recording a fee
+	// paid at the counter. Both are tournament-registration writes the generic
+	// resource must not make: one decides a price, the other asserts money.
+	mountTournamentEntry(mux, d)
+	mountDeskPayment(mux, d)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
