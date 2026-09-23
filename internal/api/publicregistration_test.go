@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -39,6 +40,9 @@ func openEvent(t *testing.T, fields map[string]any) (*client, string) {
 func entry(over map[string]any) map[string]any {
 	body := map[string]any{
 		"name": "Somchai Niran", "email": "somchai@example.com", "phone": "081-000-0000",
+		// Required of every entry now, so it belongs in the baseline rather
+		// than in each case — the cases that care set it false explicitly.
+		"acceptTerms": true,
 	}
 	for k, v := range over {
 		body[k] = v
@@ -53,10 +57,14 @@ func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 	if status != 201 {
 		t.Fatalf("register: want 201, got %d (%v)", status, out)
 	}
-	// Pending, not Approved: a stranger's submission is a request, and the desk
-	// still has to say yes.
-	if out["status"] != "Pending" {
-		t.Fatalf("want Pending, got %v", out["status"])
+	// Approved on arrival: the academy takes every entry, so there is no queue
+	// left for a submission to wait in.
+	if out["status"] != "Approved" {
+		t.Fatalf("want Approved, got %v", out["status"])
+	}
+	// And the portal is told not to promise a confirmation that never comes.
+	if out["needsApproval"] != false {
+		t.Fatalf("want needsApproval false, got %v", out["needsApproval"])
 	}
 	if out["feeQuoted"] != float64(500) {
 		t.Fatalf("want the full fee, got %v", out["feeQuoted"])
@@ -387,5 +395,117 @@ func TestRegulationLifecycle(t *testing.T) {
 	// …but staff still see it.
 	if status, _, _ := staff.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
 		t.Fatalf("private regulation, staff: want 200, got %d", status)
+	}
+}
+
+/* The terms, the nickname and the age — what the academy's entry form asks
+ * that the schema had nowhere to put. */
+
+// The five numbered conditions on the form are the point of recording this:
+// "did this person agree not to be refunded" is asked three weeks later, and a
+// record that can mean "we defaulted it to yes" answers nothing.
+func TestAnEntryIsRefusedWithoutAcceptingTheTerms(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	for _, v := range []any{false, nil} {
+		body := entry(nil)
+		if v == nil {
+			delete(body, "acceptTerms")
+		} else {
+			body["acceptTerms"] = v
+		}
+		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body)
+		if status != 400 {
+			t.Errorf("acceptTerms %v: want 400, got %d (%v)", v, status, out)
+		}
+	}
+}
+
+// Stamped by the server. A client-supplied timestamp on a consent record is
+// worth nothing, so reaching the insert is what "accepted" means.
+func TestAcceptingTheTermsIsRecordedWithATime(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
+		entry(map[string]any{"nickname": "Chai", "age": 11})); status != 201 {
+		t.Fatalf("register: %d (%v)", status, out)
+	}
+
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	_, _, rows := staff.do("GET", "/api/v1/tournament-registrations?tournament_id="+id, nil)
+	if len(rows) == 0 {
+		t.Fatalf("no registration rows")
+	}
+	row := rows[0]
+	if row["terms_accepted_at"] == nil || row["terms_accepted_at"] == "" {
+		t.Errorf("terms_accepted_at should be stamped, got %v", row["terms_accepted_at"])
+	}
+	if row["nickname"] != "Chai" {
+		t.Errorf("nickname = %v, want Chai", row["nickname"])
+	}
+	if row["participant_age"] != float64(11) {
+		t.Errorf("participant_age = %v, want 11", row["participant_age"])
+	}
+}
+
+// The form asks for an age and not a date of birth, so an age-limited group
+// has to be enforceable on the age alone — otherwise everyone who skips the
+// card scan is refused.
+func TestAClaimedAgeIsCheckedAgainstTheGroupWhenThereIsNoDateOfBirth(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	u12 := categoryOf(t, staff, id, "U12 Junior")
+
+	for _, tc := range []struct {
+		age  int
+		want int
+	}{{11, 201}, {12, 400}, {15, 400}} {
+		body := entry(map[string]any{
+			"categoryId": u12, "age": tc.age,
+			"email": fmt.Sprintf("age%d@example.com", tc.age),
+		})
+		if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body); status != tc.want {
+			t.Errorf("age %d: want %d, got %d (%v)", tc.age, tc.want, status, out)
+		}
+	}
+}
+
+// And the date of birth still wins where there is one: it is what an ID card
+// proves, where an age is what somebody typed.
+func TestADateOfBirthOutranksAClaimedAge(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	u12 := categoryOf(t, staff, id, "U12 Junior")
+
+	// Claims 10, but the card says they were born twenty years ago.
+	born := time.Now().AddDate(-20, 0, 0).Format("2006-01-02")
+	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
+		entry(map[string]any{"categoryId": u12, "age": 10, "dateOfBirth": born}))
+	if status != 400 {
+		t.Fatalf("want 400 on the date of birth, got %d", status)
+	}
+}
+
+// A group with no age in its name takes anybody — OPEN is a real category.
+func TestAnOpenGroupHasNoAgeRule(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	open := categoryOf(t, staff, id, "OPEN (FIDE Rated Event)")
+
+	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
+		entry(map[string]any{"categoryId": open, "age": 47})); status != 201 {
+		t.Fatalf("OPEN should take a 47-year-old: %d (%v)", status, out)
+	}
+}
+
+func TestAnImplausibleAgeIsRefused(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	for _, age := range []int{-1, 121} {
+		if status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
+			entry(map[string]any{"age": age})); status != 400 {
+			t.Errorf("age %d: want 400, got %d", age, status)
+		}
 	}
 }

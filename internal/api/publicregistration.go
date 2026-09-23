@@ -2,15 +2,28 @@
 //
 // Everything here is unauthenticated, which makes it the widest door in the
 // product and the only place where a row is created by somebody the academy has
-// never met. Four things hold that door:
+// never met. Three things hold that door:
 //
 //   - a tournament is closed until an organiser opens it (public_registration),
 //     exactly like results_public;
-//   - every submission lands as Pending and a member of staff approves it, so
-//     nothing a stranger types becomes a participant on its own;
 //   - the deadline and the capacity are enforced inside the write transaction,
 //     not read beforehand and hoped about;
 //   - it is rate-limited, and one email may hold one live place per event.
+//
+// # The fourth used to be approval, and is gone on purpose
+//
+// A submission used to land as Pending and wait for a member of staff, so
+// nothing a stranger typed became a participant on its own. The academy takes
+// every entry, so that queue was a step that only ever ended one way — and an
+// unworked queue is worse than none, because a place nobody has confirmed is
+// indistinguishable from a place nobody has looked at.
+//
+// What it cost is real and worth naming: a stranger's submission is now a
+// participant immediately. What replaces it is validation at the door rather
+// than judgement behind it — the category must belong to this event, the age
+// rule in the category's name is enforced against the given date of birth, and
+// a claimed student discount must name a student that exists. The desk's
+// remaining power is to correct a fee or withdraw an entry, not to admit one.
 //
 // # Why the discount is claimed rather than detected
 //
@@ -18,9 +31,9 @@
 // that claim alone. The server does look their email up against the academy's
 // own records, but it never says so in the reply: if the discount appeared only
 // for addresses that matched, this endpoint would be a way to test whether a
-// given child is a pupil here, one guess at a time. The match is passed to the
-// approval queue instead, where it belongs — staff see "claimed, and we found a
-// matching student" or "claimed, no match" and decide.
+// given child is a pupil here, one guess at a time. The match is surfaced only
+// in the staff roster, where "claimed, and we found a matching student" versus
+// "claimed, no match" is a thing the desk can act on afterwards.
 package api
 
 import (
@@ -66,14 +79,14 @@ const publicTournamentSelect = `
 	FROM tournament t`
 
 type publicTournament struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`
-	StartDate    string  `json:"startDate"`
-	EndDate      string  `json:"endDate"`
-	VenueName    string  `json:"venueName"`
-	VenueAddress string  `json:"venueAddress"`
-	Deadline     string  `json:"registrationDeadline"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	StartDate    string `json:"startDate"`
+	EndDate      string `json:"endDate"`
+	VenueName    string `json:"venueName"`
+	VenueAddress string `json:"venueAddress"`
+	Deadline     string `json:"registrationDeadline"`
 	/* Fee is what an outside participant pays if they register right now —
 	   the early-bird price while its window is open, the regular price after.
 	   Students pay StudentFee, by whichever reductions the organiser chose
@@ -85,13 +98,13 @@ type publicTournament struct {
 	EarlyBirdActive bool    `json:"earlyBirdActive"`
 	HasRegulation   bool    `json:"hasRegulation"`
 	StudentFee      float64 `json:"studentFee"`
-	DiscountPct  int     `json:"studentDiscountPct"`
-	Capacity     *int    `json:"capacity"`
-	price        tournamentPrice
-	Taken        int     `json:"taken"`
-	SpotsLeft    *int    `json:"spotsLeft"`
-	Open         bool    `json:"open"`
-	ClosedReason string  `json:"closedReason,omitempty"`
+	DiscountPct     int     `json:"studentDiscountPct"`
+	Capacity        *int    `json:"capacity"`
+	price           tournamentPrice
+	Taken           int    `json:"taken"`
+	SpotsLeft       *int   `json:"spotsLeft"`
+	Open            bool   `json:"open"`
+	ClosedReason    string `json:"closedReason,omitempty"`
 }
 
 // scanPublicTournament reads one row of publicTournamentSelect and works out
@@ -228,6 +241,19 @@ type registerInput struct {
 	/* Required when IsStudent: the discount is only quoted against a student
 	   id the academy can actually find. */
 	StudentID string `json:"studentId"`
+
+	/* Called across the hall and printed on the pairing card. Every Thai
+	   junior event uses one. */
+	Nickname string `json:"nickname"`
+	/* The form asks for an age, not a date of birth, so it is stored as given
+	   rather than derived. The date of birth is what the ID card says; the
+	   interesting case for an age-limited group is when the two disagree. */
+	Age int `json:"age"`
+	/* The five numbered conditions on the entry form — no refunds, the
+	   organiser may change the schedule, the organiser is not liable. Recorded
+	   rather than assumed: "did this person agree not to be refunded" is
+	   exactly the question somebody asks three weeks later. */
+	AcceptTerms bool `json:"acceptTerms"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -239,6 +265,7 @@ func (in *registerInput) validate() string {
 	in.DateOfBirth = strings.TrimSpace(in.DateOfBirth)
 	in.CategoryID = strings.TrimSpace(in.CategoryID)
 	in.StudentID = strings.TrimSpace(in.StudentID)
+	in.Nickname = strings.TrimSpace(in.Nickname)
 
 	switch {
 	case len([]rune(in.Name)) < 2 || len([]rune(in.Name)) > maxNameLen:
@@ -258,6 +285,21 @@ func (in *registerInput) validate() string {
 	}
 	if in.IsStudent && (in.StudentID == "" || len(in.StudentID) > 40) {
 		return "please give the JCA student ID so we can apply the discount"
+	}
+	if len([]rune(in.Nickname)) > maxNameLen {
+		return "that nickname is too long"
+	}
+	/* Refused rather than defaulted. An entry recorded as having accepted
+	   terms nobody ticked is worse than no record at all — it is a false one,
+	   and the record only has value if it can only mean yes. */
+	if !in.AcceptTerms {
+		return "please accept the terms and conditions to enter"
+	}
+	/* 0 is "not given", which is allowed — the age limit below is enforced on
+	   the date of birth. A negative or implausible age is a typo worth
+	   catching here, where the message can say so. */
+	if in.Age < 0 || in.Age > 120 {
+		return "that age does not look right"
 	}
 	return ""
 }
@@ -353,20 +395,35 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			// the tournament's start day. The page disables ineligible
 			// categories, but the page is a courtesy — this is the rule.
 			if limit := categoryAgeLimit(catName); limit > 0 {
+				/* The date of birth is the rule, because it is what an ID card
+				   proves and an age is what somebody typed. A claimed age is
+				   accepted only when there is no date of birth at all — which
+				   is the entrant who skipped the card scan, and is still
+				   better than refusing an entry we could check. */
 				if in.DateOfBirth == "" {
-					httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
-					return
-				}
-				dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
-				on := academytime.Now()
-				if t.StartDate != "" {
-					if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
-						on = parsed
+					if in.Age == 0 {
+						httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth or age", nil)
+						return
 					}
-				}
-				if ageOn(dob, on) >= limit {
-					httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-					return
+					if in.Age >= limit {
+						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
+						return
+					}
+				} else {
+					dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
+					/* The academy's day, not the server's: a tournament in
+					   Bangkok starts on the date the poster says, and a UTC
+					   clock turns that over seven hours early. */
+					on := academytime.Now()
+					if t.StartDate != "" {
+						if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
+							on = parsed
+						}
+					}
+					if ageOn(dob, on) >= limit {
+						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
+						return
+					}
 				}
 			}
 			categoryID = in.CategoryID
@@ -414,15 +471,27 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		}
 
 		regID := newID("treg")
+		// fee_charged is set here because approving used to set it, and there
+		// is no approving any more. A quote that never becomes a charge would
+		// leave every public entry owing nothing on the desk's own roster —
+		// the two columns still differ in meaning, and staff may still correct
+		// fee_charged afterwards, but its starting value is what we quoted.
 		_, err = tx.Exec(`INSERT INTO tournament_registration (
 			tournament_registration_id, tournament_id, student_id, participant_name,
 			participant_date_of_birth, tournament_category_id, registered_at,
-			status, source, contact_email, contact_phone, fee_quoted,
-			student_discount_applied
-		) VALUES (?,?,?,?,?,?,?,'Pending','Public',?,?,?,?)`,
+			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
+			student_discount_applied, nickname, participant_age, terms_accepted_at
+		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?)`,
 			regID, tournamentID, studentID, in.Name,
 			nullIfEmpty(in.DateOfBirth), categoryID, sqliteNow(),
-			in.Email, in.Phone, fee, boolToInt(in.IsStudent))
+			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent),
+			in.Nickname, nullIfZero(in.Age),
+			/* Stamped here rather than taken from the request: the time the
+			   terms were accepted is the server's fact, and a client-supplied
+			   timestamp on a consent record is worth nothing. validate()
+			   refuses the entry unless AcceptTerms is true, so reaching this
+			   line is what "accepted" means. */
+			sqliteNow())
 		if err != nil {
 			// The partial unique indexes are the last word on duplicates, and
 			// they are reached rather than pre-checked so that two simultaneous
@@ -442,11 +511,13 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 
 		httpx.JSON(w, http.StatusCreated, map[string]any{
 			"registered": true,
-			"status":     "Pending",
+			"status":     "Approved",
 			"feeQuoted":  fee,
-			// Said plainly so nobody turns up on the day assuming a place: the
-			// desk still has to confirm it.
-			"needsApproval": true,
+			// Kept, and false, rather than dropped: a portal still running the
+			// previous build reads this to decide whether to say "we will
+			// confirm your place". Removing the key would leave it undefined,
+			// which is falsey by accident rather than on purpose.
+			"needsApproval": false,
 		})
 	}
 }
@@ -481,4 +552,16 @@ func mountPublicRegistration(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("GET "+p, httpx.RateLimit(60, handlePublicTournamentList(d)))
 	mux.HandleFunc("GET "+p+"/{id}", httpx.RateLimit(60, handlePublicTournament(d)))
 	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(d)))
+}
+
+// nullIfZero keeps "not given" out of the database as NULL rather than 0.
+//
+// An age of 0 would be a claim about a newborn; the column has to be able to
+// say nothing at all, because the form allows an entrant to give a date of
+// birth instead.
+func nullIfZero(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }

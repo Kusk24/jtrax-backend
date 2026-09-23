@@ -66,6 +66,26 @@ func linkedResultsFor(d *sql.DB, tournamentID string) (*linkedResults, error) {
 		tournamentID).Scan(&crID); err != nil {
 		return nil, err
 	}
+	return linkedResultsForID(d, crID)
+}
+
+// linkedResultsForCategory is the same thing for one age group.
+//
+// A chessfest runs OPEN, U18, U12, U10 and U08 on one day, and the arbiter
+// publishes each as its own chess-results event — so the group is the unit that
+// has a link, not the tournament. See migration 0037.
+func linkedResultsForCategory(d *sql.DB, categoryID string) (*linkedResults, error) {
+	var crID sql.NullInt64
+	if err := d.QueryRow(`SELECT chess_results_id FROM tournament_category
+	                      WHERE tournament_category_id = ?`, categoryID).Scan(&crID); err != nil {
+		return nil, err
+	}
+	return linkedResultsForID(d, crID)
+}
+
+// linkedResultsForID loads the stored copy of one chess-results event. Shared
+// so a category and a whole tournament cannot drift into reading it two ways.
+func linkedResultsForID(d *sql.DB, crID sql.NullInt64) (*linkedResults, error) {
 	if !crID.Valid {
 		return nil, nil
 	}
@@ -238,41 +258,7 @@ func handleLinkChessResults(c *chessResultsDeps) http.HandlerFunc {
 			return
 		}
 
-		// Track it if it is new. Already tracked is the ordinary case once a
-		// second tournament from the same series is linked.
-		var extID string
-		err = c.db.QueryRow(`SELECT external_tournament_id FROM external_tournament
-		                     WHERE chess_results_id = ?`, crID).Scan(&extID)
-		if errors.Is(err, sql.ErrNoRows) {
-			if !c.allowFetch(crID) {
-				httpx.Error(w, http.StatusTooManyRequests,
-					"that tournament was fetched moments ago, try again shortly", nil)
-				return
-			}
-			t, ferr := c.client.Fetch(crID)
-			if ferr != nil {
-				log.Printf("chessresults: fetching %d for tournament %s: %v", crID, tournamentID, ferr)
-				httpx.Error(w, http.StatusBadGateway,
-					"chess-results.com could not be read — check the link, or try again shortly", ferr)
-				return
-			}
-			extID = newID("ext")
-			if _, err := c.db.Exec(`INSERT INTO external_tournament
-			                        (external_tournament_id, chess_results_id, name, created_by)
-			                        VALUES (?, ?, ?, ?)`,
-				extID, crID, t.Name, id.UserAccountID); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not save", err)
-				return
-			}
-			if err := c.storeExternal(extID, t); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
-				return
-			}
-			if err := c.syncRounds(extID, t); err != nil {
-				log.Printf("chessresults: rounds for %d: %v", crID, err)
-			}
-		} else if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not check", err)
+		if !c.trackEvent(w, crID, id.UserAccountID) {
 			return
 		}
 
@@ -352,5 +338,135 @@ func handleRefreshTournamentResults(c *chessResultsDeps) http.HandlerFunc {
 			return
 		}
 		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
+// trackEvent makes sure the stored copy of a chess-results event exists,
+// fetching it the first time anybody points at it.
+//
+// Tracking and linking are one action deliberately: a member of staff pasting a
+// link means "this is that", and having to also add it to a separate list would
+// be a way to end up linked to an event whose standings nobody ever fetches.
+//
+// Reports its own HTTP errors and returns false when it has; the caller stops.
+func (c *chessResultsDeps) trackEvent(w http.ResponseWriter, crID int, byUser string) bool {
+	var extID string
+	err := c.db.QueryRow(`SELECT external_tournament_id FROM external_tournament
+	                      WHERE chess_results_id = ?`, crID).Scan(&extID)
+	if err == nil {
+		return true // already tracked, the ordinary case for the second group
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		httpx.Error(w, http.StatusInternalServerError, "could not check", err)
+		return false
+	}
+	if !c.allowFetch(crID) {
+		httpx.Error(w, http.StatusTooManyRequests,
+			"that tournament was fetched moments ago, try again shortly", nil)
+		return false
+	}
+	t, ferr := c.client.Fetch(crID)
+	if ferr != nil {
+		log.Printf("chessresults: fetching %d: %v", crID, ferr)
+		httpx.Error(w, http.StatusBadGateway,
+			"chess-results.com could not be read — check the link, or try again shortly", ferr)
+		return false
+	}
+	extID = newID("ext")
+	if _, err := c.db.Exec(`INSERT INTO external_tournament
+	                        (external_tournament_id, chess_results_id, name, created_by)
+	                        VALUES (?, ?, ?, ?)`, extID, crID, t.Name, byUser); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not save", err)
+		return false
+	}
+	if err := c.storeExternal(extID, t); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
+		return false
+	}
+	if err := c.syncRounds(extID, t); err != nil {
+		log.Printf("chessresults: rounds for %d: %v", crID, err)
+	}
+	return true
+}
+
+// handleGetCategoryLink serves one age group's linked standings.
+func handleGetCategoryLink(c *chessResultsDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(c.db, w, r) == nil {
+			return
+		}
+		out, err := linkedResultsForCategory(c.db, r.PathValue("categoryId"))
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			return
+		}
+		if out == nil {
+			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+			return
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
+// handleLinkCategory points one age group at its own chess-results event.
+func handleLinkCategory(c *chessResultsDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireStaff(c.db, w, r)
+		if id == nil {
+			return
+		}
+		categoryID := r.PathValue("categoryId")
+		var exists int
+		if err := c.db.QueryRow(`SELECT COUNT(*) FROM tournament_category
+		                         WHERE tournament_category_id = ?`, categoryID).Scan(&exists); err != nil || exists == 0 {
+			httpx.Error(w, http.StatusNotFound, "not found", err)
+			return
+		}
+
+		var in struct {
+			URL string `json:"url"`
+		}
+		if err := httpx.Decode(r, &in); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "a chess-results.com link is required", err)
+			return
+		}
+		// ParseRef also refuses any host that is not chess-results.com, which is
+		// what stops this being a way to make the server fetch a URL of the
+		// caller's choosing.
+		crID, err := chessresults.ParseRef(in.URL)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest,
+				"that does not look like a chess-results.com tournament link", nil)
+			return
+		}
+		if !c.trackEvent(w, crID, id.UserAccountID) {
+			return
+		}
+		if _, err := c.db.Exec(`UPDATE tournament_category SET chess_results_id = ?
+		                        WHERE tournament_category_id = ?`, crID, categoryID); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not link", err)
+			return
+		}
+		out, err := linkedResultsForCategory(c.db, categoryID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "linked but could not reload", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
+// handleUnlinkCategory breaks one group's tie. The event stays tracked.
+func handleUnlinkCategory(c *chessResultsDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(c.db, w, r) == nil {
+			return
+		}
+		if _, err := c.db.Exec(`UPDATE tournament_category SET chess_results_id = NULL
+		                        WHERE tournament_category_id = ?`, r.PathValue("categoryId")); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
 	}
 }
