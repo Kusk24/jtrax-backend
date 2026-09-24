@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -220,5 +221,43 @@ func TestWithoutStripeTheEmailSaysHowElseToPay(t *testing.T) {
 	if status, _, _ := f.pub.do("POST", "/api/v1/public/tournament-registrations/"+id+"/pay",
 		map[string]string{"code": code}); status != 503 {
 		t.Fatalf("pay with Stripe off: want 503, got %d", status)
+	}
+}
+
+// PromptPay settles in two steps: the session completes "unpaid" when the QR
+// code is shown, and the money is confirmed by a second event. The entry must
+// stay unpaid after the first and read paid after the second.
+func TestAPromptPayEntryIsPaidWhenTheMoneyArrives(t *testing.T) {
+	f := publicPayServer(t, true)
+	id, code, _ := f.register(t, "somchai@example.com")
+	base := "/api/v1/public/tournament-registrations/" + id
+	f.pub.do("POST", base+"/pay", map[string]string{"code": code})
+
+	var payID string
+	f.d.QueryRow(`SELECT payment_id FROM payment WHERE tournament_registration_id = ?`, id).Scan(&payID)
+	event := func(typ, status string) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"type": typ,
+			"data": map[string]any{"object": map[string]any{
+				"id": "cs_pp", "payment_status": status,
+				"amount_total": 50000, "currency": "thb",
+				"metadata": map[string]string{"payment_id": payID},
+			}},
+		})
+		return b
+	}
+	send := func(payload []byte) {
+		if got := postWebhook(t, f.srv, payload, stripepay.Sign(payload, webhookSecret, time.Now())); got != 200 {
+			t.Fatalf("webhook: %d", got)
+		}
+	}
+
+	send(event("checkout.session.completed", "unpaid"))
+	if _, e, _ := f.pub.do("POST", base, map[string]string{"code": code}); e["state"] != "unpaid" {
+		t.Fatalf("after the QR was shown but before paying: %v", e["state"])
+	}
+	send(event("checkout.session.async_payment_succeeded", "paid"))
+	if _, e, _ := f.pub.do("POST", base, map[string]string{"code": code}); e["state"] != "paid" {
+		t.Fatalf("after PromptPay confirmed the money: %v", e["state"])
 	}
 }
