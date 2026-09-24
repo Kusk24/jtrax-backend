@@ -698,12 +698,20 @@ func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
 	if paymentID == "" {
 		return
 	}
-	var studentID, enrolmentID sql.NullString
+	var studentID, enrolmentID, regID sql.NullString
 	var amount float64
+	var forWhat string
 	if err := d.QueryRow(
-		`SELECT student_id, enrollment_id, final_amount FROM payment WHERE payment_id = ?`,
-		paymentID).Scan(&studentID, &enrolmentID, &amount); err != nil {
+		`SELECT student_id, enrollment_id, final_amount, tournament_registration_id,
+		        COALESCE(class_name, '')
+		   FROM payment WHERE payment_id = ?`,
+		paymentID).Scan(&studentID, &enrolmentID, &amount, &regID, &forWhat); err != nil {
 		return
+	}
+	// A tournament fee paid by somebody who entered on the public form: they
+	// may have no account at all, so the receipt goes to the address they gave.
+	if regID.Valid {
+		emailPublicEntrantReceipt(d, svc, regID.String, amount, forWhat)
 	}
 	if !studentID.Valid || studentID.String == "" {
 		return
@@ -727,6 +735,11 @@ func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
 	amt := fmtBaht(amount)
 	en := "Your payment of " + amt + " was successful."
 	th := "การชำระเงิน " + amt + " ของคุณสำเร็จแล้ว"
+	if regID.Valid && forWhat != "" {
+		// A tournament fee buys no credits, so what it was for is the news.
+		en = "Your payment of " + amt + " for " + name + "'s entry to " + forWhat + " was successful."
+		th = "ชำระค่าสมัคร " + forWhat + " ของ " + name + " จำนวน " + amt + " สำเร็จแล้ว"
+	}
 	if credits > 0 {
 		en += " " + fmtCreditsShort(credits) + " credits have been added to " + name +
 			"'s account. Current balance: " + fmtCreditsShort(balance) + " credits."
@@ -740,6 +753,44 @@ func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
 		Data:      map[string]any{"paymentId": paymentID, "studentId": studentID.String},
 		DedupeKey: "payment_received:" + paymentID,
 	})
+}
+
+// emailPublicEntrantReceipt confirms a paid tournament fee to the address a
+// public entrant registered with. Parent and desk entries have no such address
+// (their family is told through the inbox above), and an address that already
+// belongs to one of the child's parents is skipped, so nobody gets it twice.
+func emailPublicEntrantReceipt(d *sql.DB, svc *notify.Service, regID string, amount float64, tournament string) {
+	var email, participant, source string
+	var studentID sql.NullString
+	if err := d.QueryRow(`
+		SELECT COALESCE(contact_email, ''), participant_name, COALESCE(source, ''), student_id
+		  FROM tournament_registration WHERE tournament_registration_id = ?`, regID).
+		Scan(&email, &participant, &source, &studentID); err != nil {
+		return
+	}
+	if source != "Public" || email == "" {
+		return
+	}
+	if studentID.Valid {
+		var n int
+		d.QueryRow(`
+			SELECT COUNT(*) FROM user_account u
+			  JOIN parent p ON p.user_account_id = u.user_account_id
+			  JOIN student_parent sp ON sp.parent_id = p.parent_id
+			 WHERE sp.student_id = ? AND lower(trim(u.email)) = lower(trim(?))`,
+			studentID.String, email).Scan(&n)
+		if n > 0 {
+			return
+		}
+	}
+	amt := fmtBaht(amount)
+	body := "Hello,\n\n" +
+		"We have received your payment of " + amt + " for " + participant + "'s entry to " + tournament + ". " +
+		"The entry is paid; there is nothing more to do.\n\nJCA Chess Academy\n\n----------\n\n" +
+		"สวัสดีค่ะ\n\n" +
+		"เราได้รับค่าสมัคร " + tournament + " ของ " + participant + " จำนวน " + amt + " เรียบร้อยแล้ว " +
+		"ไม่ต้องดำเนินการใดเพิ่มเติม\n\nJCA Chess Academy\n"
+	svc.Email(email, "Payment received: "+tournament, body)
 }
 
 // fmtBaht writes an amount with a thousands separator and the ISO code —

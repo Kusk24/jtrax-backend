@@ -225,6 +225,22 @@ func (s *Service) alreadySent(tx *sql.Tx, uid, typ, key string) bool {
 	return n > 0
 }
 
+// Email sends one message straight to an address that has no account behind
+// it — a public tournament entrant, say — so there is no inbox or preference to
+// go through. A deployment with no mail configured sends nothing; a failure is
+// logged with the address redacted and never returned, because the caller's
+// work is already done.
+func (s *Service) Email(to, subject, body string) {
+	// mail.New returns no sender at all when SMTP is not configured, so a
+	// sender being here is what "mail is on" means.
+	if s.mail == nil || to == "" {
+		return
+	}
+	if err := s.mail.Send(to, subject, body); err != nil {
+		log.Printf("notify: email to %s failed: %v", redactAddr(to), err)
+	}
+}
+
 func (s *Service) markDelivery(id, status, errText string) {
 	var errCol any
 	if errText != "" {
