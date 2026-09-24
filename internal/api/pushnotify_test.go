@@ -166,3 +166,22 @@ func TestAParentWhoTurnedPhoneAlertsOffGetsNone(t *testing.T) {
 		t.Fatalf("inbox: %d", got)
 	}
 }
+
+func TestOnlyAnExpoTokenIsAcceptedFromAPhone(t *testing.T) {
+	srv := newServer(t)
+	sandy := &client{t: t, srv: srv}
+	sandy.login("sandy01234@gmail.com")
+	for _, bad := range []string{"not-a-token", "https://evil.example/hook", "ExponentPushToken[" + strings.Repeat("a", 600) + "]"} {
+		if status, _, _ := sandy.do("POST", "/api/v1/push-subscriptions", map[string]any{
+			"channel": "mobile", "endpoint": bad,
+		}); status != 400 {
+			t.Errorf("%.40q: want 400, got %d", bad, status)
+		}
+	}
+	anon := &client{t: t, srv: srv}
+	if status, _, _ := anon.do("POST", "/api/v1/push-subscriptions", map[string]any{
+		"channel": "mobile", "endpoint": "ExponentPushToken[x]",
+	}); status != 401 {
+		t.Errorf("anonymous registration: want 401, got %d", status)
+	}
+}
