@@ -20,6 +20,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 )
 
 // mountNotifications wires the inbox, settings, subscriptions and the manual
@@ -220,6 +221,13 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 		}
 		if (in.Channel != notify.ChannelWebPush && in.Channel != notify.ChannelMobile) || in.Endpoint == "" {
 			httpx.Error(w, http.StatusBadRequest, "channel must be webpush or mobile, with an endpoint", nil)
+			return
+		}
+		// A phone registers an Expo push token and nothing else: that is the
+		// only kind the sender can deliver to, and the column is not a place
+		// to park whatever a client sends.
+		if len(in.Endpoint) > 512 || (in.Channel == notify.ChannelMobile && !push.IsExpoToken(in.Endpoint)) {
+			httpx.Error(w, http.StatusBadRequest, "that is not a push token this server can use", nil)
 			return
 		}
 		// endpoint is UNIQUE: the same browser re-registering updates its owner
