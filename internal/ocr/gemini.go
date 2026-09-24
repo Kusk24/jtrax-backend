@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -104,6 +105,34 @@ func NewGemini(key, model string) Provider {
 
 func (g *gemini) Name() string { return "gemini/" + g.model }
 
+func (g *gemini) Model() string { return g.model }
+
+func (g *gemini) WithModel(model string) Provider {
+	if !ValidModel(model) {
+		return g
+	}
+	c := *g
+	c.model = model
+	return &c
+}
+
+// Test asks for one word of text, with no image. That costs a small fraction of
+// a scan, and it goes through the same key, model and endpoint a scan does. So
+// a 404 here is the same 404 a scan would get.
+func (g *gemini) Test(ctx context.Context) error {
+	_, err := g.call(ctx, map[string]any{
+		"contents": []any{map[string]any{
+			"parts": []any{map[string]any{"text": "Reply with the single word OK."}},
+		}},
+		"generationConfig": map[string]any{"temperature": 0},
+	})
+	// An empty answer to a trivial prompt still means the model was reached.
+	if errors.Is(err, errNoCandidate) {
+		return nil
+	}
+	return err
+}
+
 func (g *gemini) url() string {
 	if g.base != "" {
 		return g.base
@@ -118,7 +147,7 @@ func (g *gemini) url() string {
 // schema, the key in a header rather than the query string, and an upstream
 // error body that is never forwarded to the caller.
 func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]any, image []byte, mime string) ([]byte, error) {
-	body, err := json.Marshal(map[string]any{
+	return g.call(ctx, map[string]any{
 		"contents": []any{map[string]any{
 			"parts": []any{
 				map[string]any{"text": prompt},
@@ -135,6 +164,15 @@ func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]
 			"responseSchema":   schema,
 		},
 	})
+}
+
+// errNoCandidate is a successful call that came back with nothing to read.
+var errNoCandidate = errors.New("gemini: no candidate returned")
+
+// call posts one request and returns the first candidate's text. The scans and
+// the connection test share it, so the test takes the same route a scan does.
+func (g *gemini) call(ctx context.Context, payload map[string]any) ([]byte, error) {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +194,7 @@ func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]
 	if resp.StatusCode != http.StatusOK {
 		// The upstream body can quote the request, so it is never forwarded to
 		// the caller — only the status is, and the caller keeps that internal.
-		return nil, fmt.Errorf("gemini: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("gemini: %w", &StatusError{Status: resp.StatusCode})
 	}
 
 	var out struct {
@@ -173,7 +211,7 @@ func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]
 	}
 	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
 		// A safety filter or an unreadable photo both land here.
-		return nil, fmt.Errorf("gemini: no candidate returned")
+		return nil, errNoCandidate
 	}
 	return []byte(out.Candidates[0].Content.Parts[0].Text), nil
 }

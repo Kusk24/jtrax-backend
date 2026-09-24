@@ -84,6 +84,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// confirm. Writes nothing, so it sits outside the registry.
 	mountRegistrationScan(mux, d, scanner)
 	mountIDCardScan(mux, d, scanner)
+	mountOCRSettings(mux, d, scanner)
 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a

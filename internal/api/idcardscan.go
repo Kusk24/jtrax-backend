@@ -57,6 +57,7 @@ func handleScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 
+		provider := scannerFor(d, provider)
 		reader, ok := provider.(ocr.IDCardReader)
 		if provider == nil || !ok {
 			// Not an error the entrant caused, and not one they can fix. The

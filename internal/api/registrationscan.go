@@ -52,6 +52,9 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			httpx.Error(w, http.StatusForbidden, "only admin or reception may scan a form", nil)
 			return
 		}
+		// The model saved in Settings, read per scan so a change applies
+		// without a restart.
+		provider := scannerFor(d, provider)
 		if provider == nil {
 			httpx.Error(w, http.StatusServiceUnavailable,
 				"form scanning is not configured on this server", nil)
