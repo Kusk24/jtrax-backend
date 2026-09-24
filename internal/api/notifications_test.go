@@ -220,11 +220,10 @@ func TestCheckOutSendsTheCreditDeduction(t *testing.T) {
 	}
 }
 
-func TestLowCreditIsOptIn(t *testing.T) {
+// Low credit is a staff decision now, not a side effect of checking out: a
+// check-out that leaves the balance under the line sends nothing about it.
+func TestCheckOutDoesNotSendLowCreditByItself(t *testing.T) {
 	srv := newServer(t)
-
-	// The academy's line is set above Penny's balance, so her check-out
-	// leaves her "low" by the rule the console shows.
 	admin := &client{t: t, srv: srv}
 	admin.login("admin@jca.ac.th")
 	if status, _, _ := admin.do("POST", "/api/v1/system-configuration", map[string]any{
@@ -233,31 +232,91 @@ func TestLowCreditIsOptIn(t *testing.T) {
 		t.Fatalf("setting the low-credit rule failed")
 	}
 
-	checkOut(t, srv)
-	// Nothing: low credit is off until the parent turns it on.
-	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "low_credit"); got != 0 {
-		t.Fatalf("low_credit sent without opt-in: %d", got)
-	}
-
-	// Sandy opts in; the next chargeable check-out (Uri's) nudges her.
+	// Sandy has low credit switched on, so the only thing that can keep it out
+	// of her inbox is that check-out no longer sends it.
 	sandy := &client{t: t, srv: srv}
 	sandy.login("sandy01234@gmail.com")
 	if status, _, _ := sandy.do("PUT", "/api/v1/notification-settings", map[string]any{
 		"type": "low_credit", "channel": "inapp", "enabled": true,
 	}); status != 200 {
-		t.Fatalf("opting in failed")
+		t.Fatalf("switching low credit on failed")
 	}
-	// Uri's seeded attendance is corrected, which recharges the class and
-	// re-runs the deduction — the same write path Class History uses.
-	teacher := &client{t: t, srv: srv}
-	teacher.login("serene@jca.ac.th")
-	if status, _, _ := teacher.do("PATCH", "/api/v1/attendance/att_3", map[string]any{
-		"check_out_time": "2026-05-10T10:02:00",
-	}); status != 200 {
-		t.Fatalf("correcting Uri's attendance failed")
+
+	checkOut(t, srv)
+	in := inbox(t, srv, "sandy01234@gmail.com")
+	if got := countType(in, "low_credit"); got != 0 {
+		t.Fatalf("check-out sent low_credit by itself: %d", got)
 	}
+	// The receipt for the class still goes.
+	if got := countType(in, "credit_deducted"); got != 1 {
+		t.Fatalf("credit_deducted: %d, want 1", got)
+	}
+}
+
+func TestLowCreditReminderIsStaffOnly(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("POST", "/api/v1/notifications/low-credit", nil); status != 403 {
+		t.Fatalf("parent sending low-credit reminders: want 403, got %d", status)
+	}
+}
+
+// The desk previews who is low, narrows it, and cannot widen it: the same
+// contract as the expiry reminder. It reaches a parent who never touched their
+// settings, because a reminder staff chose to send is on by default.
+func TestLowCreditReminderPreviewAndTargeting(t *testing.T) {
+	srv := newServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	if status, _, _ := admin.do("POST", "/api/v1/system-configuration", map[string]any{
+		"config_key": "credit_rule_low_credit", "config_value": "100",
+	}); status != 201 {
+		t.Fatalf("setting the low-credit rule failed")
+	}
+
+	status, obj, _ := admin.do("POST", "/api/v1/notifications/low-credit", map[string]any{"dry_run": true})
+	if status != 200 {
+		t.Fatalf("dry run: status %d", status)
+	}
+	targets, _ := obj["targets"].([]any)
+	ids := map[string]bool{}
+	for _, x := range targets {
+		row := x.(map[string]any)
+		ids[row["student_id"].(string)] = true
+		if _, ok := row["balance"].(float64); !ok {
+			t.Fatalf("preview row should carry the balance: %v", row)
+		}
+	}
+	if !ids["stu_penny"] || !ids["stu_uri"] {
+		t.Fatalf("with the line at 100, Penny and Uri are low: %v", obj["targets"])
+	}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "low_credit"); got != 0 {
+		t.Fatalf("dry run must not send, inbox has %d", got)
+	}
+
+	status, obj, _ = admin.do("POST", "/api/v1/notifications/low-credit",
+		map[string]any{"student_ids": []string{"stu_penny", "stu_nobody"}})
+	if status != 200 {
+		t.Fatalf("send: status %d", status)
+	}
+	if n, _ := obj["students_notified"].(float64); n != 1 {
+		t.Fatalf("expected 1 student notified, got %v", obj["students_notified"])
+	}
+	if skipped, _ := obj["skipped"].([]any); len(skipped) != 1 || skipped[0] != "stu_nobody" {
+		t.Fatalf("the ineligible id should come back skipped, got %v", obj["skipped"])
+	}
+	// Pressing Send again the same day does not reach the family twice.
+	admin.do("POST", "/api/v1/notifications/low-credit", map[string]any{"student_ids": []string{"stu_penny"}})
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "low_credit"); got != 1 {
-		t.Fatalf("low_credit after opting in: %d, want 1", got)
+		t.Fatalf("Sandy should have exactly one low_credit, got %d", got)
+	}
+
+	// With the line at 0, children who still have credit are not low.
+	admin.do("PATCH", "/api/v1/system-configuration/credit_rule_low_credit", map[string]any{"config_value": "0"})
+	_, obj, _ = admin.do("POST", "/api/v1/notifications/low-credit", map[string]any{"dry_run": true})
+	if targets, _ := obj["targets"].([]any); len(targets) != 0 {
+		t.Fatalf("the seeded children have credit left, so nobody is at or under 0: %v", obj["targets"])
 	}
 }
 

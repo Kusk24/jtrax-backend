@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/Kusk24/jtrax-backend/internal/auth"
@@ -35,8 +36,9 @@ func mountNotifications(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/push-subscriptions", handleRegisterPush(d))
 	mux.HandleFunc("DELETE /api/v1/push-subscriptions", handleUnregisterPush(d))
 
-	// Manual, permission-gated: only Admin / Receptionist may set it off.
+	// Manual, permission-gated: only Admin / Receptionist may set these off.
 	mux.HandleFunc("POST /api/v1/notifications/credit-expiry", handleCreditExpiry(d, svc))
+	mux.HandleFunc("POST /api/v1/notifications/low-credit", handleLowCredit(d, svc))
 }
 
 // ---- inbox ---------------------------------------------------------------
@@ -399,6 +401,151 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 	}
 }
 
+// handleLowCredit asks the parents of students whose credit is at or under the
+// academy's low-credit line to top up. Manual and staff-only, the same shape as
+// handleCreditExpiry: `{"dry_run": true}` lists who it would reach, and
+// `{"student_ids": [...]}` narrows a send to those students. The list can only
+// shrink the eligible set; an id outside it comes back under `skipped`.
+//
+// A balance is counted the way the console counts it: the credits recorded
+// against an active course, plus the child's credits that sit in no course. A
+// child in two courses is low if either course is.
+func handleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		if !isStaff(id.Role) {
+			httpx.Error(w, http.StatusForbidden, "only admin or reception may send this", nil)
+			return
+		}
+		var req struct {
+			DryRun     bool     `json:"dry_run"`
+			StudentIDs []string `json:"student_ids"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		}
+		if len(req.StudentIDs) > 500 {
+			httpx.Error(w, http.StatusUnprocessableEntity, "too many student ids", nil)
+			return
+		}
+
+		line := lowCreditLine(d)
+		rows, err := d.Query(`
+			SELECT e.student_id, COALESCE(s.name, ''),
+			       COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
+			                  WHERE ct.enrollment_id = e.enrollment_id), 0)
+			     + COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
+			                  WHERE ct.enrollment_id IS NULL AND ct.student_id = e.student_id), 0)
+			  FROM student_enrollment e
+			  JOIN student s ON s.student_id = e.student_id
+			 WHERE e.status = 'Active'`)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
+			return
+		}
+		defer rows.Close()
+
+		type target struct {
+			studentID, studentName string
+			balance                float64
+		}
+		lowest := map[string]*target{}
+		var order []string
+		for rows.Next() {
+			var t target
+			if err := rows.Scan(&t.studentID, &t.studentName, &t.balance); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
+				return
+			}
+			if t.balance > line {
+				continue
+			}
+			if prev, seen := lowest[t.studentID]; seen {
+				if t.balance < prev.balance {
+					prev.balance = t.balance
+				}
+				continue
+			}
+			lowest[t.studentID] = &t
+			order = append(order, t.studentID)
+		}
+		rows.Close()
+		targets := make([]target, 0, len(order))
+		for _, sid := range order {
+			targets = append(targets, *lowest[sid])
+		}
+		// Lowest balance first: those are the families to call before a class.
+		sort.SliceStable(targets, func(i, j int) bool {
+			if targets[i].balance != targets[j].balance {
+				return targets[i].balance < targets[j].balance
+			}
+			return targets[i].studentName < targets[j].studentName
+		})
+
+		if req.DryRun {
+			list := []map[string]any{}
+			for _, t := range targets {
+				list = append(list, map[string]any{
+					"student_id":   t.studentID,
+					"student_name": t.studentName,
+					"parents":      parentNamesOf(d, t.studentID),
+					"balance":      t.balance,
+				})
+			}
+			httpx.JSON(w, http.StatusOK, map[string]any{"targets": list, "line": line})
+			return
+		}
+
+		chosen := map[string]bool{}
+		for _, sid := range req.StudentIDs {
+			chosen[sid] = true
+		}
+		skipped := []string{}
+		for _, sid := range req.StudentIDs {
+			if lowest[sid] == nil {
+				skipped = append(skipped, sid)
+			}
+		}
+
+		sent := 0
+		for _, t := range targets {
+			if len(chosen) > 0 && !chosen[t.studentID] {
+				continue
+			}
+			recipients := parentAccountsOf(d, t.studentID)
+			if len(recipients) == 0 {
+				continue
+			}
+			name := t.studentName
+			if name == "" {
+				name = "your child"
+			}
+			err := svc.Send(recipients, notify.Message{
+				Type:  notify.TypeLowCredit,
+				Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
+				Body: notify.Text{
+					EN: name + " has " + fmtCreditsShort(t.balance) + " credits remaining. " +
+						"Please top up to continue their classes without interruption.",
+					TH: name + " เหลือเครดิต " + fmtCreditsShort(t.balance) + " เครดิต " +
+						"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
+				},
+				Data: map[string]any{"studentId": t.studentID},
+				// Pressing Send twice in a day reaches a family once.
+				DedupeKey: "low_credit:" + t.studentID + ":" + today(),
+			})
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+				return
+			}
+			sent++
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "line": line, "skipped": skipped})
+	}
+}
+
 // ---- triggers on generic writes -----------------------------------------
 
 // attachNotificationHooks wires the check-in and announcement notifications
@@ -592,9 +739,9 @@ func nullable(s string) any {
 // to charge — falls back to the plain "has left class", because inventing a
 // zero-credit receipt would read as a free class rather than a gap.
 //
-// If the balance this leaves is at or under the academy's low-credit line, a
-// second, separate notification nudges the parent to top up. That one is
-// opt-in (see notify.DefaultEnabled) and held to once a day per student.
+// It no longer nudges a family whose balance ran low. The academy wants a
+// person to decide when that goes out, so it is a staff button now, beside the
+// expiry reminder: see handleLowCredit.
 func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []string, attID, studentID, name string) {
 	var used, remaining float64
 	var enrolmentID, start, end string
@@ -632,21 +779,6 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 		Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 		DedupeKey: "credit_deducted:" + attID,
 	})
-
-	if remaining <= lowCreditLine(d) {
-		svc.Send(recipients, notify.Message{
-			Type:  notify.TypeLowCredit,
-			Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
-			Body: notify.Text{
-				EN: name + " has " + fmtCreditsShort(remaining) + " credits remaining. " +
-					"Consider purchasing additional credits to continue their classes without interruption.",
-				TH: name + " เหลือเครดิต " + fmtCreditsShort(remaining) + " เครดิต " +
-					"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
-			},
-			Data:      map[string]any{"studentId": studentID},
-			DedupeKey: "low_credit:" + studentID + ":" + today(),
-		})
-	}
 }
 
 // lowCreditLine is the academy's own threshold, the same

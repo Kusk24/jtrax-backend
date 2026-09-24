@@ -48,10 +48,11 @@ const (
 )
 
 // DefaultEnabled says whether a person receives this type without ever having
-// touched their settings. Everything defaults on except the low-credit nudge,
-// which the academy decided is opt-in — a parent asks for it, it is not
-// assumed.
-func DefaultEnabled(typ string) bool { return typ != TypeLowCredit }
+// touched their settings. Everything defaults on. The low-credit nudge used to
+// be opt-in, back when it fired by itself at every check-out; since 2026-09-24
+// staff send it by hand, like the expiry reminder, and a reminder the desk
+// chose to send should reach the family unless they switched it off.
+func DefaultEnabled(typ string) bool { return true }
 
 // Text is one string in both supported languages. The sender picks per
 // recipient from user_account.language_preference, so a family that reads Thai
