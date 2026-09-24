@@ -75,6 +75,13 @@ type externalStanding struct {
 	Rating     int     `json:"rating,omitempty"`
 	Points     float64 `json:"points"`
 	Club       string  `json:"club,omitempty"`
+	// Type is the player's group as Swiss-Manager's "Typ" column names it:
+	// U14, G14, OPEN. Empty on the events that do not use it.
+	//
+	// It is what lets one link hold several age groups. The console builds the
+	// Results tab's category tabs from the distinct values here when there are
+	// any, rather than needing a separate chess-results event linked per group.
+	Type string `json:"type,omitempty"`
 	// Set when this row is one of the academy's own students — the reason the
 	// feature exists.
 	StudentID   string `json:"studentId,omitempty"`
@@ -156,9 +163,10 @@ func (c *chessResultsDeps) storeExternal(extID string, t *chessresults.Tournamen
 		}
 		if _, err := tx.Exec(`
 			INSERT INTO external_standing (external_tournament_id, position, rank, name, fide_id,
-			                               federation, rating, points, club, student_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			extID, i+1, r.Rank, r.Name, r.FideID, r.Federation, r.Rating, r.Points, r.Club, studentID); err != nil {
+			                               federation, rating, points, club, player_type, student_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			extID, i+1, r.Rank, r.Name, r.FideID, r.Federation, r.Rating, r.Points, r.Club,
+			r.Type, studentID); err != nil {
 			return err
 		}
 	}
@@ -542,7 +550,7 @@ func staleExternal(fetchedISO string) bool {
 func loadExternalStandings(d *sql.DB, extID string) ([]externalStanding, error) {
 	rows, err := d.Query(`
 		SELECT s.rank, s.name, s.fide_id, s.federation, s.rating, s.points, s.club,
-		       COALESCE(s.student_id,''), COALESCE(st.name,'')
+		       s.player_type, COALESCE(s.student_id,''), COALESCE(st.name,'')
 		FROM external_standing s
 		LEFT JOIN student st ON st.student_id = s.student_id
 		WHERE s.external_tournament_id = ?
@@ -555,7 +563,7 @@ func loadExternalStandings(d *sql.DB, extID string) ([]externalStanding, error) 
 	for rows.Next() {
 		var s externalStanding
 		if err := rows.Scan(&s.Rank, &s.Name, &s.FideID, &s.Federation, &s.Rating,
-			&s.Points, &s.Club, &s.StudentID, &s.StudentName); err != nil {
+			&s.Points, &s.Club, &s.Type, &s.StudentID, &s.StudentName); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

@@ -204,3 +204,54 @@ func TestBlankRankRowsAreKeptNotDropped(t *testing.T) {
 		t.Errorf("blank rank should carry the previous rank 31, got %d", pisut.Rank)
 	}
 }
+
+// An age-group event published as one tournament rather than several.
+//
+// Swiss-Manager uploads groups either way: as separate tournaments with their
+// own tnr numbers, or as one file with each player's group in the "Typ"
+// column. The fixture is the real page for tnr1193905, "WCIB CHESS
+// CHAMPIONSHIP 2025 [U14 + G14]" — two age groups, one link, and no way to
+// tell them apart except this column.
+//
+// It was parsed and thrown away, so the console showed the event as one
+// undivided list of twenty children.
+func TestFetchReadsThePlayerTypeColumn(t *testing.T) {
+	c := serveFixtures(t, fixture(t, "ranking_with_types.html"), "")
+	tour, err := c.Fetch(1193905)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tour.Rows) != 20 {
+		t.Fatalf("parsed %d rows, want 20", len(tour.Rows))
+	}
+	if first := tour.Rows[0]; first.Name != "Uapongkitikul, Pavatt" || first.Type != "U14" {
+		t.Errorf("first row = %+v, want Uapongkitikul with type U14", first)
+	}
+
+	// Both groups have to survive. Reading the column but collapsing it to
+	// whichever value came first would look like it worked on the tab strip
+	// and put every girl in U14.
+	seen := map[string]int{}
+	for _, r := range tour.Rows {
+		seen[r.Type]++
+	}
+	if seen["U14"] != 15 || seen["G14"] != 5 {
+		t.Errorf("groups = %v, want 15 U14 and 5 G14", seen)
+	}
+}
+
+// Most events have no Typ column at all, and an empty string is the honest
+// answer for them — not a group called "" that the console would draw a tab
+// for.
+func TestFetchLeavesTheTypeEmptyWhenTheEventHasNoGroups(t *testing.T) {
+	c := serveFixtures(t, fixture(t, "final_ranking.html"), fixture(t, "player_list.html"))
+	tour, err := c.Fetch(1476156)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range tour.Rows {
+		if r.Type != "" {
+			t.Fatalf("row %q has type %q, want none", r.Name, r.Type)
+		}
+	}
+}

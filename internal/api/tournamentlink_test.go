@@ -300,3 +300,62 @@ func TestCategoryLinkingIsStaffOnly(t *testing.T) {
 		}
 	}
 }
+
+// One link, several age groups.
+//
+// An arbiter can publish a group event either as separate tournaments — which
+// is what a per-category link is for — or as one tournament with each player's
+// group in the ranking table's "Typ" column. tnr1193905, "WCIB CHESS
+// CHAMPIONSHIP 2025 [U14 + G14]", is the second kind: there is one link to
+// give, so no amount of per-category linking can divide it.
+//
+// The group has to survive the whole way — parsed, stored, and served — or the
+// Results tab has nothing to build its tabs from.
+func TestOneLinkCarriesEveryGroupItPublishes(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	status, out, _ := c.do("GET", "/api/v1/tournaments/"+id+"/chess-results", nil)
+	if status != 200 {
+		t.Fatalf("read link: %d (%v)", status, out)
+	}
+	rows, _ := out["standings"].([]any)
+	if len(rows) == 0 {
+		t.Fatal("no standings came back")
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		row, _ := r.(map[string]any)
+		if s, _ := row["type"].(string); s != "" {
+			seen[s] = true
+		}
+	}
+	if !seen["U14"] || !seen["G14"] {
+		t.Errorf("groups reaching the console = %v, want both U14 and G14", seen)
+	}
+}
+
+// Families see which section a child played in, because it is already on the
+// wall at the venue. It travels on the public feed for the same reason the
+// tab strip exists: an undivided list of every group is not a result anyone
+// can read.
+func TestThePublicResultsNameTheGroupToo(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	pub := &client{t: t, srv: c.srv}
+	status, out, _ := pub.do("GET", "/api/v1/public/tournaments/"+id+"/results", nil)
+	if status != 200 {
+		t.Fatalf("public results: %d (%v)", status, out)
+	}
+	rows, _ := out["standings"].([]any)
+	if len(rows) == 0 {
+		t.Fatal("no standings came back")
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["type"] != "U14" {
+		t.Errorf("first public row type = %v, want U14", first["type"])
+	}
+	// Still nothing about who is ours — the group is a section, not a child.
+	if _, leaked := first["studentId"]; leaked {
+		t.Error("the public feed named one of our students")
+	}
+}

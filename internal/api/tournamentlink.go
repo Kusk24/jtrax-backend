@@ -191,6 +191,10 @@ func publicExternalStandings(rows []externalStanding) []map[string]any {
 		out = append(out, map[string]any{
 			"rank": r.Rank, "name": r.Name, "points": r.Points,
 			"federation": r.Federation, "rating": r.Rating, "club": r.Club,
+			// The group, where the arbiter named one. Public because it is
+			// already on the wall at the venue — it is which section a child
+			// played in, not anything about them.
+			"type": r.Type,
 		})
 	}
 	return out
