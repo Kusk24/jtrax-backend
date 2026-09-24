@@ -97,7 +97,7 @@ def main() -> int:
     code([
         "OCR_PROVIDER = gemini",
         "OCR_API_KEY  = <the key you just copied>",
-        "OCR_MODEL    = gemini-2.5-flash        # optional, this is the default",
+        "OCR_MODEL    = gemini-3.8-flash        # optional, this is the default",
     ])
     body("Restart the service. With no key set, scanning is simply switched off: the console says so, "
          "and the rest of JTrax is unaffected.")
