@@ -45,6 +45,8 @@ const (
 	TypeCreditExpiry   = "credit_expiry"
 	TypeAnnouncement   = "announcement"
 	TypePayment        = "payment_received"
+	// A class called off by the office, to the families who were due at it.
+	TypeClassCancelled = "class_cancelled"
 )
 
 // DefaultEnabled says whether a person receives this type without ever having

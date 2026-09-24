@@ -148,7 +148,7 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{
 			"settings": settings,
-			"types":    []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement},
+			"types":    []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypeClassCancelled},
 			"channels": notify.Channels,
 		})
 	}
@@ -560,7 +560,7 @@ func rowStr(row map[string]any, key string) string {
 func validType(t string) bool {
 	switch t {
 	case notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditDeducted, notify.TypeLowCredit,
-		notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment:
+		notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment, notify.TypeClassCancelled:
 		return true
 	}
 	return false

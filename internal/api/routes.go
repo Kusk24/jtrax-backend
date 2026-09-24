@@ -97,6 +97,8 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// new announcement turns into a notification through the existing writes.
 	notifier := notify.New(d, sender, mailCfg)
 	mountNotifications(mux, d, notifier)
+	// Calling a class off refunds it and tells the families, in one request.
+	mountClassCancel(mux, d, notifier)
 	// Card payments: a checkout link for a pending payment, and the webhook
 	// that settles it — and, through the notifier, sends the receipt. Off —
 	// including the webhook route — until the Stripe keys are in the
