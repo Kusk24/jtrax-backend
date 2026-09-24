@@ -359,3 +359,44 @@ func TestThePublicResultsNameTheGroupToo(t *testing.T) {
 		t.Error("the public feed named one of our students")
 	}
 }
+
+// An age group has to be removable after people have entered it.
+//
+// Both the entry table and the category link point at tournament_category, so
+// the first entrant to pick a group froze it: the delete came back "cannot
+// delete: record is referenced by other data", and an organiser who mistyped a
+// group name was stuck with it for the life of the event.
+func TestACategoryCanBeDeletedAfterSomeoneHasEnteredIt(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	status, cat, _ := c.do("POST", "/api/v1/tournament-categories",
+		map[string]any{"tournament_id": id, "name": "U19"})
+	if status != 201 {
+		t.Fatalf("create category: %d (%v)", status, cat)
+	}
+	catID := cat["tournament_category_id"].(string)
+
+	status, reg, _ := c.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": id, "participant_name": "Mistyped, Child",
+		"tournament_category_id": catID,
+	})
+	if status != 201 {
+		t.Fatalf("enter the category: %d (%v)", status, reg)
+	}
+	regID := reg["tournament_registration_id"].(string)
+
+	if status, out, _ := c.do("DELETE", "/api/v1/tournament-categories/"+catID, nil); status != 200 {
+		t.Fatalf("delete category: %d (%v)", status, out)
+	}
+
+	// The entry survives. They entered the tournament, not the category — the
+	// category is the office's own bookkeeping, and deleting it must not
+	// quietly withdraw a child from the event.
+	status, after, _ := c.do("GET", "/api/v1/tournament-registrations/"+regID, nil)
+	if status != 200 {
+		t.Fatalf("the entrant was deleted with the category: %d (%v)", status, after)
+	}
+	if after["tournament_category_id"] != nil && after["tournament_category_id"] != "" {
+		t.Errorf("still in a category that no longer exists: %v", after["tournament_category_id"])
+	}
+}
