@@ -122,7 +122,8 @@ type challengeView struct {
 	BothCanPlayRated bool `json:"bothCanPlayRated"`
 }
 
-// handleListChallenges returns the caller's live invitations, both directions.
+// handleListChallenges returns the caller's live invitations, both directions,
+// and the games they led to that are still being played.
 func handleListChallenges(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
@@ -149,7 +150,15 @@ func handleListChallenges(d *sql.DB) http.HandlerFunc {
 			-- Scoped in the WHERE clause, not filtered afterwards: a caller's
 			-- list can never contain somebody else's invitation.
 			WHERE (c.from_account_id = ? OR c.to_account_id = ?)
-			  AND c.status IN ('Pending','Accepted')
+			  AND (c.status = 'Pending'
+			       -- An accepted challenge stays on the list only while its
+			       -- board can still be played. Once the game is finished or
+			       -- stopped it is a game on record, not one to open, and the
+			       -- card kept saying "your game is ready" after a resignation.
+			       OR (c.status = 'Accepted' AND EXISTS (
+			             SELECT 1 FROM game_room g
+			              WHERE g.game_room_id = c.game_room_id
+			                AND g.status IN ('Open','Active'))))
 			ORDER BY c.created_at DESC
 			LIMIT 50`, id.UserAccountID, id.UserAccountID)
 		if err != nil {

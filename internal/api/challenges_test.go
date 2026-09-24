@@ -200,3 +200,34 @@ func TestChallengeListIsScopedToTheCaller(t *testing.T) {
 	}
 	_ = uri
 }
+
+// A game that has ended is not "ready": once somebody resigns, the accepted
+// challenge leaves both players' lists. It used to stay, so the Challenge
+// screen still offered to open a finished board.
+func TestAFinishedChallengeGameLeavesTheList(t *testing.T) {
+	penny, uri, _, uriID := twoStudents(t)
+	_, sent, _ := penny.do("POST", "/api/v1/challenges", map[string]any{"studentId": uriID})
+	_, acc, _ := uri.do("POST", "/api/v1/challenges/"+sent["challengeId"].(string)+"/accept", nil)
+	roomID := acc["gameRoomId"].(string)
+
+	listed := func(c *client) int {
+		_, out, _ := c.do("GET", "/api/v1/challenges", nil)
+		list, _ := out["challenges"].([]any)
+		return len(list)
+	}
+	if listed(penny) != 1 || listed(uri) != 1 {
+		t.Fatalf("while the game is on, both players should see it")
+	}
+
+	if status, out, _ := penny.do("POST", "/api/v1/game-rooms/"+roomID+"/resign", nil); status != 200 {
+		t.Fatalf("resign: %d (%v)", status, out)
+	}
+	if n, m := listed(penny), listed(uri); n != 0 || m != 0 {
+		t.Fatalf("after the resignation the game is still listed: penny %d, uri %d", n, m)
+	}
+
+	// And the pair can play again.
+	if status, _, _ := uri.do("POST", "/api/v1/challenges", map[string]any{"studentId": "stu_penny"}); status != 201 {
+		t.Fatalf("a new challenge after a finished game: %d", status)
+	}
+}
