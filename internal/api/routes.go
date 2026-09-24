@@ -68,7 +68,13 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Chess-results first: the public results route refreshes through its deps.
 	crDeps := mountChessResults(mux, d)
 	mountTournamentResults(mux, d, crDeps)
-	mountPublicRegistration(mux, d)
+	// Read here rather than beside mountStripe: the public form needs to know
+	// whether card payment is on, to offer it and to email the pay link.
+	stripeCfg := stripepay.FromEnv()
+	stripeClient := stripepay.New(stripeCfg)
+	mountPublicRegistration(mux, &publicEntryDeps{
+		db: d, sender: sender, mail: mailCfg, stripe: stripeClient, stripeCfg: stripeCfg,
+	})
 	mountTournamentRegulation(mux, d)
 	mountRegistrationQueue(mux, d)
 	// A parent's own entry, priced by the server, and the desk recording a fee
@@ -95,8 +101,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// that settles it — and, through the notifier, sends the receipt. Off —
 	// including the webhook route — until the Stripe keys are in the
 	// environment.
-	stripeCfg := stripepay.FromEnv()
-	mountStripe(mux, d, stripepay.New(stripeCfg), stripeCfg, notifier)
+	mountStripe(mux, d, stripeClient, stripeCfg, notifier)
 	resources := Registry()
 	attachNotificationHooks(resources, d, notifier)
 	for _, rs := range resources {

@@ -139,9 +139,16 @@ func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *str
 	if studentName != "" {
 		name += " (" + studentName + ")"
 	}
+	// A public entrant gave an email on the form, so it is filled in for them
+	// on Stripe's page. Nothing else is known about them to pass.
+	var email string
+	d.QueryRow(`SELECT COALESCE(r.contact_email,'') FROM payment p
+	              JOIN tournament_registration r
+	                ON r.tournament_registration_id = p.tournament_registration_id
+	             WHERE p.payment_id = ?`, paymentID).Scan(&email)
 	base := returnBase(cfg)
 	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
-		base+"/pay/done", base+"/pay/cancelled")
+		base+"/pay/done", base+"/pay/cancelled", email)
 	if err != nil {
 		// The Stripe error names the account; the log gets it, the client
 		// does not.

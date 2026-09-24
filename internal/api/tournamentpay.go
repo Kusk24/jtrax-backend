@@ -92,7 +92,8 @@ func handleRegistrationStripeLink(d *sql.DB, client *stripepay.Client, cfg strip
 			return
 		}
 
-		paymentID, err := createTournamentPayment(d, regID, studentID, participantName, tournamentName, fee.Float64)
+		paymentID, err := createTournamentPayment(d, regID,
+			sql.NullString{String: studentID, Valid: true}, participantName, tournamentName, fee.Float64)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not open the payment", err)
 			return
@@ -108,11 +109,15 @@ func handleRegistrationStripeLink(d *sql.DB, client *stripepay.Client, cfg strip
 // `tournament_registration_id` is what settles it: the loser's INSERT fails and
 // it reads back the winner's row, so both parents' tabs end up at the same
 // Checkout session rather than two.
-func createTournamentPayment(d *sql.DB, regID, studentID, participantName, tournamentName string, fee float64) (string, error) {
+//
+// studentID is NULL for a public entrant the academy has no record of: the
+// payment still names them, through the snapshot columns, and simply has no
+// student to point at.
+func createTournamentPayment(d *sql.DB, regID string, studentID sql.NullString, participantName, tournamentName string, fee float64) (string, error) {
 	// The snapshot columns exist so a payment still says who it was for after
 	// the student row is gone. `class_name` holds the tournament, which is what
 	// the money was for and what the payments screen needs to show.
-	parentName := parentNameOf(d, studentID)
+	parentName := parentNameOf(d, studentID.String)
 
 	paymentID := newID("pay")
 	_, err := d.Exec(`

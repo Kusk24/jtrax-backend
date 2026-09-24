@@ -335,7 +335,8 @@ func ageOn(dob, on time.Time) int {
 // already holds a place — are made inside it. Reading the count first and
 // inserting afterwards would let two people take the last seat at once, which
 // on the day means turning a child away at the door.
-func handlePublicRegister(d *sql.DB) http.HandlerFunc {
+func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
+	d := deps.db
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
 		var in registerInput
@@ -378,8 +379,8 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		// A category, when given, has to belong to *this* event — otherwise the
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
+		var catName string
 		if in.CategoryID != "" {
-			var catName string
 			err := tx.QueryRow(`SELECT name FROM tournament_category
 			                    WHERE tournament_category_id = ? AND tournament_id = ?`,
 				in.CategoryID, tournamentID).Scan(&catName)
@@ -471,6 +472,13 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		}
 
 		regID := newID("treg")
+		// The entrant's right to pay for this entry later, from the email.
+		// Only the hash is stored; the code itself goes back once, below.
+		payCode, payCodeHash, err := newPayCode()
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
 		// fee_charged is set here because approving used to set it, and there
 		// is no approving any more. A quote that never becomes a charge would
 		// leave every public entry owing nothing on the desk's own roster —
@@ -480,8 +488,9 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			tournament_registration_id, tournament_id, student_id, participant_name,
 			participant_date_of_birth, tournament_category_id, registered_at,
 			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
-			student_discount_applied, nickname, participant_age, terms_accepted_at
-		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?)`,
+			student_discount_applied, nickname, participant_age, terms_accepted_at,
+			pay_code_hash
+		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?,?)`,
 			regID, tournamentID, studentID, in.Name,
 			nullIfEmpty(in.DateOfBirth), categoryID, sqliteNow(),
 			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent),
@@ -491,7 +500,7 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			   timestamp on a consent record is worth nothing. validate()
 			   refuses the entry unless AcceptTerms is true, so reaching this
 			   line is what "accepted" means. */
-			sqliteNow())
+			sqliteNow(), payCodeHash)
 		if err != nil {
 			// The partial unique indexes are the last word on duplicates, and
 			// they are reached rather than pre-checked so that two simultaneous
@@ -509,10 +518,21 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Off the request, so a slow mail server does not hold the entrant at a
+		// spinner after their place is already theirs.
+		go sendEntryConfirmation(deps, in.Email, tournamentID, t.Name, regID, in.Name, catName, fee, payCode)
+
 		httpx.JSON(w, http.StatusCreated, map[string]any{
 			"registered": true,
 			"status":     "Approved",
 			"feeQuoted":  fee,
+			// What the done screen needs to offer "Pay now" straight away. The
+			// code is shown to this caller once and never again; the email
+			// carries the same one.
+			"registrationId": regID,
+			"payCode":        payCode,
+			"cardPayments":   deps.stripe != nil && fee > 0,
+			"emailed":        deps.sender != nil,
 			// Kept, and false, rather than dropped: a portal still running the
 			// previous build reads this to decide whether to say "we will
 			// confirm your place". Removing the key would leave it undefined,
@@ -545,13 +565,21 @@ func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT FAILED")
 }
 
-func mountPublicRegistration(mux *http.ServeMux, d *sql.DB) {
+func mountPublicRegistration(mux *http.ServeMux, deps *publicEntryDeps) {
+	d := deps.db
 	const p = "/api/v1/public/tournaments"
 	// Reads are cheap and cacheable; the write is the one that costs something,
 	// so it carries the tighter budget.
 	mux.HandleFunc("GET "+p, httpx.RateLimit(60, handlePublicTournamentList(d)))
 	mux.HandleFunc("GET "+p+"/{id}", httpx.RateLimit(60, handlePublicTournament(d)))
-	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(d)))
+	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(deps)))
+
+	// The pay link's two calls. The code is the whole of the authorization,
+	// and it is 256 bits, so the limit is a flood guard rather than what
+	// stops guessing. Paying spends a Stripe API call, so it gets less.
+	const e = "/api/v1/public/tournament-registrations/{id}"
+	mux.HandleFunc("POST "+e, httpx.RateLimit(30, handlePublicEntry(deps)))
+	mux.HandleFunc("POST "+e+"/pay", httpx.RateLimit(20, handlePublicEntryPay(deps)))
 }
 
 // nullIfZero keeps "not given" out of the database as NULL rather than 0.
