@@ -9,6 +9,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -59,6 +60,8 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Built early: the desk's tournament fee and the notification endpoints
 	// below both send through it.
 	notifier := notify.New(d, sender, mailCfg)
+	// Phones get pushes through Expo, which needs no key to be switched on.
+	notifier.SetPush(push.New(push.FromEnv()))
 
 	mountUserAccounts(mux, d)
 	relay := mountGameRooms(mux, d)

@@ -14,14 +14,17 @@
 package notify
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 )
 
 // Channels a notification can go out over.
@@ -89,7 +92,19 @@ type Service struct {
 	db      *sql.DB
 	mail    mail.Sender
 	mailCfg mail.Config
+	// push delivers to phones. Nil leaves phone deliveries pending, which is
+	// what they were before there was a sender.
+	push Pusher
 }
+
+// Pusher hands phone notifications to a push service and says, per message,
+// whether each reached it. *push.Client is the real one.
+type Pusher interface {
+	Send(ctx context.Context, msgs []push.Message) []push.Result
+}
+
+// SetPush turns phone delivery on.
+func (s *Service) SetPush(p Pusher) { s.push = p }
 
 func New(db *sql.DB, sender mail.Sender, cfg mail.Config) *Service {
 	return &Service{db: db, mail: sender, mailCfg: cfg}
@@ -131,6 +146,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 
 	type emailJob struct{ deliveryID, notifID, addr, subject, body string }
 	var emails []emailJob
+	var phones []pushJob
 
 	for _, uid := range recipients {
 		if !prefEnabled(tx, uid, msg.Type, ChannelInApp) {
@@ -172,9 +188,12 @@ func (s *Service) Send(recipients []string, msg Message) error {
 			case ch == ChannelWebPush || ch == ChannelMobile:
 				if !hasSubscription(tx, uid, ch) {
 					status = "skipped_by_preference"
+				} else if ch == ChannelMobile && s.push != nil {
+					// Sent after the commit, like email; the row stays
+					// 'pending' until Expo has answered.
+					phones = append(phones, pushJob{deliveryID, uid, notifID, msg.Type, title, body, msg.Data})
 				}
-				// else 'pending': a push worker delivers it out of band. The
-				// VAPID/Expo send path is deliberately not inlined here.
+				// Browser push has no sender yet, so it stays 'pending'.
 			}
 			if err := insertDelivery(tx, deliveryID, notifID, ch, status); err != nil {
 				return err
@@ -195,7 +214,84 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		}
 		s.markDelivery(j.deliveryID, "sent", "")
 	}
+	s.sendToPhones(phones)
 	return nil
+}
+
+// pushJob is one notification waiting to go to one person's phones.
+type pushJob struct {
+	deliveryID, uid, notifID, typ, title, body string
+	data                                       map[string]any
+}
+
+// sendToPhones delivers each job to every phone its person has registered, in
+// one call to the push service. A delivery is 'sent' if it reached at least
+// one of that person's phones. A phone the service says is no longer
+// registered (the app was removed) is marked failed, so it is not tried again.
+func (s *Service) sendToPhones(jobs []pushJob) {
+	if len(jobs) == 0 || s.push == nil {
+		return
+	}
+	type target struct {
+		job            int
+		subscriptionID string
+	}
+	var msgs []push.Message
+	var targets []target
+	for i, j := range jobs {
+		rows, err := s.db.Query(
+			`SELECT push_subscription_id, endpoint FROM push_subscription
+			  WHERE user_account_id = ? AND channel = ? AND failed_at IS NULL`, j.uid, ChannelMobile)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var subID, token string
+			if rows.Scan(&subID, &token) != nil || !push.IsExpoToken(token) {
+				continue
+			}
+			data := map[string]any{"notificationId": j.notifID, "type": j.typ}
+			for k, v := range j.data {
+				data[k] = v
+			}
+			msgs = append(msgs, push.Message{To: token, Title: j.title, Body: j.body, Data: data})
+			targets = append(targets, target{i, subID})
+		}
+		rows.Close()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	results := s.push.Send(ctx, msgs)
+
+	reached := make([]bool, len(jobs))
+	reason := make([]string, len(jobs))
+	for n, r := range results {
+		if n >= len(targets) {
+			break
+		}
+		t := targets[n]
+		if r.OK {
+			reached[t.job] = true
+			continue
+		}
+		reason[t.job] = r.Error
+		if r.Unregistered {
+			s.db.Exec(`UPDATE push_subscription SET failed_at = datetime('now')
+			            WHERE push_subscription_id = ?`, t.subscriptionID)
+		}
+	}
+	for i, j := range jobs {
+		switch {
+		case reached[i]:
+			s.markDelivery(j.deliveryID, "sent", "")
+		case reason[i] != "":
+			s.markDelivery(j.deliveryID, "failed", reason[i])
+		default:
+			// Registered, but no token this sender can reach.
+			s.markDelivery(j.deliveryID, "failed", "no Expo push token")
+		}
+	}
 }
 
 func (s *Service) encodeData(msg Message) any {
