@@ -179,7 +179,7 @@ type stripeEvent struct {
 }
 
 // handleStripeWebhook marks a payment Paid — and releases its credits — when
-// Stripe reports its Checkout session completed.
+// Stripe reports the money for its Checkout session collected.
 //
 // Everything here assumes the caller is hostile until the signature says
 // otherwise, and assumes Stripe will deliver the same event more than once,
@@ -204,10 +204,16 @@ func handleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.Han
 			httpx.Error(w, http.StatusBadRequest, "malformed event", nil)
 			return
 		}
-		// Everything else Stripe can send — expiries, refbacks, the async
-		// events of methods the academy does not take — is acknowledged and
-		// dropped. Answering non-200 would just make Stripe resend it.
-		if ev.Type != "checkout.session.completed" || ev.Data.Object.PaymentStatus != "paid" {
+		// Two events can settle a payment. A card pays at once, so its
+		// `checkout.session.completed` already says "paid". PromptPay does not:
+		// the session completes "unpaid" when the QR is shown, and the money is
+		// confirmed later by `checkout.session.async_payment_succeeded`. Only
+		// the first was read, so every PromptPay payment stayed Pending.
+		// Everything else — expiries, failures, an "unpaid" completion — is
+		// acknowledged and dropped; answering non-200 would make Stripe resend.
+		settles := ev.Type == "checkout.session.completed" ||
+			ev.Type == "checkout.session.async_payment_succeeded"
+		if !settles || ev.Data.Object.PaymentStatus != "paid" {
 			httpx.JSON(w, http.StatusOK, map[string]string{"received": "ignored"})
 			return
 		}
