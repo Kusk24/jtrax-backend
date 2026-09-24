@@ -191,6 +191,10 @@ func publicExternalStandings(rows []externalStanding) []map[string]any {
 		out = append(out, map[string]any{
 			"rank": r.Rank, "name": r.Name, "points": r.Points,
 			"federation": r.Federation, "rating": r.Rating, "club": r.Club,
+			// The group, where the arbiter named one. Public because it is
+			// already on the wall at the venue — it is which section a child
+			// played in, not anything about them.
+			"type": r.Type,
 		})
 	}
 	return out
@@ -469,4 +473,29 @@ func handleUnlinkCategory(c *chessResultsDeps) http.HandlerFunc {
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
 	}
+}
+
+// releaseCategoryEntrants lets an age group be deleted after people have
+// entered it.
+//
+// tournament_registration points at tournament_category, so the moment one
+// entrant picked a group the row could never be removed again: the delete hit
+// a foreign key and came back as "cannot delete: record is referenced by other
+// data". An organiser who mistyped "U18" as "U19" was stuck with it for the
+// life of the event.
+//
+// Withdrawing the entrants instead would be wrong — they entered the
+// tournament, not the category, and the category is the office's own
+// bookkeeping. So the entry stays and only its group is cleared, which is what
+// deleting the group means: nobody is in it any more. They show as
+// uncategorised until somebody puts them in another one.
+//
+// One table, not two: 0014 rebuilt tournament_registration in place to take
+// public sign-ups rather than giving them a table of their own, so a public
+// entry and a staff-entered one are the same row with a different `source`.
+func releaseCategoryEntrants(tx *sql.Tx, categoryID string) error {
+	_, err := tx.Exec(
+		`UPDATE tournament_registration SET tournament_category_id = NULL
+		 WHERE tournament_category_id = ?`, categoryID)
+	return err
 }

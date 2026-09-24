@@ -29,10 +29,10 @@ func newCRStub(t *testing.T) *crStub {
 		case "1":
 			fmt.Fprintf(w, `<h2>Bangkok Open 2026</h2><h2>%s</h2>
 			<table class="CRs1">
-			<tr><th>Rk.</th><th>Name</th><th>FED</th><th>Rtg</th><th>Pts.</th></tr>
-			<tr><td>1</td><td>Somchai, Niran</td><td>THA</td><td>1650</td><td>4</td></tr>
-			<tr><td>2</td><td>Penny</td><td>THA</td><td>1200</td><td>3,5</td></tr>
-			<tr><td>3</td><td>Stranger, Alice</td><td>SGP</td><td>1400</td><td>2</td></tr>
+			<tr><th>Rk.</th><th>Name</th><th>Typ</th><th>FED</th><th>Rtg</th><th>Pts.</th></tr>
+			<tr><td>1</td><td>Somchai, Niran</td><td>U14</td><td>THA</td><td>1650</td><td>4</td></tr>
+			<tr><td>2</td><td>Penny</td><td>G14</td><td>THA</td><td>1200</td><td>3,5</td></tr>
+			<tr><td>3</td><td>Stranger, Alice</td><td>U14</td><td>SGP</td><td>1400</td><td>2</td></tr>
 			</table>`, s.stage.Load())
 		case "3":
 			fmt.Fprint(w, `<h2>Bangkok Open 2026</h2><h2>Alphabetical list</h2>

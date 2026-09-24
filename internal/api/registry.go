@@ -398,7 +398,8 @@ func Registry() []*Resource {
 				{Name: "tournament_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
 			},
-			ReadRoles: everyone,
+			ReadRoles:    everyone,
+			BeforeDelete: releaseCategoryEntrants,
 		},
 		{
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",

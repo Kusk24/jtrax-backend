@@ -300,3 +300,103 @@ func TestCategoryLinkingIsStaffOnly(t *testing.T) {
 		}
 	}
 }
+
+// One link, several age groups.
+//
+// An arbiter can publish a group event either as separate tournaments — which
+// is what a per-category link is for — or as one tournament with each player's
+// group in the ranking table's "Typ" column. tnr1193905, "WCIB CHESS
+// CHAMPIONSHIP 2025 [U14 + G14]", is the second kind: there is one link to
+// give, so no amount of per-category linking can divide it.
+//
+// The group has to survive the whole way — parsed, stored, and served — or the
+// Results tab has nothing to build its tabs from.
+func TestOneLinkCarriesEveryGroupItPublishes(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	status, out, _ := c.do("GET", "/api/v1/tournaments/"+id+"/chess-results", nil)
+	if status != 200 {
+		t.Fatalf("read link: %d (%v)", status, out)
+	}
+	rows, _ := out["standings"].([]any)
+	if len(rows) == 0 {
+		t.Fatal("no standings came back")
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		row, _ := r.(map[string]any)
+		if s, _ := row["type"].(string); s != "" {
+			seen[s] = true
+		}
+	}
+	if !seen["U14"] || !seen["G14"] {
+		t.Errorf("groups reaching the console = %v, want both U14 and G14", seen)
+	}
+}
+
+// Families see which section a child played in, because it is already on the
+// wall at the venue. It travels on the public feed for the same reason the
+// tab strip exists: an undivided list of every group is not a result anyone
+// can read.
+func TestThePublicResultsNameTheGroupToo(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	pub := &client{t: t, srv: c.srv}
+	status, out, _ := pub.do("GET", "/api/v1/public/tournaments/"+id+"/results", nil)
+	if status != 200 {
+		t.Fatalf("public results: %d (%v)", status, out)
+	}
+	rows, _ := out["standings"].([]any)
+	if len(rows) == 0 {
+		t.Fatal("no standings came back")
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["type"] != "U14" {
+		t.Errorf("first public row type = %v, want U14", first["type"])
+	}
+	// Still nothing about who is ours — the group is a section, not a child.
+	if _, leaked := first["studentId"]; leaked {
+		t.Error("the public feed named one of our students")
+	}
+}
+
+// An age group has to be removable after people have entered it.
+//
+// Both the entry table and the category link point at tournament_category, so
+// the first entrant to pick a group froze it: the delete came back "cannot
+// delete: record is referenced by other data", and an organiser who mistyped a
+// group name was stuck with it for the life of the event.
+func TestACategoryCanBeDeletedAfterSomeoneHasEnteredIt(t *testing.T) {
+	c, id := linkedEvent(t)
+
+	status, cat, _ := c.do("POST", "/api/v1/tournament-categories",
+		map[string]any{"tournament_id": id, "name": "U19"})
+	if status != 201 {
+		t.Fatalf("create category: %d (%v)", status, cat)
+	}
+	catID := cat["tournament_category_id"].(string)
+
+	status, reg, _ := c.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": id, "participant_name": "Mistyped, Child",
+		"tournament_category_id": catID,
+	})
+	if status != 201 {
+		t.Fatalf("enter the category: %d (%v)", status, reg)
+	}
+	regID := reg["tournament_registration_id"].(string)
+
+	if status, out, _ := c.do("DELETE", "/api/v1/tournament-categories/"+catID, nil); status != 200 {
+		t.Fatalf("delete category: %d (%v)", status, out)
+	}
+
+	// The entry survives. They entered the tournament, not the category — the
+	// category is the office's own bookkeeping, and deleting it must not
+	// quietly withdraw a child from the event.
+	status, after, _ := c.do("GET", "/api/v1/tournament-registrations/"+regID, nil)
+	if status != 200 {
+		t.Fatalf("the entrant was deleted with the category: %d (%v)", status, after)
+	}
+	if after["tournament_category_id"] != nil && after["tournament_category_id"] != "" {
+		t.Errorf("still in a category that no longer exists: %v", after["tournament_category_id"])
+	}
+}
