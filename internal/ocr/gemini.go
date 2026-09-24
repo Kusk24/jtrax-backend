@@ -23,7 +23,10 @@ import (
 	"time"
 )
 
-const defaultGeminiModel = "gemini-2.5-flash"
+// The model when nothing else picks one. Not gemini-2.5-flash, though it is
+// still listed: Google now serves the 2.5 models only to accounts that already
+// used them, so a key made today gets a 404 for it and every scan fails.
+const defaultGeminiModel = "gemini-3.8-flash"
 
 const geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
 
