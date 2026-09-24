@@ -56,6 +56,10 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mux.HandleFunc("GET /api/v1/auth/me", handleMe(d))
 	mux.HandleFunc("PATCH /api/v1/auth/me", handleUpdateMe(d))
 
+	// Built early: the desk's tournament fee and the notification endpoints
+	// below both send through it.
+	notifier := notify.New(d, sender, mailCfg)
+
 	mountUserAccounts(mux, d)
 	relay := mountGameRooms(mux, d)
 	mountChallenges(mux, d, relay)
@@ -81,7 +85,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// paid at the counter. Both are tournament-registration writes the generic
 	// resource must not make: one decides a price, the other asserts money.
 	mountTournamentEntry(mux, d)
-	mountDeskPayment(mux, d)
+	mountDeskPayment(mux, d, notifier)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
@@ -95,7 +99,6 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a
 	// new announcement turns into a notification through the existing writes.
-	notifier := notify.New(d, sender, mailCfg)
 	mountNotifications(mux, d, notifier)
 	// Calling a class off refunds it and tells the families, in one request.
 	mountClassCancel(mux, d, notifier)

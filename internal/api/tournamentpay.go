@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -169,7 +170,7 @@ var deskMethods = []string{"Cash", "PromptPay", "BankTransfer"}
 // Staff only — Admin and Receptionist, the people who take the money. It reuses
 // the registration's payment row if the family had already opened a card link,
 // so there is still one payment per registration and the unique index holds.
-func handleDeskPayment(d *sql.DB) http.HandlerFunc {
+func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
 		if id == nil {
@@ -264,14 +265,18 @@ func handleDeskPayment(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not record the payment", err)
 			return
 		}
+		// Written as SQL rather than through the payments resource, so its
+		// receipt hook never sees it: the receipt is sent here instead, the
+		// same one a card payment gets from the webhook.
+		notifyPaymentPaid(d, svc, paymentID)
 		httpx.JSON(w, http.StatusOK, map[string]any{
 			"payment_id": paymentID, "status": "Paid", "final_amount": fee.Float64,
 		})
 	}
 }
 
-func mountDeskPayment(mux *http.ServeMux, d *sql.DB) {
-	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/desk-payment", handleDeskPayment(d))
+func mountDeskPayment(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
+	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/desk-payment", handleDeskPayment(d, svc))
 }
 
 // parentNameOf is the snapshot a payment keeps of who paid, so it still says
