@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
@@ -187,5 +188,66 @@ func TestScanProviderFailureDoesNotLeakInternals(t *testing.T) {
 	}
 	if msg != "" && bytes.Contains([]byte(msg), []byte("context deadline")) {
 		t.Errorf("internal error leaked to the caller: %q", msg)
+	}
+}
+
+// A body that is not multipart at all must not be reported as an oversized
+// image.
+//
+// This is the bug as it reached a parent. jtrax-web-app's proxy forwarded the
+// tournament entry form's upload with Content-Type: application/json, so the
+// multipart boundary was gone; ParseMultipartForm failed for that reason, and
+// every parse failure was being answered "image is too large (10 MB maximum)".
+// A 200 KB photo was therefore met with advice to send a smaller one — which
+// could not work, about a problem that did not exist.
+func TestScanSaysWhatIsActuallyWrongWithAMalformedUpload(t *testing.T) {
+	scanner := &fakeScanner{form: &ocr.Form{}}
+	srv := scanServer(t, scanner)
+	token := tokenFor(t, srv, "admin@jca.ac.th")
+
+	// Exactly what the broken proxy produced: real image bytes, wrong type.
+	req, _ := http.NewRequest("POST", srv.URL+"/api/v1/registrations/scan", bytes.NewReader(onePixelPNG))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(resp.Body).Decode(&out)
+
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		t.Fatal("a 70-byte upload was reported as too large")
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%v)", resp.StatusCode, out)
+	}
+	msg, _ := out["error"].(string)
+	if strings.Contains(strings.ToLower(msg), "too large") {
+		t.Errorf("error still blames the size: %q", msg)
+	}
+	if !strings.Contains(msg, "multipart") {
+		t.Errorf("error does not say what was actually wrong: %q", msg)
+	}
+	// Nothing reached the paid provider.
+	if scanner.calls != 0 {
+		t.Errorf("provider was called %d times for an unparseable upload", scanner.calls)
+	}
+}
+
+// And the size limit still reports itself as a size limit — the point is to
+// tell the two apart, not to stop saying "too large" when it is true.
+func TestScanStillRefusesAnOversizedImage(t *testing.T) {
+	srv := scanServer(t, &fakeScanner{form: &ocr.Form{}})
+	token := tokenFor(t, srv, "admin@jca.ac.th")
+
+	// 11 MB against the 10 MB cap.
+	status, out := postScan(t, srv, token, "image", bytes.Repeat([]byte{0x41}, 11<<20))
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%v)", status, out)
+	}
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "too large") {
+		t.Errorf("error = %q, want it to name the size", msg)
 	}
 }
