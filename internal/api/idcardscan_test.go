@@ -1,8 +1,12 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Kusk24/jtrax-backend/internal/mail"
@@ -147,5 +151,69 @@ func TestScanningACardRefusesSomethingThatIsNotAnImage(t *testing.T) {
 	}
 	if reader.calls != 0 {
 		t.Errorf("a mis-picked file must cost nothing at the provider, got %d calls", reader.calls)
+	}
+}
+
+// The bug a parent actually hit, at the endpoint they hit it on.
+//
+// jtrax-web-app's proxy forwarded this upload with Content-Type:
+// application/json, which dropped the multipart boundary. Parsing then failed,
+// and every parse failure here was answered "image is too large (10 MB
+// maximum)" — so a 200 KB photo of a child's ID card was met with advice to
+// send a smaller one. The proxy is fixed; this is the half that made the
+// failure unreadable.
+func TestAMalformedCardUploadIsNotCalledTooLarge(t *testing.T) {
+	reader := &fakeCardReader{card: &ocr.IDCard{FirstName: ocr.Field{Value: "Ada", Confidence: 0.9}}}
+	srv, id := cardServer(t, reader)
+
+	req, _ := http.NewRequest("POST",
+		srv.URL+"/api/v1/public/tournaments/"+id+"/scan-id",
+		bytes.NewReader(onePixelPNG))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(resp.Body).Decode(&out)
+
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		t.Fatal("a 70-byte card upload was reported as too large")
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%v)", resp.StatusCode, out)
+	}
+	if msg, _ := out["error"].(string); strings.Contains(strings.ToLower(msg), "too large") {
+		t.Errorf("error still blames the size: %q", msg)
+	}
+	// An unparseable request must not reach the paid provider.
+	if reader.calls != 0 {
+		t.Errorf("provider was called %d times for an unparseable upload", reader.calls)
+	}
+}
+
+// A properly-formed multipart upload — what the fixed proxy now sends — still
+// works. The pair is the point: the same photo fails one way and succeeds the
+// other, and only the envelope differs.
+func TestAWellFormedCardUploadStillReads(t *testing.T) {
+	reader := &fakeCardReader{card: &ocr.IDCard{
+		FirstName: ocr.Field{Value: "Ada", Confidence: 0.9},
+		LastName:  ocr.Field{Value: "Lovelace", Confidence: 0.9},
+	}}
+	srv, id := cardServer(t, reader)
+
+	status, out := postScan(t, srv, "", "image", onePixelPNG,
+		"/api/v1/public/tournaments/"+id+"/scan-id")
+	if status != 200 {
+		t.Fatalf("status = %d, want 200 (%v)", status, out)
+	}
+	fields, _ := out["fields"].(map[string]any)
+	first, _ := fields["firstName"].(map[string]any)
+	if first["value"] != "Ada" {
+		t.Errorf("fields = %v, want the card read back", fields)
+	}
+	if reader.gotMime != "image/png" {
+		t.Errorf("provider saw mime %q, want image/png", reader.gotMime)
 	}
 }

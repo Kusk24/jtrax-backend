@@ -67,11 +67,7 @@ func handleScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 
-		// Cap what can be read before parsing, not after.
-		r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
-		if err := r.ParseMultipartForm(maxScanBytes); err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge,
-				"image is too large (10 MB maximum)", err)
+		if !readScanUpload(w, r) {
 			return
 		}
 		defer r.MultipartForm.RemoveAll()

@@ -12,6 +12,7 @@ package api
 
 import (
 	"database/sql"
+	"errors"
 	"io"
 	"net/http"
 
@@ -22,6 +23,37 @@ import (
 // A phone photo of an A4 page is a couple of megabytes; ten is generous and
 // still bounds what one request can make the server hold.
 const maxScanBytes = 10 << 20
+
+// readScanUpload caps and parses the multipart body both scanners take, and
+// answers the two failures apart.
+//
+// They were one failure for a while, and both were reported as "image is too
+// large (10 MB maximum)". That was true of only one of them. When
+// jtrax-web-app's proxy forwarded an upload as application/json the boundary
+// was gone, parsing failed for that reason, and an entrant with a 200 KB photo
+// was told to send a smaller one — advice that could not work, about a problem
+// they did not have. A wrong diagnosis in an error message is worse than a
+// vague one: it sends somebody off to fix the wrong thing.
+//
+// Returns false once it has answered the request.
+func readScanUpload(w http.ResponseWriter, r *http.Request) bool {
+	// Cap what can be read before parsing, not after: without this the server
+	// buffers whatever was sent.
+	r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
+	err := r.ParseMultipartForm(maxScanBytes)
+	if err == nil {
+		return true
+	}
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		httpx.Error(w, http.StatusRequestEntityTooLarge,
+			"image is too large (10 MB maximum)", err)
+		return false
+	}
+	httpx.Error(w, http.StatusBadRequest,
+		"the upload was not readable as an image form — it must be sent as multipart/form-data", err)
+	return false
+}
 
 // What a camera or a scanner produces. Anything else is refused before it
 // reaches the provider, so a mis-picked file fails here and costs nothing.
@@ -61,12 +93,7 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 
-		// Cap what can be read before parsing, not after: without this the
-		// server buffers whatever was sent.
-		r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
-		if err := r.ParseMultipartForm(maxScanBytes); err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge,
-				"image is too large (10 MB maximum)", err)
+		if !readScanUpload(w, r) {
 			return
 		}
 		defer r.MultipartForm.RemoveAll()
