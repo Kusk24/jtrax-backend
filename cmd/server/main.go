@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
@@ -53,7 +54,34 @@ func main() {
 		port = "8080"
 	}
 	log.Printf("jtrax-backend listening on :%s (db %s)", port, db.Redact(dsn))
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	log.Fatal(newHTTPServer(":"+port, handler).ListenAndServe())
+}
+
+// readHeaderTimeout is how long a connection may take to send its request
+// line and headers. Real clients send them in one packet; ten seconds is
+// generous for a phone on a bad signal.
+const readHeaderTimeout = 10 * time.Second
+
+// newHTTPServer is the server with the limits a public API needs.
+// http.ListenAndServe has none: a client that sends its headers a byte at a
+// time holds a connection open for as long as it likes, and a few hundred of
+// them tie the server up ("slowloris").
+//
+// Only the header read and idle keep-alive time are limited. ReadTimeout and
+// WriteTimeout are deliberately left at zero: they bound the whole request,
+// and the live game board and the LINE inbox are event streams that stay open
+// for as long as somebody is watching — a write deadline would cut them off
+// mid-game. Request bodies are already capped per handler (MaxBytesReader),
+// and nginx buffers a body before it passes it on, so a slow upload never
+// reaches this process.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // seed loads the development dataset. A local file database seeds itself so a
