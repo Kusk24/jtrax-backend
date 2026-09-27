@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -25,7 +26,17 @@ type Identity struct {
 	AdminID   string `json:"adminId,omitempty"`
 }
 
+// hashSessionToken is what auth_session stores in place of the token. The token
+// itself exists only on the caller's device; the table holds its SHA-256, so a
+// copy of the database signs nobody in. A plain hash rather than a slow one is
+// enough because the token is 256 random bits, not a password somebody chose.
+func hashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 // CreateSession stores a fresh random token for the account and returns it.
+// Only its hash is written; the returned token is the one copy.
 func CreateSession(d *sql.DB, userAccountID string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -33,14 +44,14 @@ func CreateSession(d *sql.DB, userAccountID string) (string, error) {
 	}
 	token := hex.EncodeToString(raw)
 	expires := time.Now().UTC().Add(sessionTTL).Format(time.RFC3339)
-	_, err := d.Exec(`INSERT INTO auth_session (token, user_account_id, expires_at) VALUES (?,?,?)`,
-		token, userAccountID, expires)
+	_, err := d.Exec(`INSERT INTO auth_session (token_hash, user_account_id, expires_at) VALUES (?,?,?)`,
+		hashSessionToken(token), userAccountID, expires)
 	return token, err
 }
 
 // DeleteSession revokes a token; deleting an unknown token is not an error.
 func DeleteSession(d *sql.DB, token string) error {
-	_, err := d.Exec(`DELETE FROM auth_session WHERE token = ?`, token)
+	_, err := d.Exec(`DELETE FROM auth_session WHERE token_hash = ?`, hashSessionToken(token))
 	return err
 }
 
@@ -57,7 +68,7 @@ func Lookup(d *sql.DB, token string) (*Identity, error) {
 		SELECT u.user_account_id, u.email, u.role, u.display_name,
 		       u.language_preference, u.theme_preference, s.expires_at
 		FROM auth_session s JOIN user_account u ON u.user_account_id = s.user_account_id
-		WHERE s.token = ?`, token).
+		WHERE s.token_hash = ?`, hashSessionToken(token)).
 		Scan(&id.UserAccountID, &id.Email, &id.Role, &id.DisplayName, &id.Language, &id.Theme, &expires)
 	if err == sql.ErrNoRows {
 		return nil, ErrNoSession
