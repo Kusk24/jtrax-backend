@@ -7,8 +7,12 @@
 package mail
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"mime"
 	"net/smtp"
 	"os"
 	"strings"
@@ -80,14 +84,68 @@ func New(cfg Config) Sender {
 }
 
 func (s *smtpSender) Send(to, subject, body string) error {
-	if strings.ContainsAny(to, "\r\n") || strings.ContainsAny(subject, "\r\n") {
-		// Header injection: a newline in either field would let a caller append
-		// their own headers and turn this into an open relay.
-		return errors.New("mail: header field contains a newline")
+	if err := checkHeaders(to, subject); err != nil {
+		return err
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\n"+
-		"Content-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n", s.cfg.From, to, subject, body)
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n", s.cfg.From, to, encodeSubject(subject), body)
+	return s.deliver(to, msg)
+}
 
+// SendRich sends the HTML layout with its plain-text copy as alternatives;
+// the client shows whichever it can.
+func (s *smtpSender) SendRich(to, subject, text, htmlBody string) error {
+	if err := checkHeaders(to, subject); err != nil {
+		return err
+	}
+	boundary := "jtrax-" + randomBoundary()
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\n"+
+		"Content-Type: multipart/alternative; boundary=%q\r\n\r\n"+
+		"--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n"+
+		"--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n"+
+		"--%s--\r\n",
+		s.cfg.From, to, encodeSubject(subject), boundary,
+		boundary, base64Lines(text),
+		boundary, base64Lines(htmlBody),
+		boundary)
+	return s.deliver(to, msg)
+}
+
+// checkHeaders refuses header injection: a newline in either field would let
+// a caller append their own headers and turn this into an open relay.
+func checkHeaders(to, subject string) error {
+	if strings.ContainsAny(to, "\r\n") || strings.ContainsAny(subject, "\r\n") {
+		return errors.New("mail: header field contains a newline")
+	}
+	return nil
+}
+
+// encodeSubject keeps a subject with anything beyond ASCII — a Thai course
+// name, a dash — readable, as RFC 2047 asks.
+func encodeSubject(subject string) string {
+	return mime.QEncoding.Encode("UTF-8", subject)
+}
+
+// base64Lines encodes a body in the 76-column lines SMTP expects, so a long
+// HTML line is never cut by a relay.
+func base64Lines(body string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(body))
+	var b strings.Builder
+	for len(enc) > 76 {
+		b.WriteString(enc[:76] + "\r\n")
+		enc = enc[76:]
+	}
+	b.WriteString(enc)
+	return b.String()
+}
+
+func randomBoundary() string {
+	raw := make([]byte, 12)
+	_, _ = rand.Read(raw)
+	return hex.EncodeToString(raw)
+}
+
+func (s *smtpSender) deliver(to, msg string) error {
 	addr := s.cfg.Host + ":" + s.cfg.Port
 	var auth smtp.Auth
 	if s.cfg.Username != "" {

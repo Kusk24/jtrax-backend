@@ -37,6 +37,9 @@ type IDCard struct {
 	// separately, and splitting on the last space is wrong for Thai names.
 	FirstName Field `json:"firstName"`
 	LastName  Field `json:"lastName"`
+	// The whole name in Thai script, as a Thai ID card prints it above the
+	// English. Empty for a passport, which prints none.
+	ThaiName Field `json:"thaiName"`
 	// Normalised to YYYY-MM-DD. The age is worked out from this rather than
 	// read, because a card prints a date and never an age.
 	DateOfBirth Field `json:"dateOfBirth"`

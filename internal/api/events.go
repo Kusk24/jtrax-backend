@@ -89,6 +89,12 @@ type roomEvent struct {
 	White    *seat  `json:"white"`
 	Black    *seat  `json:"black"`
 	Finished bool   `json:"finished"`
+	// Removed says the room itself is gone — sent once, as it is deleted.
+	Removed bool `json:"removed,omitempty"`
+	// A draw offer standing, and a rated game's clock — both change without a
+	// move being played, so a board learns them from here.
+	DrawOffer string     `json:"drawOffer,omitempty"`
+	Clock     *clockView `json:"clock,omitempty"`
 }
 
 // publishRoom reads the room back and fans out its current state.
@@ -108,8 +114,10 @@ func publishRoom(d *sql.DB, h *hub, roomID string) {
 		RoomID: room.ID, Status: room.Status, FEN: room.FEN,
 		Result: room.Result, Reason: room.Reason,
 		White: room.White, Black: room.Black,
-		Ply:      len(moves),
-		Finished: room.Status == "Finished" || room.Status == "Cancelled",
+		Ply:       len(moves),
+		Finished:  room.Status == "Finished" || room.Status == "Cancelled",
+		DrawOffer: room.DrawOffer,
+		Clock:     room.Clock,
 	}
 	if n := len(moves); n > 0 {
 		ev.LastSAN, ev.LastUCI = moves[n-1].SAN, moves[n-1].UCI

@@ -123,7 +123,8 @@ type challengeView struct {
 }
 
 // handleListChallenges returns the caller's live invitations, both directions,
-// and the games they led to that are still being played.
+// the games they led to that are still being played, and — for the challenger
+// only — a decline they have not dismissed yet.
 func handleListChallenges(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
@@ -158,9 +159,14 @@ func handleListChallenges(d *sql.DB) http.HandlerFunc {
 			       OR (c.status = 'Accepted' AND EXISTS (
 			             SELECT 1 FROM game_room g
 			              WHERE g.game_room_id = c.game_room_id
-			                AND g.status IN ('Open','Active'))))
+			                AND g.status IN ('Open','Active')))
+			       -- A "no" is shown to whoever asked until they dismiss it, so
+			       -- their invitation does not just vanish. The one who declined
+			       -- already knows.
+			       OR (c.status = 'Declined' AND c.from_account_id = ?
+			           AND c.decline_seen_at IS NULL))
 			ORDER BY c.created_at DESC
-			LIMIT 50`, id.UserAccountID, id.UserAccountID)
+			LIMIT 50`, id.UserAccountID, id.UserAccountID, id.UserAccountID)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not load challenges", err)
 			return
@@ -373,13 +379,43 @@ func handleCancelChallenge(d *sql.DB) http.HandlerFunc {
 	}
 }
 
+// handleDismissDecline clears a declined challenge from the challenger's list
+// once they have seen it.
+func handleDismissDecline(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		res, err := d.Exec(`UPDATE game_challenge SET decline_seen_at = ?
+		                    WHERE game_challenge_id = ? AND from_account_id = ?
+		                      AND status = 'Declined' AND decline_seen_at IS NULL`,
+			sqliteNow(), r.PathValue("id"), id.UserAccountID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not dismiss", err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			httpx.Error(w, http.StatusNotFound, "there is no decline of yours to dismiss", nil)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"status": "Declined"})
+	}
+}
+
 /* ---- room minting, shared with the staff path ---- */
 
 type mintOptions struct {
-	CreatedBy      string
-	Label          string
-	White, Black   string
-	Rated          bool
+	CreatedBy    string
+	Label        string
+	White, Black string
+	Rated        bool
+	// Timed says a time control was chosen; a rated game always has one.
+	Timed bool
+	// Assigned seats both players but waits for each to enter before the game
+	// is in play — the office's way. Without it, both seats filled means both
+	// players already agreed (an accepted challenge) and the game starts now.
+	Assigned       bool
 	ClockLimit     int
 	ClockIncrement int
 }
@@ -390,15 +426,24 @@ type mintOptions struct {
 // the same kind of board as one the console hands out — the only difference
 // being that the seats are already filled.
 func mintRoom(tx *sql.Tx, o mintOptions) (string, error) {
-	rated := 0
+	rated, timed := 0, 0
 	if o.Rated {
 		rated = 1
+	}
+	if o.Rated || o.Timed {
+		timed = 1
 	}
 	var seat = func(s string) any {
 		if s == "" {
 			return nil
 		}
 		return s
+	}
+	// An accepted challenge opens in play with both players entered; an
+	// assigned game opens waiting, with nobody entered yet.
+	status, started, entered := statusFor(o.White, o.Black), startedAt(o.White, o.Black), startedAt(o.White, o.Black)
+	if o.Assigned {
+		status, started, entered = "Open", nil, nil
 	}
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -409,12 +454,12 @@ func mintRoom(tx *sql.Tx, o mintOptions) (string, error) {
 		roomID := newID("gmr")
 		_, lastErr = tx.Exec(`INSERT INTO game_room
 			(game_room_id, code, label, created_by, fen, white_account_id, black_account_id,
-			 lichess_rated, lichess_clock_limit, lichess_clock_increment, status, started_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 lichess_rated, timed, lichess_clock_limit, lichess_clock_increment, status, started_at,
+			 white_entered_at, black_entered_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			roomID, code, strings.TrimSpace(o.Label), o.CreatedBy, game.StartFEN,
-			seat(o.White), seat(o.Black), rated, o.ClockLimit, o.ClockIncrement,
-			// Both seats are filled the moment it exists, so it opens Active.
-			statusFor(o.White, o.Black), startedAt(o.White, o.Black))
+			seat(o.White), seat(o.Black), rated, timed, o.ClockLimit, o.ClockIncrement,
+			status, started, entered, entered)
 		if lastErr == nil {
 			return roomID, nil
 		}
@@ -446,5 +491,6 @@ func mountChallenges(mux *http.ServeMux, d *sql.DB, relay *lichessRelay) {
 	mux.HandleFunc("POST "+p, httpx.RateLimit(20, handleCreateChallenge(d)))
 	mux.HandleFunc("POST "+p+"/{id}/accept", handleRespondToChallenge(d, relay, true))
 	mux.HandleFunc("POST "+p+"/{id}/decline", handleRespondToChallenge(d, relay, false))
+	mux.HandleFunc("POST "+p+"/{id}/dismiss", handleDismissDecline(d))
 	mux.HandleFunc("DELETE "+p+"/{id}", handleCancelChallenge(d))
 }

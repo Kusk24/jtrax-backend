@@ -54,7 +54,7 @@ func handleCancelClass(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			SELECT s.class_id, COALESCE(c.name, ''), s.session_date, s.start_time, s.end_time
 			  FROM class_session s
 			  LEFT JOIN class c ON c.class_id = s.class_id
-			 WHERE s.session_id = ?`, sessionID).Scan(&classID, &className, &day, &start, &end)
+			 WHERE s.session_id = ? AND s.cancelled_at IS NULL`, sessionID).Scan(&classID, &className, &day, &start, &end)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "no such class", nil)
 			return
@@ -101,7 +101,9 @@ func handleCancelClass(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not cancel the class", err)
 			return
 		}
-		if _, err := tx.Exec(`DELETE FROM class_session WHERE session_id = ?`, sessionID); err != nil {
+		// Kept, marked: the desk still sees it on the day as Cancelled.
+		if _, err := tx.Exec(`UPDATE class_session SET cancelled_at = ? WHERE session_id = ?`,
+			time.Now().UTC().Format(time.RFC3339), sessionID); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not cancel the class", err)
 			return
 		}

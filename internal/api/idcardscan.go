@@ -50,7 +50,7 @@ func handleScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// that does not exist, or this becomes a way to enumerate tournaments.
 		var open int
 		err := d.QueryRow(`SELECT COUNT(*) FROM tournament
-		                   WHERE tournament_id = ? AND public_registration = 1`,
+		                   WHERE tournament_id = ? AND public_registration = 1 AND draft = 0`,
 			r.PathValue("id")).Scan(&open)
 		if err != nil || open == 0 {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)

@@ -53,6 +53,9 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// each accepted call sends mail to somebody else's inbox.
 	mux.HandleFunc("POST /api/v1/auth/forgot-password", httpx.RateLimit(60, handleForgotPassword(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/reset-password", httpx.RateLimit(10, handleResetPassword(d)))
+	mux.HandleFunc("POST /api/v1/auth/change-password", httpx.RateLimit(30, handleChangePassword(d)))
+	// Staff only: a new parent chooses their own password from this link.
+	mux.HandleFunc("POST /api/v1/user-accounts/{id}/invite", httpx.RateLimit(60, handleInvite(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/logout", handleLogout(d))
 	mux.HandleFunc("GET /api/v1/auth/me", handleMe(d))
 	mux.HandleFunc("PATCH /api/v1/auth/me", handleUpdateMe(d))
@@ -69,6 +72,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mountPuzzles(mux, d)
 	mountFreePlay(mux, d)
 	mountPractice(mux, d)
+	mountProgress(mux, d)
 	mountHistory(mux, d)
 	mountLine(mux, d)
 	mountLichess(mux, d)
@@ -82,7 +86,12 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mountPublicRegistration(mux, &publicEntryDeps{
 		db: d, sender: sender, mail: mailCfg, stripe: stripeClient, stripeCfg: stripeCfg,
 	})
+	mountArrival(mux, d, mailCfg, sender)
+	mountDashboardActivity(mux, d)
 	mountTournamentRegulation(mux, d)
+	mountTournamentBanner(mux, d)
+	mountAcademyContact(mux, d)
+	mountTournamentDraft(mux, d, stripeClient != nil)
 	mountRegistrationQueue(mux, d)
 	// A parent's own entry, priced by the server, and the desk recording a fee
 	// paid at the counter. Both are tournament-registration writes the generic

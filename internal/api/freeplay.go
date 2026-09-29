@@ -124,8 +124,9 @@ func assignFromBank(d *sql.DB, studentID string, t tier) (*puzzleView, error) {
 		SELECT puzzle_id, fen, moves, rating, themes FROM puzzle
 		WHERE rating BETWEEN ? AND ?
 		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
+		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_list WHERE student_id = ?)
 		ORDER BY ABS(rating - ?), puzzle_id LIMIT 1`,
-		t.minRate, t.maxRate, studentID, (t.minRate+min(t.maxRate, 1600))/2,
+		t.minRate, t.maxRate, studentID, studentID, (t.minRate+min(t.maxRate, 1600))/2,
 	).Scan(&pid, &fen, &moves, &rating, &themes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -184,4 +185,5 @@ func mountFreePlay(mux *http.ServeMux, d *sql.DB) {
 	// surface. Ten a minute was too tight: solving auto-fetches the next
 	// puzzle, so a child on a good run hit 429 in under a minute.
 	mux.HandleFunc("GET /api/v1/puzzles/free", httpx.RateLimit(30, handleFreePlayPuzzle(d, lc)))
+	mountPuzzleList(mux, d, lc)
 }

@@ -83,6 +83,18 @@ type Message struct {
 	// of this Type whose data.dedupe matches — so a check-in row patched twice
 	// notifies once. Empty means every send is delivered.
 	DedupeKey string
+	// Details, when set, is shown as a table in the email — a receipt's
+	// amount, credits and balance. The in-app notification keeps to Body.
+	Details []Detail
+	// EmailIntro replaces Body in the email when Details already say the
+	// rest — so a receipt's figures are not written out twice.
+	EmailIntro Text
+}
+
+// Detail is one row of an email's details table, in both languages.
+type Detail struct {
+	Label Text
+	Value Text
 }
 
 // Service sends notifications. It holds the mail sender so the email channel
@@ -144,7 +156,10 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		return nil
 	}
 
-	type emailJob struct{ deliveryID, notifID, addr, subject, body string }
+	type emailJob struct {
+		deliveryID, notifID, addr, subject string
+		email                              mail.Email
+	}
 	var emails []emailJob
 	var phones []pushJob
 
@@ -181,7 +196,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 				if s.mailCfg.Configured() && addr != "" {
 					// Queue the actual send for after commit; the row stays
 					// 'pending' until that succeeds or fails.
-					emails = append(emails, emailJob{deliveryID, notifID, addr, title, body})
+					emails = append(emails, emailJob{deliveryID, notifID, addr, title, s.emailFor(tx, uid, lang, title, body, msg)})
 				}
 				// No SMTP yet, or no address: left 'pending' so a sender that
 				// runs later can pick it up, not 'failed'.
@@ -207,7 +222,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 
 	// After the lock is released: attempt the emails and record the outcome.
 	for _, j := range emails {
-		if err := s.mail.Send(j.addr, j.subject, j.body); err != nil {
+		if err := mail.Deliver(s.mail, j.addr, j.subject, j.email); err != nil {
 			log.Printf("notify: email to %s failed: %v", redactAddr(j.addr), err)
 			s.markDelivery(j.deliveryID, "failed", err.Error())
 			continue
@@ -329,15 +344,36 @@ func (s *Service) alreadySent(tx *sql.Tx, uid, typ, key string) bool {
 // go through. A deployment with no mail configured sends nothing; a failure is
 // logged with the address redacted and never returned, because the caller's
 // work is already done.
-func (s *Service) Email(to, subject, body string) {
+func (s *Service) Email(to, subject string, e mail.Email) {
 	// mail.New returns no sender at all when SMTP is not configured, so a
 	// sender being here is what "mail is on" means.
 	if s.mail == nil || to == "" {
 		return
 	}
-	if err := s.mail.Send(to, subject, body); err != nil {
+	if err := mail.Deliver(s.mail, to, subject, e); err != nil {
 		log.Printf("notify: email to %s failed: %v", redactAddr(to), err)
 	}
+}
+
+// emailFor lays a notification out as an email: addressed to the person by
+// name, the message, any details as a table, and a way into the app.
+func (s *Service) emailFor(tx *sql.Tx, uid, lang, title, body string, msg Message) mail.Email {
+	var name, role string
+	tx.QueryRow(`SELECT COALESCE(display_name,''), role FROM user_account WHERE user_account_id = ?`, uid).Scan(&name, &role)
+	if intro := msg.EmailIntro.pick(lang); intro != "" {
+		body = intro
+	}
+	e := mail.Email{Heading: title, Paragraphs: []string{body}}
+	if name != "" {
+		e.Greeting = Text{EN: "Hello " + name + ",", TH: "สวัสดีค่ะ คุณ" + name}.pick(lang)
+	}
+	for _, d := range msg.Details {
+		e.Details = append(e.Details, mail.Detail{Label: d.Label.pick(lang), Value: d.Value.pick(lang)})
+	}
+	if url := s.mailCfg.PortalFor(role); url != "" {
+		e.Button = &mail.Button{Label: Text{EN: "Open JTrax", TH: "เปิด JTrax"}.pick(lang), URL: url}
+	}
+	return e
 }
 
 func (s *Service) markDelivery(id, status, errText string) {
@@ -392,8 +428,17 @@ func prefEnabled(tx *sql.Tx, uid, typ, channel string) bool {
 // system_configuration, and only an explicit "off" turns a type off — an
 // absent key is on, so a new type works before anyone visits Settings.
 func typeEnabledForSchool(tx *sql.Tx, typ string) bool {
+	return SchoolEnabled(tx, typ)
+}
+
+// SchoolEnabled is the same switch, readable outside a send: the school-level
+// setting is the master permission, so a parent's own settings screen lists
+// only the types it allows, and a parent cannot switch on one it has off.
+func SchoolEnabled(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, typ string) bool {
 	var value string
-	err := tx.QueryRow(
+	err := q.QueryRow(
 		`SELECT config_value FROM system_configuration WHERE config_key = ?`,
 		"notify_"+typ).Scan(&value)
 	if err != nil {

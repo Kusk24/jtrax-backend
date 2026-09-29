@@ -1,0 +1,11 @@
+-- 0047_a_game_can_be_stopped_and_resumed.sql — the bell goes mid-game, and the
+-- two students finish it next lesson.
+--
+-- Stopping a game in play pauses it: back to Open, every move kept,
+-- and nobody can move until the office resumes it. `stopped_at` is what tells
+-- a paused game from one that never began, so the console and the pupils
+-- can say "Paused" rather than "Waiting".
+--
+-- A rated game cannot be paused on Lichess — its clock keeps running — so
+-- stopping one ends the Lichess side and the game resumes here unrated.
+ALTER TABLE game_room ADD COLUMN stopped_at TEXT;

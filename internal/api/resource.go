@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -81,6 +82,12 @@ type Resource struct {
 	// now stored, which makes it the same function for a create and an update
 	// — write it to be re-runnable rather than incremental.
 	AfterWrite func(tx *sql.Tx, rowID string) error
+	// AfterInsert is a rule about a row being added rather than one being
+	// edited: a student joining a class may not clash with another class they
+	// are already in, but checking them out of a clash that predates the rule
+	// must still work. It runs only on create, inside the same transaction and
+	// before AfterWrite, so a refused row is never charged.
+	AfterInsert func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
 	// AfterCommit runs once the row is committed and reloaded, OUTSIDE the
@@ -111,6 +118,16 @@ func inTx(d *sql.DB, write func(tx *sql.Tx) error) error {
 	}
 	return tx.Commit()
 }
+
+// ClientError is a hook error meant to reach the caller as-is — its own
+// status and message — instead of being flattened into the generic
+// create/update failure every other AfterWrite error gets.
+type ClientError struct {
+	Status  int
+	Message string
+}
+
+func (e *ClientError) Error() string { return e.Message }
 
 func isStaff(role string) bool { return role == "Admin" || role == "Receptionist" }
 
@@ -359,17 +376,30 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 		}
 		insert := "INSERT INTO " + rs.Table + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(marks, ", ") + ")"
 		var err error
-		if rs.AfterWrite == nil {
+		if rs.AfterWrite == nil && rs.AfterInsert == nil {
 			_, err = d.Exec(insert, args...)
 		} else {
 			err = inTx(d, func(tx *sql.Tx) error {
 				if _, e := tx.Exec(insert, args...); e != nil {
 					return e
 				}
+				if rs.AfterInsert != nil {
+					if e := rs.AfterInsert(tx, rowID); e != nil {
+						return e
+					}
+				}
+				if rs.AfterWrite == nil {
+					return nil
+				}
 				return rs.AfterWrite(tx, rowID)
 			})
 		}
 		if err != nil {
+			var ce *ClientError
+			if errors.As(err, &ce) {
+				httpx.Error(w, ce.Status, ce.Message, err)
+				return
+			}
 			httpx.Error(w, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
 			return
 		}
@@ -453,6 +483,11 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			})
 		}
 		if err != nil {
+			var ce *ClientError
+			if errors.As(err, &ce) {
+				httpx.Error(w, ce.Status, ce.Message, err)
+				return
+			}
 			httpx.Error(w, http.StatusBadRequest, "could not update record", err)
 			return
 		}

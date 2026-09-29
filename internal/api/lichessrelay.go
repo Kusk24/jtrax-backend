@@ -360,8 +360,12 @@ func (rl *lichessRelay) watch(roomID, gameID, token string) {
 
 // onState records what Lichess says about the game.
 func (rl *lichessRelay) onState(roomID string, st lichess.GameState) {
-	if _, err := rl.db.Exec(`UPDATE game_room SET lichess_status = ? WHERE game_room_id = ?`,
-		st.Status, roomID); err != nil {
+	// The clock rides along: both remainders and the moment they were true,
+	// so a board can count the side to move down between updates.
+	if _, err := rl.db.Exec(`UPDATE game_room SET lichess_status = ?,
+	                           clock_white_ms = ?, clock_black_ms = ?, clock_at = ?
+	                         WHERE game_room_id = ?`,
+		st.Status, st.WTime, st.BTime, time.Now().UTC().Format(time.RFC3339Nano), roomID); err != nil {
 		log.Printf("lichess relay: recording status for room %s: %v", roomID, err)
 		return
 	}
@@ -474,6 +478,43 @@ func (rl *lichessRelay) abandon(roomID string) {
 // Without this a pupil resigning in JTrax would leave the Lichess game running
 // until it timed out, and the rating would eventually move for the wrong
 // reason, minutes later.
+// draw carries a draw agreed on our board to Lichess: the side that offered
+// offers there, then the side that accepted accepts. In order, since an
+// accept with no offer standing is itself only an offer.
+func (rl *lichessRelay) draw(roomID, offeredBy string) {
+	if !rl.enabled() {
+		return
+	}
+	var gameID sql.NullString
+	var rated int
+	if err := rl.db.QueryRow(`SELECT lichess_game_id, lichess_rated FROM game_room
+	                          WHERE game_room_id = ?`, roomID).Scan(&gameID, &rated); err != nil {
+		return
+	}
+	if rated != 1 || !gameID.Valid || gameID.String == "" {
+		return
+	}
+	white, black, err := rl.seatTokens(roomID)
+	if err != nil {
+		return
+	}
+	first, second := white.token, black.token
+	if offeredBy == "Black" {
+		first, second = black.token, white.token
+	}
+	go func() {
+		for _, token := range []string{first, second} {
+			ctx, cancel := context.WithTimeout(context.Background(), relayMoveTimeout)
+			err := rl.oauth.client.Draw(ctx, token, gameID.String)
+			cancel()
+			if err != nil {
+				log.Printf("lichess relay: drawing room %s: %v", roomID, err)
+				return
+			}
+		}
+	}()
+}
+
 func (rl *lichessRelay) resign(roomID, seat string) {
 	if !rl.enabled() {
 		return

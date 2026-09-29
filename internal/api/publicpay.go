@@ -152,6 +152,11 @@ func handlePublicEntry(deps *publicEntryDeps) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		/* The early-bird and closing-date rules, applied before a price is
+		   read, so a lapsed price is never the one sent to Stripe. */
+		if err := sweepUnpaidEntries(deps.db, today()); err != nil {
+			log.Printf("entry rules: %v", err)
+		}
 		e, err := findPublicEntry(deps.db, r.PathValue("id"), code)
 		if errors.Is(err, errNoEntry) {
 			httpx.Error(w, http.StatusNotFound, "this payment link does not work", nil)
@@ -179,6 +184,11 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 		if deps.stripe == nil {
 			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not switched on", nil)
 			return
+		}
+		/* The early-bird and closing-date rules, applied before a price is
+		   read, so a lapsed price is never the one sent to Stripe. */
+		if err := sweepUnpaidEntries(deps.db, today()); err != nil {
+			log.Printf("entry rules: %v", err)
 		}
 		e, err := findPublicEntry(deps.db, r.PathValue("id"), code)
 		if errors.Is(err, errNoEntry) {
@@ -217,7 +227,7 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 // when card payments are on, the link to pay it. It runs after the entry is
 // committed and never fails the registration: an email that did not send is
 // no reason to tell somebody their place was not taken.
-func sendEntryConfirmation(deps *publicEntryDeps, to, tournamentID, tournamentName, regID, participant, category string, fee float64, code string) {
+func sendEntryConfirmation(deps *publicEntryDeps, to, tournamentID, tournamentName, regID, participant, category string, fee float64, code, earlyBirdUntil, closes string) {
 	var link string
 	if deps.stripe != nil && fee > 0 && deps.mail.AppURL != "" {
 		link = payLink(deps.mail.AppURL, tournamentID, regID, code)
@@ -231,7 +241,7 @@ func sendEntryConfirmation(deps *publicEntryDeps, to, tournamentID, tournamentNa
 		return
 	}
 	subject := "You're registered: " + tournamentName
-	if err := deps.sender.Send(to, subject, entryConfirmationBody(tournamentName, participant, category, fee, link)); err != nil {
+	if err := deps.sender.Send(to, subject, entryConfirmationBody(tournamentName, participant, category, fee, link, earlyBirdUntil, closes)); err != nil {
 		// The address is the entrant's, which is personal data; the entry id
 		// is enough for somebody to find it.
 		log.Printf("public entry: confirmation for %s did not send: %v", regID, err)
@@ -239,9 +249,12 @@ func sendEntryConfirmation(deps *publicEntryDeps, to, tournamentID, tournamentNa
 }
 
 // entryConfirmationBody is the email, English then Thai, plain text like every
-// other message the academy sends.
-func entryConfirmationBody(tournament, participant, category string, fee float64, link string) string {
+// other message the academy sends. An unpaid fee comes with its two dates
+// (entryrules.go) — earlyBirdUntil only when the entry got that price.
+func entryConfirmationBody(tournament, participant, category string, fee float64, link, earlyBirdUntil, closes string) string {
 	var b strings.Builder
+	rulesEN, rulesTH := unpaidRules(earlyBirdUntil, closes)
+	contactEN, contactTH := contactLines()
 	b.WriteString("Hello,\n\n")
 	b.WriteString(participant + " is registered for " + tournament + ".\n")
 	if category != "" {
@@ -256,7 +269,11 @@ func entryConfirmationBody(tournament, participant, category string, fee float64
 		} else {
 			b.WriteString("Please pay by bank transfer or at the JCA front desk.\n")
 		}
+		for _, line := range rulesEN[1:] {
+			b.WriteString("- " + line + "\n")
+		}
 	}
+	b.WriteString("\n" + contactEN + "\n")
 	b.WriteString("\nJCA Chess Academy\n\n----------\n\n")
 
 	b.WriteString("สวัสดีค่ะ\n\n")
@@ -273,7 +290,11 @@ func entryConfirmationBody(tournament, participant, category string, fee float64
 		} else {
 			b.WriteString("กรุณาโอนเงินผ่านธนาคาร หรือชำระที่เคาน์เตอร์ของ JCA\n")
 		}
+		for _, line := range rulesTH[1:] {
+			b.WriteString("- " + line + "\n")
+		}
 	}
+	b.WriteString("\n" + contactTH + "\n")
 	b.WriteString("\nJCA Chess Academy\n")
 	return b.String()
 }

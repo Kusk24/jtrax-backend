@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -46,7 +47,9 @@ func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg st
 	// no script and no data: the payment's state is what the webhook said, not
 	// which of these two URLs a browser happened to load.
 	mux.HandleFunc("GET /pay/done", payPage("Payment received — thank you! · ชำระเงินเรียบร้อยแล้ว ขอบคุณค่ะ"))
-	mux.HandleFunc("GET /pay/cancelled", payPage("Payment cancelled — nothing was charged. · ยกเลิกการชำระเงิน ยังไม่มีการตัดเงิน"))
+	// A tournament entry's cancel page says what happens to the unpaid place
+	// (entrynotice.go); any other payment's says nothing was charged.
+	mux.HandleFunc("GET /pay/cancelled", httpx.RateLimit(60, handlePayCancelled(d)))
 }
 
 func payPage(text string) http.HandlerFunc {
@@ -141,14 +144,18 @@ func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *str
 	}
 	// A public entrant gave an email on the form, so it is filled in for them
 	// on Stripe's page. Nothing else is known about them to pass.
-	var email string
-	d.QueryRow(`SELECT COALESCE(r.contact_email,'') FROM payment p
+	var email, entry string
+	d.QueryRow(`SELECT COALESCE(r.contact_email,''), r.tournament_registration_id FROM payment p
 	              JOIN tournament_registration r
 	                ON r.tournament_registration_id = p.tournament_registration_id
-	             WHERE p.payment_id = ?`, paymentID).Scan(&email)
+	             WHERE p.payment_id = ?`, paymentID).Scan(&email, &entry)
 	base := returnBase(cfg)
+	cancelled := base + "/pay/cancelled"
+	if entry != "" {
+		cancelled += "?entry=" + url.QueryEscape(entry)
+	}
 	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
-		base+"/pay/done", base+"/pay/cancelled", email)
+		base+"/pay/done", cancelled, email)
 	if err != nil {
 		// The Stripe error names the account; the log gets it, the client
 		// does not.
