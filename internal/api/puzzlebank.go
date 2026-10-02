@@ -11,8 +11,6 @@ package api
 import (
 	"database/sql"
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/Kusk24/jtrax-backend/internal/lichess"
 	"github.com/Kusk24/jtrax-backend/internal/puzzle"
@@ -62,11 +60,5 @@ func topUpBank(d *sql.DB, lc *lichess.Client, t tier) error {
 }
 
 func mountPuzzleBank(mux *http.ServeMux, d *sql.DB) {
-	lc := lichess.New()
-	// Same override the rest of the Lichess surface uses, so a test can point
-	// the whole integration at a stub without a second mechanism.
-	if base := strings.TrimSpace(os.Getenv("LICHESS_API_BASE")); base != "" {
-		lc.BaseURL = base
-	}
-	mountPuzzleList(mux, d, lc)
+	mountPuzzleList(mux, d, newPuzzleClient())
 }

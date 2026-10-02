@@ -287,6 +287,8 @@ func TestSigningInIsRequiredForPuzzles(t *testing.T) {
 
 // A pupil is never set the same puzzle twice, and is told when that means
 // there is nothing left rather than being handed a silently empty day.
+// With Lichess unreachable (the suite's default, see main_test.go) nothing can
+// top the bank up, so the seeded sixty run out and the portal is told.
 func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 	d := newDB(t)
 	srv := newServerOn(t, d)
