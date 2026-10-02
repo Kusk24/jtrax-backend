@@ -17,6 +17,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/lichess"
 	"github.com/Kusk24/jtrax-backend/internal/puzzle"
 )
 
@@ -79,7 +80,7 @@ func today() string { return academytime.Today() }
 // The set is materialised as puzzle_attempt rows rather than recomputed, which
 // is what makes it stable: refreshing the page cannot reroll a puzzle the pupil
 // has just failed.
-func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
+func handleDailyPuzzles(d *sql.DB, lc *lichess.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
 		if id == nil {
@@ -91,7 +92,7 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 		}
 		day := today()
 
-		if err := assignDaily(d, studentID, day); err != nil {
+		if err := assignDaily(d, lc, studentID, day); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not prepare today's puzzles", err)
 			return
 		}
@@ -124,9 +125,10 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 		}
 
 		// How many the pupil has never been set. Zero with a short set means the
-		// bank is spent for them, which the portal has to be able to say — a
-		// silently empty daily challenge reads as a broken app, and with sixty
-		// seeded puzzles this arrives on about the twentieth day.
+		// bank is spent for them and Lichess could not add more just now — an
+		// outage, since the set tops itself up otherwise (dailytopup.go). The
+		// portal has to be able to say so: a silently empty daily challenge
+		// reads as a broken app.
 		var unseen int
 		if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle
 		                      WHERE puzzle_id NOT IN
@@ -146,8 +148,9 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-// assignDaily fills today's set if it is not already there.
-func assignDaily(d *sql.DB, studentID, day string) error {
+// assignDaily fills today's set if it is not already there, topping the bank up
+// from Lichess when the pupil's band runs low (see dailytopup.go).
+func assignDaily(d *sql.DB, lc *lichess.Client, studentID, day string) error {
 	var have int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle_attempt
 	                      WHERE student_id = ? AND assigned_on = ? AND source = 'daily'`,
@@ -166,6 +169,24 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 	if rating.Valid && rating.Float64 > 0 {
 		target = int(rating.Float64)
 	}
+	need := dailyCount - have
+
+	// The guarantee: before choosing, make sure the band holds enough unseen
+	// puzzles for today, fetching one at a time until it does or the attempts
+	// run out. Fetched puzzles may land outside the band; the choice below
+	// still falls back to the nearest rating, as it always has.
+	inBand, err := unseenInBand(d, studentID, target)
+	if err != nil {
+		return err
+	}
+	for i := 0; inBand < need && i < dailyTopUpAttempts; i++ {
+		if fetchForBand(d, lc, target, 1) == 0 {
+			break
+		}
+		if inBand, err = unseenInBand(d, studentID, target); err != nil {
+			return err
+		}
+	}
 
 	// Never a puzzle this pupil has been set before — repeating one they have
 	// already solved is worth nothing, and repeating one they failed teaches
@@ -180,7 +201,7 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 		SELECT puzzle_id FROM puzzle
 		WHERE puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
 		ORDER BY (ABS(rating - ?) > ?), ABS(rating - ?) LIMIT ?`,
-		studentID, target, ratingBand, target, dailyCount-have)
+		studentID, target, ratingBand, target, need)
 	if err != nil {
 		return err
 	}
@@ -202,6 +223,14 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 		// than double-assign, so the error is expected and ignored.
 		d.Exec(`INSERT INTO puzzle_attempt (puzzle_attempt_id, student_id, puzzle_id, assigned_on)
 		        VALUES (?, ?, ?, ?)`, newID("pza"), studentID, pid, day)
+	}
+
+	// Ahead of need: with fewer than reserveDays of sets left in the band,
+	// refill it now in the background so tomorrow's set is already waiting.
+	// Only on the request that chose today's set, so it runs at most once a
+	// day per pupil, not on every refresh.
+	if left, err := unseenInBand(d, studentID, target); err == nil && left < reserveDays*dailyCount {
+		topUpInBackground(d, lc, target, reserveDays*dailyCount-left)
 	}
 	return nil
 }
@@ -349,7 +378,7 @@ func minutesOnPuzzle(d *sql.DB, studentID, puzzleID string) int {
 }
 
 func mountPuzzles(mux *http.ServeMux, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d))
+	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d, newPuzzleClient()))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/open", handlePuzzleOpen(d))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/attempt", handlePuzzleAttempt(d))
 }

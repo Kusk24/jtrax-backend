@@ -15,7 +15,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -173,12 +172,7 @@ func topUpBank(d *sql.DB, lc *lichess.Client, t tier) error {
 }
 
 func mountFreePlay(mux *http.ServeMux, d *sql.DB) {
-	lc := lichess.New()
-	// Same override the rest of the Lichess surface uses, so a test can point
-	// the whole integration at a stub without a second mechanism.
-	if base := strings.TrimSpace(os.Getenv("LICHESS_API_BASE")); base != "" {
-		lc.BaseURL = base
-	}
+	lc := newPuzzleClient()
 	// Authenticated, but one press can spend up to topUpAttempts calls against
 	// Lichess, so it is limited more tightly than the rest of the puzzle
 	// surface. Ten a minute was too tight: solving auto-fetches the next

@@ -54,6 +54,8 @@ const (
 	Easiest = "easiest"
 	Easier  = "easier"
 	Normal  = "normal"
+	Harder  = "harder"
+	Hardest = "hardest"
 )
 
 // NextPuzzle fetches one puzzle at the given difficulty.
