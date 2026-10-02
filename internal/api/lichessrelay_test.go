@@ -657,7 +657,13 @@ func TestTheLichessClockReachesTheRoom(t *testing.T) {
 	roomID := pairInRoom(t, base, penny, uri)
 
 	stub.push("game1", `{"type":"gameState","moves":"","wtime":598000,"btime":600000,"status":"started"}`)
-	room := waitForRoom(t, penny, roomID, func(r map[string]any) bool { return r["clock"] != nil })
+	// Wait for this state's clock, not the first one: the stream opens with a
+	// gameFull whose state carries no times, which the relay records too, so
+	// waiting for any clock at all raced the pushed update.
+	room := waitForRoom(t, penny, roomID, func(r map[string]any) bool {
+		c, _ := r["clock"].(map[string]any)
+		return c != nil && c["whiteMs"] == float64(598000)
+	})
 	clock := room["clock"].(map[string]any)
 	if clock["whiteMs"] != float64(598000) || clock["blackMs"] != float64(600000) || clock["at"] == "" {
 		t.Fatalf("clock = %v, want White 598000, Black 600000 and when", clock)
