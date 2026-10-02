@@ -22,6 +22,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -56,6 +57,11 @@ func handleRegistrationStripeLink(d *sql.DB, client *stripepay.Client, cfg strip
 		// The family filter is part of the lookup, not a check after it: another
 		// family's registration reads as missing, which is also the only honest
 		// answer to give — that it exists is not this caller's business.
+		/* The early-bird and closing-date rules, applied before a price is
+		   read, so a lapsed price is never the one sent to Stripe. */
+		if err := sweepUnpaidEntries(d, today()); err != nil {
+			log.Printf("entry rules: %v", err)
+		}
 		regID := r.PathValue("id")
 		var studentID, participantName, status, tournamentName string
 		var fee sql.NullFloat64
@@ -165,6 +171,9 @@ func checkRegistrationNotes(row map[string]any) error {
 // of staff's to assert.
 var deskMethods = []string{"Cash", "PromptPay", "BankTransfer"}
 
+// maxReferenceLen bounds a transfer's reference number; real ones are ~20.
+const maxReferenceLen = 100
+
 // handleDeskPayment records a tournament fee paid at the front desk.
 //
 // Staff only — Admin and Receptionist, the people who take the money. It reuses
@@ -182,9 +191,17 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 		}
 		var in struct {
 			Method string `json:"payment_method"`
+			// The slip's transaction number for a PromptPay or bank transfer,
+			// so the money can be found on the statement. Optional.
+			Reference string `json:"reference_number"`
 		}
 		if err := httpx.Decode(r, &in); err != nil {
 			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+			return
+		}
+		in.Reference = strings.TrimSpace(in.Reference)
+		if len(in.Reference) > maxReferenceLen {
+			httpx.Error(w, http.StatusBadRequest, "reference_number is too long", nil)
 			return
 		}
 		if !slices.Contains(deskMethods, in.Method) {
@@ -243,19 +260,20 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			// cleared so it is not handed out again for money already taken.
 			_, err = tx.Exec(`
 				UPDATE payment SET status = 'Paid', payment_method = ?, payment_date = ?,
-				       amount = ?, final_amount = ?, stripe_checkout_url = NULL
+				       amount = ?, final_amount = ?, stripe_checkout_url = NULL,
+				       reference_number = ?
 				 WHERE payment_id = ? AND status = 'Pending'`,
-				in.Method, today(), fee.Float64, fee.Float64, paymentID)
+				in.Method, today(), fee.Float64, fee.Float64, nullIfEmpty(in.Reference), paymentID)
 		default:
 			paymentID = newID("pay")
 			_, err = tx.Exec(`
 				INSERT INTO payment (payment_id, student_id, student_name, class_name, parent_name,
 				                     amount, discount_amount, final_amount, payment_method, status,
-				                     payment_date, tournament_registration_id)
-				VALUES (?,?,?,?,?,?,0,?,?,'Paid',?,?)`,
+				                     payment_date, tournament_registration_id, reference_number)
+				VALUES (?,?,?,?,?,?,0,?,?,'Paid',?,?,?)`,
 				paymentID, studentID, participantName, tournamentName,
 				parentNameOf(tx, studentID.String), fee.Float64, fee.Float64, in.Method,
-				today(), regID)
+				today(), regID, nullIfEmpty(in.Reference))
 		}
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not record the payment", err)

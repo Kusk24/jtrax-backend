@@ -146,8 +146,50 @@ func handleDailyPuzzles(d *sql.DB) http.HandlerFunc {
 	}
 }
 
+// dailyTarget is the rating a pupil's daily puzzles aim at, and the band they
+// are drawn from first. The band is the pupil's level as the office set it —
+// the same bands Practice uses — so an Advanced pupil is not handed 800-rated
+// puzzles because they have no FIDE rating. A FIDE rating inside that band
+// sharpens the aim; with no level on file the FIDE rating (or 800) decides.
+func dailyTarget(d *sql.DB, studentID string) (int, tier, error) {
+	var level sql.NullString
+	var rating sql.NullFloat64
+	if err := d.QueryRow(`SELECT current_level, fide_rating FROM student WHERE student_id = ?`, studentID).Scan(&level, &rating); err != nil {
+		return 0, tier{}, err
+	}
+	fide := 0
+	if rating.Valid && rating.Float64 > 0 {
+		fide = int(rating.Float64)
+	}
+	if t, ok := tiers[strings.ToLower(strings.TrimSpace(level.String))]; ok {
+		if fide >= t.minRate && fide <= t.maxRate {
+			return fide, t, nil
+		}
+		return (t.minRate + min(t.maxRate, 1600)) / 2, t, nil
+	}
+	target := defaultRating
+	if fide > 0 {
+		target = fide
+	}
+	return target, tier{minRate: target - ratingBand, maxRate: target + ratingBand}, nil
+}
+
 // assignDaily fills today's set if it is not already there.
+//
+// Puzzles in today's set the pupil has not touched (not opened, not tried,
+// not solved) are swapped out when they fall outside the pupil's level — so a
+// level the office changes today takes effect today, not tomorrow.
 func assignDaily(d *sql.DB, studentID, day string) error {
+	if _, band, err := dailyTarget(d, studentID); err == nil {
+		d.Exec(`DELETE FROM puzzle_attempt
+		        WHERE student_id = ? AND assigned_on = ? AND source = 'daily'
+		          AND solved = 0 AND wrong_moves = 0 AND opened_at IS NULL
+		          AND puzzle_id IN (SELECT puzzle_id FROM puzzle WHERE rating NOT BETWEEN ? AND ?)
+		          AND EXISTS (SELECT 1 FROM puzzle p WHERE p.rating BETWEEN ? AND ?
+		                        AND p.puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
+		                        AND p.puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_list WHERE student_id = ?))`,
+			studentID, day, band.minRate, band.maxRate, band.minRate, band.maxRate, studentID, studentID)
+	}
 	var have int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle_attempt
 	                      WHERE student_id = ? AND assigned_on = ? AND source = 'daily'`,
@@ -158,13 +200,9 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 		return nil
 	}
 
-	var rating sql.NullFloat64
-	if err := d.QueryRow(`SELECT fide_rating FROM student WHERE student_id = ?`, studentID).Scan(&rating); err != nil {
+	target, band, err := dailyTarget(d, studentID)
+	if err != nil {
 		return err
-	}
-	target := defaultRating
-	if rating.Valid && rating.Float64 > 0 {
-		target = int(rating.Float64)
 	}
 
 	// Never a puzzle this pupil has been set before — repeating one they have
@@ -179,8 +217,9 @@ func assignDaily(d *sql.DB, studentID, day string) error {
 	rows, err := d.Query(`
 		SELECT puzzle_id FROM puzzle
 		WHERE puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
-		ORDER BY (ABS(rating - ?) > ?), ABS(rating - ?) LIMIT ?`,
-		studentID, target, ratingBand, target, dailyCount-have)
+		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_list WHERE student_id = ?)
+		ORDER BY (rating NOT BETWEEN ? AND ?), (ABS(rating - ?) > ?), ABS(rating - ?) LIMIT ?`,
+		studentID, studentID, band.minRate, band.maxRate, target, ratingBand, target, dailyCount-have)
 	if err != nil {
 		return err
 	}

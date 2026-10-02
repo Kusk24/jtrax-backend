@@ -87,3 +87,29 @@ func TestAPublicEntrantIsEmailedTheirReceiptWhenTheDeskTakesTheFee(t *testing.T)
 		t.Fatalf("receipt went to %q", to)
 	}
 }
+
+// A transfer's slip number is kept with the payment, so the money can be found
+// on the bank statement. It is optional: cash has none.
+func TestADeskPaymentKeepsItsTransferReference(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	regID := registerPenny(t, parent, 800)
+
+	desk := &client{t: t, srv: srv}
+	desk.login("admin@jca.ac.th")
+	status, out, _ := desk.do("POST", "/api/v1/tournament-registrations/"+regID+"/desk-payment",
+		map[string]any{"payment_method": "PromptPay", "reference_number": "  2026092812345678  "})
+	if status != 200 {
+		t.Fatalf("desk payment: %d (%v)", status, out)
+	}
+	_, pay, _ := desk.do("GET", "/api/v1/payments/"+out["payment_id"].(string), nil)
+	if pay["reference_number"] != "2026092812345678" || pay["payment_method"] != "PromptPay" {
+		t.Fatalf("reference not kept: %v", pay)
+	}
+
+	if status, _, _ := desk.do("POST", "/api/v1/tournament-registrations/"+regID+"/desk-payment",
+		map[string]any{"payment_method": "Cash", "reference_number": strings.Repeat("9", 101)}); status != 400 {
+		t.Fatalf("an over-long reference should be refused, got %d", status)
+	}
+}

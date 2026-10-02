@@ -102,6 +102,7 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 		`DELETE FROM practice_activity WHERE student_id = ?`,
 		`DELETE FROM practice_settings WHERE student_id = ?`,
 		`DELETE FROM puzzle_attempt WHERE student_id = ?`,
+		`DELETE FROM puzzle_list WHERE student_id = ?`,
 		`DELETE FROM tournament_registration WHERE student_id = ?`,
 		`DELETE FROM student_parent WHERE student_id = ?`,
 		`DELETE FROM student WHERE student_id = ?`,

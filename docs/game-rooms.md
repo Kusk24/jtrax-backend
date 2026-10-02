@@ -39,9 +39,38 @@ That composite key is the concurrency control. Two clients racing to submit the
 same turn cannot both append: the second `INSERT` violates the key and the
 handler answers `409` rather than writing a second move into one turn.
 
+`0045_a_game_room_is_monitored.sql` adds what the console needs to watch a class
+of boards:
+
+- `timed` — whether a time control was chosen. The 0012 clock columns default
+  to 15+10 on every room, so they alone cannot say. A rated room is always
+  timed. An unrated one shows its time control as a label only: this board
+  keeps no time, so only a rated game (on Lichess's clock) can end on time.
+- `clock_white_ms`, `clock_black_ms`, `clock_at` — each side's remaining time as
+  the Lichess game stream last reported it, and when. The side to move counts
+  down from `clock_at`. Rated games only.
+- `draw_offer` — the colour offering a draw while the offer stands.
+
+`0046_an_assigned_game_waits_for_both.sql` adds `white_entered_at` and
+`black_entered_at`. A game the office sets up has both seats filled but opens
+`Open`; each student presses Enter (`POST /{id}/enter`), and the game becomes
+`Active` — and a rated one is paired on Lichess — only when both have. Joining
+by code counts as entering. An accepted challenge still opens `Active`.
+
+`0047_a_game_can_be_stopped_and_resumed.sql` adds `stopped_at`. Staff pause a
+game in play (`POST /{id}/stop`): it returns to `Open` with its moves
+kept, and nobody can move until staff resume it (`POST /{id}/resume`) — the
+players cannot resume it, and Enter is refused while it is paused. Resuming
+puts it back to waiting: both players press Enter again, and it is in play
+once both have, from the same position. A rated game cannot be paused on Lichess, so stopping one aborts the
+Lichess side where it still can and the game resumes here unrated
+(`lichess_detached_reason = 'stopped'`); the console warns before doing it.
+
 Seats reference `user_account`, not `student`, so a teacher can sit down against
 a pupil. Reads resolve each seat to a display name and — where the account
-belongs to a pupil — a `student_id`, which is what the admin history links to.
+belongs to a pupil — a `student_id`, which is what the admin history links to. A
+pupil's seat also carries their non-provisional Lichess `rating` in the game's
+speed (limit + 40 × increment, by Lichess's own rule; rapid when untimed).
 
 ## Endpoints
 
@@ -49,14 +78,20 @@ All are under `/api/v1/game-rooms` and require a session.
 
 | Method | Path | Who | Notes |
 | --- | --- | --- | --- |
-| `POST` | `/game-rooms` | staff | Mints a room and its code. Optional `label`. |
-| `GET` | `/game-rooms` | any | Staff see every room (`?status=` filters); a player sees only rooms they are seated in. |
+| `POST` | `/game-rooms` | staff | Mints a room and its code. Optional `label`; `timed` with `clockLimit`/`clockIncrement` for a time control; `lichessRated`. `whiteStudentId` + `blackStudentId` seat both players — the game shows in both pupils' lists and waits, `Open`, until each has entered. Both or neither; `409` if either is already in an unfinished game. |
+| `GET` | `/game-rooms` | any | Staff see every room (`?status=` filters, `?moves=1` adds each game's `sans` and `lastUci`); a player sees only rooms they are seated in. |
 | `GET` | `/game-rooms/{id}` | staff, seated players | Room, move list, the caller's seat, and every legal move. |
 | `DELETE` | `/game-rooms/{id}` | staff | Marks the room `Cancelled`. Ends the game; keeps the record. |
 | `DELETE` | `/game-rooms/{id}/record` | staff | Removes the room and its moves for good. `409` while the game is `Active`. |
 | `POST` | `/game-rooms/join` | Student, Teacher | Body `{"code":"ABC123"}`. Rate-limited to 20/min per IP. |
+| `POST` | `/game-rooms/{id}/stop` | staff | Pauses a game in play; `409` otherwise. |
+| `POST` | `/game-rooms/{id}/resume` | staff | Lets a paused game carry on: it waits for both players to enter again; `409` otherwise. |
+| `POST` | `/game-rooms/{id}/enter` | seated players | Marks the caller at the board; the game starts when both have. Idempotent. |
 | `POST` | `/game-rooms/{id}/moves` | seated players | Body `{"move":"e2e4"}` in UCI. |
 | `POST` | `/game-rooms/{id}/resign` | seated players | Colour comes from the caller's seat. |
+| `POST` | `/game-rooms/{id}/draw/offer` | seated players | Stands until the opponent answers or either side moves. |
+| `POST` | `/game-rooms/{id}/draw/accept` | the other seated player | Ends the game `1/2-1/2`, reason `Agreement`; forwarded to Lichess on a rated game. |
+| `POST` | `/game-rooms/{id}/draw/decline` | the other seated player | Clears the offer. |
 | `GET` | `/game-rooms/{id}/events` | staff, seated players | SSE stream of room state. |
 
 ## Live updates

@@ -82,7 +82,8 @@ func TestCheckInDedupesOnRepeatedWrite(t *testing.T) {
 	}
 }
 
-func TestAnnouncementFansOutToStudentsAndParents(t *testing.T) {
+// Announcements are for families: the parent is told, the student is not.
+func TestAnnouncementFansOutToParents(t *testing.T) {
 	srv := newServer(t)
 	teacher := &client{t: t, srv: srv}
 	teacher.login("serene@jca.ac.th")
@@ -95,10 +96,11 @@ func TestAnnouncementFansOutToStudentsAndParents(t *testing.T) {
 		t.Fatalf("announcement create: status %d", status)
 	}
 
-	for _, email := range []string{"sandy01234@gmail.com", "penny@jca.ac.th"} {
-		if got := countType(inbox(t, srv, email), "announcement"); got != 1 {
-			t.Fatalf("%s should have the announcement, got %d", email, got)
-		}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 1 {
+		t.Fatalf("the parent should have the announcement, got %d", got)
+	}
+	if got := countType(inbox(t, srv, "penny@jca.ac.th"), "announcement"); got != 0 {
+		t.Fatalf("students are not an audience, got %d", got)
 	}
 }
 
@@ -441,5 +443,73 @@ func TestCreditExpiryPreviewAndTargeting(t *testing.T) {
 	}
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 1 {
 		t.Fatalf("only Penny's reminder should have arrived, got %d", got)
+	}
+}
+
+/* The school's switch is the master permission; a parent's is whether they
+ * want a type the school allows. */
+
+func schoolSwitch(t *testing.T, staff *client, typ, value string) {
+	t.Helper()
+	if s, _, _ := staff.do("PATCH", "/api/v1/system-configuration/notify_"+typ, map[string]any{"config_value": value}); s == 200 {
+		return
+	}
+	if s, out, _ := staff.do("POST", "/api/v1/system-configuration", map[string]any{"config_key": "notify_" + typ, "config_value": value}); s != 201 {
+		t.Fatalf("school switch %s=%s: %d (%v)", typ, value, s, out)
+	}
+}
+
+func TestParentsSeeWhichTypesTheSchoolSends(t *testing.T) {
+	srv := newServer(t)
+	staff := &client{t: t, srv: srv}
+	staff.login("admin@jca.ac.th")
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+
+	schoolSwitch(t, staff, "check_in", "off")
+	_, obj, _ := parent.do("GET", "/api/v1/notification-settings", nil)
+	school, _ := obj["schoolEnabled"].(map[string]any)
+	if school["check_in"] != false || school["announcement"] != true {
+		t.Fatalf("schoolEnabled: %v", school)
+	}
+}
+
+func TestAParentCannotSwitchOnATypeTheSchoolHasOff(t *testing.T) {
+	srv := newServer(t)
+	staff := &client{t: t, srv: srv}
+	staff.login("admin@jca.ac.th")
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+
+	schoolSwitch(t, staff, "check_in", "off")
+	put := func(enabled bool) int {
+		s, _, _ := parent.do("PUT", "/api/v1/notification-settings", map[string]any{
+			"type": "check_in", "channel": "inapp", "enabled": enabled,
+		})
+		return s
+	}
+	if s := put(true); s != 409 {
+		t.Fatalf("switching on a type the school has off: want 409, got %d", s)
+	}
+	// Opting out is always allowed.
+	if s := put(false); s != 200 {
+		t.Fatalf("switching off: want 200, got %d", s)
+	}
+	// Back on at the school: the parent may opt in again, and their own
+	// choice (off, just saved) is what stands until they do.
+	schoolSwitch(t, staff, "check_in", "on")
+	_, obj, _ := parent.do("GET", "/api/v1/notification-settings", nil)
+	kept := false
+	for _, r := range obj["settings"].([]any) {
+		m := r.(map[string]any)
+		if m["type"] == "check_in" && m["channel"] == "inapp" && m["enabled"] == false {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("the parent's own choice was not kept: %v", obj["settings"])
+	}
+	if s := put(true); s != 200 {
+		t.Fatalf("switching on once the school allows it: want 200, got %d", s)
 	}
 }

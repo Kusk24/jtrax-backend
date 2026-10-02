@@ -135,7 +135,13 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		id := newID("usr")
 		if _, err := d.Exec(`INSERT INTO user_account (user_account_id, email, password_hash, role, display_name)
 			VALUES (?,?,?,?,?)`, id, in.Email, hash, in.Role, in.DisplayName); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "could not create account (that sign-in ID or email is already taken)", err)
+			// A taken address is a conflict the office can act on — use the
+			// existing account — not a malformed request.
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "UNIQUE") {
+				status = http.StatusConflict
+			}
+			httpx.Error(w, status, "could not create account (that sign-in ID or email is already taken)", err)
 			return
 		}
 		row, _ := accountRow(d, id)

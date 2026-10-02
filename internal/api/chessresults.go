@@ -694,5 +694,9 @@ func mountChessResults(mux *http.ServeMux, d *sql.DB) *chessResultsDeps {
 	mux.HandleFunc("GET "+t+"/categories/{categoryId}/chess-results", handleGetCategoryLink(deps))
 	mux.HandleFunc("POST "+t+"/categories/{categoryId}/chess-results", httpx.RateLimit(10, handleLinkCategory(deps)))
 	mux.HandleFunc("DELETE "+t+"/categories/{categoryId}/chess-results", handleUnlinkCategory(deps))
+
+	// One link for the whole event: its sections become the tournament's
+	// results categories (resultsections.go, migration 0051).
+	mountResultSections(mux, deps)
 	return deps
 }

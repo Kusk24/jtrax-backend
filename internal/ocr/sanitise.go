@@ -110,7 +110,7 @@ func SanitiseIDCard(c *IDCard) *IDCard {
 	if c == nil {
 		return nil
 	}
-	for _, p := range []*Field{&c.FirstName, &c.LastName, &c.DateOfBirth} {
+	for _, p := range []*Field{&c.FirstName, &c.LastName, &c.ThaiName, &c.DateOfBirth} {
 		clean(p)
 	}
 

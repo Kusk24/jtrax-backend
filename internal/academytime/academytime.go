@@ -31,6 +31,28 @@ func Now() time.Time { return clock().In(zone) }
 // Today is the academy's current calendar day, as the schema writes it.
 func Today() string { return Now().Format(DayLayout) }
 
+// Moment reads a stored timestamp. One carrying a zone — the console's
+// toISOString(), "…Z" — is exact; one without is the academy's wall clock,
+// the way the seed and hand-entered rows write it.
+func Moment(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, s, zone); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// At is a calendar day and an "HH:MM" clock time on the academy's wall clock
+// — when a class session starts, say.
+func At(day, clock string) (time.Time, bool) {
+	t, err := time.ParseInLocation("2006-01-02 15:04", day+" "+clock, zone)
+	return t, err == nil
+}
+
 // Freeze makes Now return t until the returned function is called. It is for
 // tests that need a particular hour — the early morning, when the academy's day
 // and UTC's disagree — without waiting for one.

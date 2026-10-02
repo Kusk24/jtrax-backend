@@ -109,14 +109,15 @@ func handleDeleteRegulation(d *sql.DB) http.HandlerFunc {
 }
 
 // handleGetRegulation serves the file. Public only where the tournament
-// itself is public — an event with registration and results both switched off
-// keeps its paperwork to signed-in staff.
+// itself is public — an event with registration and results both switched off,
+// or still a draft, keeps its paperwork to signed-in staff and its preview link.
 func handleGetRegulation(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
 		var isPublic int
 		err := d.QueryRow(
-			`SELECT COALESCE(public_registration,0) + COALESCE(results_public,0)
+			`SELECT CASE WHEN draft = 1 THEN 0
+			             ELSE COALESCE(public_registration,0) + COALESCE(results_public,0) END
 			   FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&isPublic)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)
@@ -126,7 +127,9 @@ func handleGetRegulation(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load regulation", err)
 			return
 		}
-		if isPublic == 0 {
+		// A draft's own preview link shows its regulation too — the organiser
+		// is checking the page exactly as parents will get it.
+		if isPublic == 0 && !previewAllowed(d, r, tournamentID) {
 			id, idErr := auth.Lookup(d, bearerToken(r))
 			if idErr != nil || !isStaff(id.Role) {
 				// Same answer as a missing tournament, so this cannot probe

@@ -449,7 +449,8 @@ func TestAcceptingTheTermsIsRecordedWithATime(t *testing.T) {
 
 // The form asks for an age and not a date of birth, so an age-limited group
 // has to be enforceable on the age alone — otherwise everyone who skips the
-// card scan is refused.
+// card scan is refused. By birth year, somebody who says they are 12 may be
+// born in the event's year minus 12, so U12 takes them; 13 is too old.
 func TestAClaimedAgeIsCheckedAgainstTheGroupWhenThereIsNoDateOfBirth(t *testing.T) {
 	pub, id := openEvent(t, nil)
 	staff := &client{t: t, srv: pub.srv}
@@ -459,7 +460,7 @@ func TestAClaimedAgeIsCheckedAgainstTheGroupWhenThereIsNoDateOfBirth(t *testing.
 	for _, tc := range []struct {
 		age  int
 		want int
-	}{{11, 201}, {12, 400}, {15, 400}} {
+	}{{11, 201}, {12, 201}, {13, 400}, {15, 400}} {
 		body := entry(map[string]any{
 			"categoryId": u12, "age": tc.age,
 			"email": fmt.Sprintf("age%d@example.com", tc.age),
