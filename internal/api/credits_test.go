@@ -276,7 +276,11 @@ func TestArchivingAClassKeepsItsHistory(t *testing.T) {
 }
 
 // A child at the desk has to be recordable even with nothing left to spend.
-func TestAnEmptyBalanceGoesNegativeRatherThanRefusing(t *testing.T) {
+// Going negative used to be allowed unconditionally, with only a soft warning
+// on the console. credit_rule_max_negative defaults to 0 (no admin has set
+// one), so a student with no credits is now refused outright rather than
+// recorded on credit.
+func TestGoingNegativeIsRefusedByDefault(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
 	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
@@ -284,11 +288,99 @@ func TestAnEmptyBalanceGoesNegativeRatherThanRefusing(t *testing.T) {
 	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
 		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
 	})
+	if status != 409 {
+		t.Fatalf("a student with no credits should be refused by default, got %d", status)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 0) {
+		t.Fatalf("a refused check-in must not touch the balance, got %v", got)
+	}
+}
+
+// Raising the academy's limit permits exactly what the old, unconditional
+// behavior allowed — the same scenario, now opt-in through Settings.
+func TestRaisingTheLimitPermitsGoingNegative(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	if status, _, _ := c.do("POST", "/api/v1/system-configuration", map[string]any{
+		"config_key": "credit_rule_max_negative", "config_value": "5",
+	}); status != 201 {
+		t.Fatalf("setting the max-negative rule failed")
+	}
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
+
+	status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
 	if status != 201 {
-		t.Fatalf("a student with no credits must still be recordable, got %d", status)
+		t.Fatalf("within the configured limit, check-in should succeed: %d (%v)", status, att)
 	}
 	if got := balanceOf(c, enrolmentID); !near(got, -1) {
 		t.Fatalf("want -1, got %v", got)
+	}
+}
+
+// A balance that would land exactly on the limit is still within it — only
+// crossing past it is refused.
+func TestNegativeCreditAtExactlyTheLimitIsAllowed(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	if status, _, _ := c.do("POST", "/api/v1/system-configuration", map[string]any{
+		"config_key": "credit_rule_max_negative", "config_value": "1",
+	}); status != 201 {
+		t.Fatalf("setting the max-negative rule failed")
+	}
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
+
+	status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("landing exactly on the limit should be allowed: %d (%v)", status, att)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, -1) {
+		t.Fatalf("want -1, got %v", got)
+	}
+}
+
+// Expired credit refuses a check-in outright, regardless of the negative
+// limit — a balance can be positive and still be no good.
+func TestExpiredCreditRefusesCheckIn(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 0)
+	if status, _, _ := c.do("POST", "/api/v1/credit-transactions", map[string]any{
+		"enrollment_id": enrolmentID, "transaction_type": "purchase",
+		"amount": 10, "transaction_date": "2026-07-01", "expiry_date": "2026-08-01",
+	}); status != 201 {
+		t.Fatalf("granting the expired purchase failed")
+	}
+
+	status, _, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 409 {
+		t.Fatalf("expired credit should refuse check-in, got %d", status)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 10) {
+		t.Fatalf("a refused check-in must not touch the balance, got %v", got)
+	}
+}
+
+// No expiry_date at all means the credits never expire — the check must not
+// treat an absent date as an expired one.
+func TestNoExpiryDateNeverBlocksCheckIn(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:00", 10)
+
+	status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	})
+	if status != 201 {
+		t.Fatalf("credit with no expiry should never block check-in: %d (%v)", status, att)
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 9) {
+		t.Fatalf("want 9, got %v", got)
 	}
 }
 
@@ -324,5 +416,89 @@ func TestSessionEndingBeforeItStartsChargesNothing(t *testing.T) {
 	})
 	if got := balanceOf(c, enrolmentID); !near(got, 5) {
 		t.Fatalf("balance should be untouched, got %v", got)
+	}
+}
+
+// checkInOut checks a student in and later out, the way the desk does: a POST
+// on arrival, then a PATCH stamping check_out_time. Times are UTC, as the
+// console's toISOString() writes them — 07:00Z is 14:00 at the academy.
+func checkInOut(t *testing.T, c *client, studentID, sessionID, in, out string) {
+	t.Helper()
+	status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": in,
+	})
+	if status != 201 {
+		t.Fatalf("check in: %d (%v)", status, att)
+	}
+	status, _, _ = c.do("PATCH", "/api/v1/attendance/"+att["attendance_id"].(string), map[string]any{
+		"check_out_time": out,
+	})
+	if status != 200 {
+		t.Fatalf("check out: %d", status)
+	}
+}
+
+// Leaving before the class ends costs the time actually spent.
+func TestLeavingEarlyCostsTheTimeAttended(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
+
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T08:30:00Z") // 14:00 → 15:30
+	if got := balanceOf(c, enrolmentID); !near(got, 8.5) {
+		t.Fatalf("an hour and a half of a two-hour class should cost 1.5, left %v", got)
+	}
+}
+
+// Staying to the end — or past it — costs the whole class, never more.
+func TestCheckingOutAfterTheEndCostsTheWholeClass(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
+
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T09:20:00Z") // out 16:20
+	if got := balanceOf(c, enrolmentID); !near(got, 8) {
+		t.Fatalf("want the full two credits taken, left %v", got)
+	}
+}
+
+// Arriving late and leaving early counts from arrival, not from the start.
+func TestAttendedTimeCountsFromArrival(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
+
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:30:00Z", "2026-08-21T08:30:00Z") // 14:30 → 15:30
+	if got := balanceOf(c, enrolmentID); !near(got, 9) {
+		t.Fatalf("an hour in the room should cost 1, left %v", got)
+	}
+}
+
+// By default an early check-out is rounded to the nearest quarter hour.
+func TestEarlyCheckOutRoundsToTheNearestQuarterHour(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
+
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T08:22:00Z") // 82 min → 75
+	if got := balanceOf(c, enrolmentID); !near(got, 8.75) {
+		t.Fatalf("82 minutes should round to 1.25 credits, left %v", got)
+	}
+}
+
+// With the rounding step set to 0, the exact minutes are charged.
+func TestEarlyCheckOutCanChargeExactMinutes(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	if status, _, _ := c.do("POST", "/api/v1/system-configuration", map[string]any{
+		"config_key": "credit_rule_checkout_round_minutes", "config_value": "0",
+	}); status != 201 {
+		t.Fatalf("setting the rounding rule failed")
+	}
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
+
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T08:22:00Z")
+	if got := balanceOf(c, enrolmentID); !near(got, 10-82.0/60) {
+		t.Fatalf("want exactly 82 minutes charged, left %v", got)
 	}
 }

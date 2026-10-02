@@ -170,10 +170,14 @@ func handleTournamentResults(d *sql.DB) http.HandlerFunc {
 func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		var name, status string
-		var public int
-		err := d.QueryRow(`SELECT name, tournament_status, results_public
-		                   FROM tournament WHERE tournament_id = ?`, id).Scan(&name, &status, &public)
+		var name, status, start, end, venueName, venueAddress string
+		var public, hasBanner int
+		err := d.QueryRow(`SELECT name, tournament_status, results_public,
+		                          COALESCE(start_date,''), COALESCE(end_date,''),
+		                          COALESCE(venue_name,''), COALESCE(venue_address,''),
+		                          EXISTS (SELECT 1 FROM tournament_banner b WHERE b.tournament_id = tournament.tournament_id)
+		                   FROM tournament WHERE tournament_id = ?`, id).
+			Scan(&name, &status, &public, &start, &end, &venueName, &venueAddress, &hasBanner)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && public != 1) {
 			// An unpublished tournament is indistinguishable from one that does
 			// not exist, so the endpoint cannot be used to discover ids.
@@ -184,6 +188,33 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
+		// What the page's banner needs: the picture, or the name, dates and
+		// venue it draws when there is none — the same header as registration.
+		head := map[string]any{
+			"name": name, "status": status, "startDate": start, "endDate": end,
+			"venueName": venueName, "venueAddress": venueAddress, "hasBanner": hasBanner == 1,
+		}
+
+		// Connected with one link (0051): every chess-results category of the
+		// event, each with its own table and rounds. This is what the console's
+		// Results tab shows, so the public page shows the same thing.
+		if sections, err := publicSections(d, cr, id); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			return
+		} else if len(sections) > 0 {
+			first := sections[0]
+			httpx.JSON(w, http.StatusOK, map[string]any{
+				"tournament": head,
+				"source":     "chess-results",
+				"sections":   sections,
+				// The first category at the top level too, for a page that
+				// predates categories.
+				"sourceUrl": first["sourceUrl"], "stage": first["stage"], "fetchedAt": first["fetchedAt"],
+				"rounds": first["rounds"], "standings": first["standings"],
+			})
+			return
+		}
+
 		// When the event is published on chess-results.com, that is the result —
 		// the arbiter's upload is what players and federations treat as true,
 		// and a second table typed in here would be wrong the moment a round
@@ -213,7 +244,7 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 				}()
 			}
 			httpx.JSON(w, http.StatusOK, map[string]any{
-				"tournament": map[string]any{"name": name, "status": status},
+				"tournament": head,
 				"source":     linked.Source,
 				"sourceUrl":  linked.URL,
 				"stage":      linked.Stage,
@@ -253,7 +284,7 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 			})
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{
-			"tournament": map[string]any{"name": name, "status": status},
+			"tournament": head,
 			"rounds":     pubRounds, "standings": pub,
 		})
 	}
@@ -585,4 +616,45 @@ func mountTournamentResults(mux *http.ServeMux, d *sql.DB, cr *chessResultsDeps)
 		httpx.RateLimit(60, handlePublicResults(d, cr)))
 	mux.HandleFunc("GET /api/v1/public/live-tournaments",
 		httpx.RateLimit(60, handleListLiveTournaments(d)))
+}
+
+// publicSections is a connected tournament's chess-results categories as the
+// public page reads them: name, where it came from, the rounds and the table.
+// Empty when the tournament is not connected. A category never read yet is
+// left out rather than shown as an empty table.
+//
+// A stale category starts a background re-read, as the single-link path does,
+// so a hall full of phones keeps the page current without waiting on it.
+func publicSections(d *sql.DB, cr *chessResultsDeps, tournamentID string) ([]map[string]any, error) {
+	view, err := loadResultSections(d, tournamentID)
+	if err != nil || !view.Connected {
+		return nil, err
+	}
+	out := []map[string]any{}
+	for _, sec := range view.Sections {
+		linked, err := linkedResultsForID(d, sql.NullInt64{Int64: int64(sec.ChessResultsID), Valid: true})
+		if err != nil {
+			return nil, err
+		}
+		if linked == nil {
+			continue
+		}
+		if cr != nil && !chessresults.FinalStage(linked.Stage) && staleExternal(linked.FetchedAt) {
+			extID, crID := linked.extID, linked.ChessResID
+			go func() {
+				if err := cr.refreshExternal(extID, crID); err != nil && !errors.Is(err, errExternalThrottled) {
+					log.Printf("chessresults: public refresh %d: %v", crID, err)
+				}
+			}()
+		}
+		out = append(out, map[string]any{
+			"name":      sec.Name,
+			"sourceUrl": linked.URL,
+			"stage":     linked.Stage,
+			"fetchedAt": linked.FetchedAt,
+			"rounds":    publicExternalRounds(linked.Rounds),
+			"standings": publicExternalStandings(linked.Standings),
+		})
+	}
+	return out, nil
 }

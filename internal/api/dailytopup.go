@@ -2,8 +2,8 @@
 //
 // The daily set never repeats a puzzle, and the bank shipped with sixty, so a
 // pupil set three a day used to reach "You've solved every puzzle we have!" in
-// about twenty days. Free Play already refilled its own tier from Lichess; the
-// daily set did not. Now it does, in two ways:
+// about twenty days. The practice list (puzzlelist.go) refills its own levels
+// from Lichess; the daily set did not. Now it does, in two ways:
 //
 //   - When today's set cannot be filled from the pupil's rating band, the bank
 //     is topped up on the spot — a few fetches at most — before the set is
@@ -65,26 +65,37 @@ func dailyDifficulty(rating int) string {
 	}
 }
 
-// unseenInBand counts the puzzles this pupil has never been set that sit
-// within ratingBand of their rating.
-func unseenInBand(d *sql.DB, studentID string, rating int) (int, error) {
+// unseenInBand counts the puzzles in the pupil's daily band (dailyTarget) that
+// they have never been set and that are not waiting on their practice list —
+// the same two exclusions the daily choice makes.
+func unseenInBand(d *sql.DB, studentID string, band tier) (int, error) {
 	var n int
 	err := d.QueryRow(`
 		SELECT COUNT(*) FROM puzzle
-		WHERE ABS(rating - ?) <= ?
-		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)`,
-		rating, ratingBand, studentID).Scan(&n)
+		WHERE rating BETWEEN ? AND ?
+		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)
+		  AND puzzle_id NOT IN (SELECT puzzle_id FROM puzzle_list WHERE student_id = ?)`,
+		band.minRate, band.maxRate, studentID, studentID).Scan(&n)
 	return n, err
+}
+
+// bandDifficulty is the Lichess band to ask for: the level's own when the pupil
+// has one (puzzlebank.go's tiers), else the nearest to their rating.
+func bandDifficulty(target int, band tier) string {
+	if band.difficulty != "" {
+		return band.difficulty
+	}
+	return dailyDifficulty(target)
 }
 
 // fetchForBand pulls up to `want` puzzles at the pupil's difficulty into the
 // bank, stopping at the first failure. Whatever arrives is kept even if it
 // lands outside the band — it is still a puzzle the bank did not have.
-func fetchForBand(d *sql.DB, lc *lichess.Client, rating, want int) int {
+func fetchForBand(d *sql.DB, lc *lichess.Client, target int, band tier, want int) int {
 	if lc == nil {
 		return 0
 	}
-	t := tier{difficulty: dailyDifficulty(rating)}
+	t := tier{difficulty: bandDifficulty(target, band)}
 	added := 0
 	for i := 0; i < want && i < dailyTopUpAttempts; i++ {
 		if err := topUpBank(d, lc, t); err != nil {
@@ -103,13 +114,13 @@ func fetchForBand(d *sql.DB, lc *lichess.Client, rating, want int) int {
 var topUpsRunning sync.Map
 
 // topUpInBackground refills the pupil's band without making them wait.
-func topUpInBackground(d *sql.DB, lc *lichess.Client, rating, want int) {
-	band := dailyDifficulty(rating)
-	if _, busy := topUpsRunning.LoadOrStore(band, true); busy {
+func topUpInBackground(d *sql.DB, lc *lichess.Client, target int, band tier, want int) {
+	key := bandDifficulty(target, band)
+	if _, busy := topUpsRunning.LoadOrStore(key, true); busy {
 		return
 	}
 	go func() {
-		defer topUpsRunning.Delete(band)
-		fetchForBand(d, lc, rating, want)
+		defer topUpsRunning.Delete(key)
+		fetchForBand(d, lc, target, band, want)
 	}()
 }

@@ -143,3 +143,34 @@ func TestOnlyAStudentRecordsASoloGame(t *testing.T) {
 		}
 	}
 }
+
+// The console groups a pupil's practice by day and tells the daily set from
+// free play, so each entry says which day it was and, for a puzzle, which.
+func TestHistoryEntriesCarryTheirDayAndSource(t *testing.T) {
+	srv := newServer(t)
+	penny := &client{t: t, srv: srv}
+	penny.login("penny@jca.ac.th")
+	dailySet(t, penny)
+	if status := recordSolo(t, penny, map[string]any{
+		"opponent": "novice", "moves": []string{"e2e4"}, "startedAt": "2026-09-27T02:00:00Z",
+	}); status != 201 {
+		t.Fatalf("recording a solo game: status %d", status)
+	}
+
+	for _, e := range historyOf(t, penny, "stu_penny") {
+		day, _ := e["day"].(string)
+		if len(day) != 10 {
+			t.Errorf("%v entry has no day: %v", e["kind"], e)
+		}
+		switch e["kind"] {
+		case "puzzle":
+			if e["source"] != "daily" {
+				t.Errorf("a daily puzzle says source %v", e["source"])
+			}
+		case "solo":
+			if e["startedAt"] != "2026-09-27T02:00:00Z" {
+				t.Errorf("solo startedAt = %v", e["startedAt"])
+			}
+		}
+	}
+}

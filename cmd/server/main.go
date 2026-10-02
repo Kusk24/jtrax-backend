@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
 func main() {
@@ -48,6 +50,11 @@ func main() {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
 	}
 	handler := httpx.CORS(origins, api.NewHandler(d))
+	// An unpaid entry's early-bird price and place lapse on their dates
+	// (internal/api/entryrules.go); this applies them through the day.
+	api.StartEntrySweeper(context.Background(), d)
+	mailCfg := mail.FromEnv()
+	api.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
 
 	port := os.Getenv("PORT")
 	if port == "" {

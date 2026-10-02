@@ -28,7 +28,7 @@ func countPuzzles(d *sql.DB) int {
 }
 
 func TestASpentBankIsToppedUpBeforeTodaysSetIsChosen(t *testing.T) {
-	stub := newPuzzleStub(t, 720) // Lichess's "easiest" band, inside Penny's
+	stub := newPuzzleStub(t, 720) // Lichess's "easiest" band, inside Penny's Beginner band
 	t.Setenv("LICHESS_API_BASE", stub.srv.URL)
 	d := newDB(t)
 	pupil := &client{t: t, srv: newServerOn(t, d)}
@@ -59,11 +59,12 @@ func TestALowBandIsRefilledInTheBackground(t *testing.T) {
 	pupil := &client{t: t, srv: newServerOn(t, d)}
 	pupil.login("penny@jca.ac.th")
 	spendBank(t, d)
-	// Free one band puzzle per slot today, so the set fills from the bank
-	// without a fetch — and leaves nothing behind for tomorrow.
+	// Free three puzzles in Penny's band (Beginner, 0–799: the seed's level for
+	// her), so today's set fills from the bank without a fetch and leaves
+	// nothing behind for tomorrow.
 	if _, err := d.Exec(`DELETE FROM puzzle_attempt WHERE puzzle_attempt_id IN (
 		SELECT a.puzzle_attempt_id FROM puzzle_attempt a JOIN puzzle p USING (puzzle_id)
-		WHERE a.student_id = 'stu_penny' AND ABS(p.rating - 800) <= 250 LIMIT 3)`); err != nil {
+		WHERE a.student_id = 'stu_penny' AND p.rating BETWEEN 0 AND 799 LIMIT 3)`); err != nil {
 		t.Fatal(err)
 	}
 	before := countPuzzles(d)

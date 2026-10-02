@@ -108,10 +108,12 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			INSERT INTO tournament_registration (
 				tournament_registration_id, tournament_id, student_id, participant_name,
 				participant_contact, fee_quoted, fee_charged, student_discount_applied,
-				medical_notes, remarks
-			) VALUES (?,?,?,?,?,?,?,1,?,?)`,
+				medical_notes, remarks, early_bird_applied, priced_as_student
+			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1)`,
 			regID, tournamentID, in.StudentID, name, in.Contact, fee, fee,
-			in.MedicalNotes, in.Remarks)
+			in.MedicalNotes, in.Remarks,
+			// How it was priced, for the early-bird rule (entryrules.go).
+			boolToInt(price.StudentEarlyBird && price.earlyBirdOpen(today())))
 		if isUniqueViolation(err) {
 			httpx.Error(w, http.StatusConflict, "this child is already entered", nil)
 			return

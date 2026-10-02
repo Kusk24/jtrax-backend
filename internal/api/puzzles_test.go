@@ -331,16 +331,16 @@ func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 	}
 }
 
-// Puzzles come from inside the pupil's rating band while the band has any
-// left. Penny has no FIDE rating, so she is treated as 800.
+// Puzzles come from inside the pupil's band while the band has any left.
+// Penny's level is Beginner and she has no FIDE rating, so her band is the
+// Beginner one: under 800.
 func TestPuzzlesComeFromTheRatingBandFirst(t *testing.T) {
 	pupil := &client{t: t, srv: newServer(t)}
 	pupil.login("penny@jca.ac.th")
 
 	for _, p := range dailySet(t, pupil) {
-		r, _ := p["rating"].(float64)
-		if diff := r - 800; diff > 250 || diff < -250 {
-			t.Errorf("puzzle rated %v is outside the ±250 band around 800", r)
+		if r, _ := p["rating"].(float64); r >= 800 {
+			t.Errorf("a Beginner was set a %v-rated puzzle", r)
 		}
 	}
 }

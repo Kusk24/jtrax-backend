@@ -76,7 +76,7 @@ func TestASecondChildCannotTakeTheFirstOnesID(t *testing.T) {
 		t.Fatalf("first John Smith: %d (%v)", status, obj)
 	}
 	status, obj, _ := c.do("POST", "/api/v1/user-accounts", body("stu_john_smith"))
-	if status != 400 {
+	if status != 409 {
 		t.Fatalf("second John Smith took the same ID: %d (%v)", status, obj)
 	}
 	// The desk has to be told which of the two things went wrong, because the

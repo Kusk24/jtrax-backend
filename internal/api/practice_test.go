@@ -3,6 +3,7 @@ package api_test
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
@@ -155,22 +156,7 @@ func TestSolvingAPuzzleRecordsPracticeOnTheServer(t *testing.T) {
 
 	set := dailySet(t, penny)
 	id, _ := set[0]["puzzleId"].(string)
-	var solution string
-	if err := d.QueryRow(`SELECT moves FROM puzzle WHERE puzzle_id = ?`, id).Scan(&solution); err != nil {
-		t.Fatal(err)
-	}
-	first := solution
-	for i, ch := range solution {
-		if ch == ' ' {
-			first = solution[:i]
-			break
-		}
-	}
-	status, obj, _ := penny.do("POST", "/api/v1/puzzles/"+id+"/attempt",
-		map[string]any{"move": first, "played": []string{}})
-	if status != 200 || obj["correct"] != true {
-		t.Fatalf("solving: status %d, %v", status, obj)
-	}
+	solveFirstMove(t, d, penny, id)
 
 	sum := summaryFor(t, penny)
 	if got, _ := sum["streak"].(float64); got != 1 {
@@ -295,23 +281,24 @@ func TestAPuzzleNeverOpenedContributesNoMinutes(t *testing.T) {
 	}
 }
 
-// solveFirstMove plays the first move of a puzzle's stored solution.
+// solveFirstMove solves a puzzle by playing the pupil's side of its stored
+// solution. It once played only the first move, which was enough for the
+// one-move puzzles an 800-rated default drew; a Beginner's band holds longer
+// ones, so it plays them all.
 func solveFirstMove(t *testing.T, d *sql.DB, c *client, puzzleID string) {
 	t.Helper()
 	var solution string
 	if err := d.QueryRow(`SELECT moves FROM puzzle WHERE puzzle_id = ?`, puzzleID).Scan(&solution); err != nil {
 		t.Fatal(err)
 	}
-	first := solution
-	for i, ch := range solution {
-		if ch == ' ' {
-			first = solution[:i]
-			break
+	moves := strings.Fields(solution)
+	played := []string{}
+	for i := 0; i < len(moves); i += 2 {
+		status, obj, _ := c.do("POST", "/api/v1/puzzles/"+puzzleID+"/attempt",
+			map[string]any{"move": moves[i], "played": played})
+		if status != 200 || obj["correct"] != true {
+			t.Fatalf("solving %s: status %d, %v", puzzleID, status, obj)
 		}
-	}
-	status, obj, _ := c.do("POST", "/api/v1/puzzles/"+puzzleID+"/attempt",
-		map[string]any{"move": first, "played": []string{}})
-	if status != 200 || obj["correct"] != true {
-		t.Fatalf("solving %s: status %d, %v", puzzleID, status, obj)
+		played = append(played, moves[i])
 	}
 }

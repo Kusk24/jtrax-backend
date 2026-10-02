@@ -242,6 +242,7 @@ Return only these fields. Rules:
 - If you cannot read a value, return an empty string and confidence 0. Never invent a plausible value.
 - confidence is 0..1: how sure you are of the characters you read.
 - firstName / lastName: as printed. A Thai card prints them on separate labelled lines — use those lines, do not split a single name yourself. If the card shows both Thai and English, return the English.
+- thaiName: on a Thai ID card, the holder's full name in Thai script exactly as printed (title, first name and last name on one line). Empty for a passport or when there is no Thai name.
 - dateOfBirth: the holder's date of birth, normalised to YYYY-MM-DD. A card also prints an issue date and an expiry date; those are not it. Thai cards may print a Buddhist-era year (2500+) — convert to the common era by subtracting 543. If the day/month order is ambiguous, still answer but set confidence below 0.5.
 - documentType: "thai-id" or "passport", or "" if the image is neither or you are unsure.
 - Keep Thai text in Thai. Do not translate or transliterate anything.`
@@ -251,6 +252,7 @@ var geminiIDCardSchema = map[string]any{
 	"properties": map[string]any{
 		"firstName":    fieldSchema(),
 		"lastName":     fieldSchema(),
+		"thaiName":     fieldSchema(),
 		"dateOfBirth":  fieldSchema(),
 		"documentType": map[string]any{"type": "string"},
 	},

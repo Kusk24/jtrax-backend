@@ -142,6 +142,17 @@ func (c *Client) Resign(ctx context.Context, token, gameID string) error {
 	return status(res)
 }
 
+// Draw offers a draw, or accepts the one the opponent offered — Lichess uses
+// the same call for both.
+func (c *Client) Draw(ctx context.Context, token, gameID string) error {
+	res, err := c.do(ctx, http.MethodPost, "/api/board/game/"+url.PathEscape(gameID)+"/draw/yes", token, url.Values{})
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	return status(res)
+}
+
 // Abort aborts a game before either side has committed to it.
 func (c *Client) Abort(ctx context.Context, token, gameID string) error {
 	res, err := c.do(ctx, http.MethodPost, "/api/board/game/"+url.PathEscape(gameID)+"/abort", token, url.Values{})

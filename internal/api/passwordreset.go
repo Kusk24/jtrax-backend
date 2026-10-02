@@ -53,6 +53,10 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 		// The reply is the same as for an unknown address, so this does not
 		// become a way to ask which identifiers are children's.
 		if !auth.LooksLikeEmail(email) {
+			// A child's login ID. Their link goes to their guardians'
+			// inboxes instead — a grown-up is in the loop, and the child
+			// still gets back in without calling the office.
+			sendChildReset(d, cfg, sender, email)
 			return
 		}
 
@@ -80,11 +84,14 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 			log.Printf("password reset: SMTP not configured — link for %s (SENSITIVE): %s", email, link)
 			return
 		}
-		body := "Hello " + displayName + ",\n\n" +
-			"Someone asked to reset your JTrax password. Open the link below to choose a new one:\n\n" +
-			link + "\n\nThe link works once and expires in an hour. " +
-			"If this wasn't you, ignore this email — your password stays as it is.\n\nJCA Chess Academy\n"
-		if err := sender.Send(email, "Reset your JTrax password", body); err != nil {
+		reset := mail.Email{
+			Heading:    "Reset your password",
+			Greeting:   "Hello " + displayName + ",",
+			Paragraphs: []string{"Someone asked to reset your JTrax password. Use the button below to choose a new one."},
+			Button:     &mail.Button{Label: "Choose a new password", URL: link},
+			Note:       "The link works once and expires in an hour. If this wasn't you, ignore this email: your password stays as it is.",
+		}
+		if err := mail.Deliver(sender, email, "Reset your JTrax password", reset); err != nil {
 			// Logged, not returned: the caller already has the neutral reply,
 			// and the error would tell them the address exists.
 			log.Printf("password reset: send to a registered address failed: %v", err)
@@ -121,5 +128,104 @@ func handleResetPassword(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "password updated"})
+	}
+}
+
+// sendChildReset emails a reset link for a student's account to each of their
+// guardians who has an email address. Unknown IDs, and children with no
+// guardian to write to, get nothing — and the caller has already had the same
+// neutral reply as everyone else.
+func sendChildReset(d *sql.DB, cfg mail.Config, sender mail.Sender, loginID string) {
+	var accountID, childName string
+	if err := d.QueryRow(`
+		SELECT u.user_account_id, COALESCE(s.name, u.display_name) FROM user_account u
+		  JOIN student s ON s.user_account_id = u.user_account_id
+		 WHERE lower(trim(u.email)) = ? AND u.role = 'Student'`, loginID).Scan(&accountID, &childName); err != nil {
+		return
+	}
+	rows, err := d.Query(`
+		SELECT DISTINCT g.email, COALESCE(g.display_name, p.name) FROM student s
+		  JOIN student_parent sp ON sp.student_id = s.student_id
+		  JOIN parent p ON p.parent_id = sp.parent_id
+		  JOIN user_account g ON g.user_account_id = p.user_account_id
+		 WHERE s.user_account_id = ?`, accountID)
+	if err != nil {
+		return
+	}
+	type guardian struct{ email, name string }
+	var to []guardian
+	for rows.Next() {
+		var g guardian
+		if rows.Scan(&g.email, &g.name) == nil && auth.LooksLikeEmail(g.email) {
+			to = append(to, g)
+		}
+	}
+	rows.Close()
+	if len(to) == 0 {
+		return
+	}
+
+	token, err := auth.CreateReset(d, accountID)
+	if err != nil {
+		log.Printf("password reset: could not create token for a student: %v", err)
+		return
+	}
+	link := resetLink(cfg.PortalFor("Student"), token)
+	if sender == nil {
+		log.Printf("password reset: SMTP not configured — student link (SENSITIVE): %s", link)
+		return
+	}
+	for _, g := range to {
+		e := mail.Email{
+			Heading:  "Reset " + childName + "'s password",
+			Greeting: "Hello " + g.name + ",",
+			Paragraphs: []string{
+				childName + " asked to reset their JTrax student password. Use the button below to choose a new one together.",
+			},
+			Details: []mail.Detail{{Label: childName + "'s login ID", Value: loginID}},
+			Button:  &mail.Button{Label: "Choose a new password for " + childName, URL: link},
+			Note: "The link works once and expires in an hour. If " + childName +
+				" didn't ask for this, ignore this email: the password stays as it is.",
+		}
+		if err := mail.Deliver(sender, g.email, "Reset "+childName+"'s JTrax password", e); err != nil {
+			log.Printf("password reset: send to a guardian failed: %v", err)
+		}
+	}
+}
+
+// handleChangePassword lets a signed-in person replace their own password.
+func handleChangePassword(d *sql.DB) http.HandlerFunc {
+	// Per account, so the current-password check cannot be used to guess it.
+	limiter := httpx.NewLimiter(5)
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		var in struct {
+			CurrentPassword string `json:"currentPassword"`
+			NewPassword     string `json:"newPassword"`
+		}
+		if err := httpx.Decode(r, &in); err != nil || in.CurrentPassword == "" || in.NewPassword == "" {
+			httpx.Error(w, http.StatusBadRequest, "current and new password are required", err)
+			return
+		}
+		if !limiter.Allow(id.UserAccountID) {
+			httpx.Error(w, http.StatusTooManyRequests, "too many attempts — wait a minute and try again", nil)
+			return
+		}
+		if err := auth.ValidatePassword(in.NewPassword); err != nil {
+			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			return
+		}
+		if err := auth.ChangePassword(d, id.UserAccountID, in.CurrentPassword, in.NewPassword, bearerToken(r)); err != nil {
+			if errors.Is(err, auth.ErrWrongPassword) {
+				httpx.Error(w, http.StatusBadRequest, "your current password is not right", nil)
+				return
+			}
+			httpx.Error(w, http.StatusInternalServerError, "could not change the password", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "password changed"})
 	}
 }
