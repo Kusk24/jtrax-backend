@@ -21,6 +21,9 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/push"
+	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
 func main() {
@@ -58,6 +61,11 @@ func main() {
 	// A class made for later checks its booked students in when it starts,
 	// and only then are their credits spent (internal/api/classstart.go).
 	api.StartClassStarts(context.Background(), d)
+	// Card payments the Stripe webhook never reported are settled by asking
+	// Stripe (internal/api/stripe.go). Off until the Stripe key is set.
+	notifier := notify.New(d, mail.New(mailCfg), mailCfg)
+	notifier.SetPush(push.New(push.FromEnv()))
+	api.StartStripeReconciler(context.Background(), d, stripepay.New(stripepay.FromEnv()), notifier)
 
 	port := os.Getenv("PORT")
 	if port == "" {

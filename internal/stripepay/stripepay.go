@@ -134,6 +134,61 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, paymentID, productNa
 	return Session{ID: s.ID, URL: s.URL}, nil
 }
 
+// SessionState is what Stripe says about a Checkout session right now.
+type SessionState struct {
+	ID string
+	// Status is "open", "complete" or "expired".
+	Status string
+	// PaymentStatus is "paid" once the money is collected. A PromptPay
+	// session is "complete" but "unpaid" until the bank confirms.
+	PaymentStatus string
+	AmountTotal   int64
+	Currency      string
+	// PaymentID is the metadata this server set when it opened the session.
+	PaymentID string
+}
+
+// GetCheckoutSession asks Stripe for a session's current state. It is the
+// same answer the webhook carries, fetched by this server from Stripe itself
+// with the secret key — so, unlike anything a browser sends, it can be trusted
+// without a signature.
+func (c *Client) GetCheckoutSession(ctx context.Context, id string) (SessionState, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/v1/checkout/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return SessionState{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.key)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return SessionState{}, err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return SessionState{}, err
+	}
+	if res.StatusCode != http.StatusOK {
+		return SessionState{}, fmt.Errorf("stripe: reading session: %s: %s", res.Status, truncate(body, 300))
+	}
+	var s struct {
+		ID            string            `json:"id"`
+		Status        string            `json:"status"`
+		PaymentStatus string            `json:"payment_status"`
+		AmountTotal   int64             `json:"amount_total"`
+		Currency      string            `json:"currency"`
+		Metadata      map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &s); err != nil {
+		return SessionState{}, fmt.Errorf("stripe: decoding session: %w", err)
+	}
+	return SessionState{
+		ID: s.ID, Status: s.Status, PaymentStatus: s.PaymentStatus,
+		AmountTotal: s.AmountTotal, Currency: s.Currency, PaymentID: s.Metadata["payment_id"],
+	}, nil
+}
+
 // Tolerance is how stale a webhook's timestamp may be. Five minutes is
 // Stripe's own recommendation; anything older is a replay.
 const Tolerance = 5 * time.Minute
