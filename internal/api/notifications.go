@@ -14,11 +14,15 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 )
 
 // mountNotifications wires the inbox, settings, subscriptions and the manual
@@ -35,8 +39,9 @@ func mountNotifications(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/push-subscriptions", handleRegisterPush(d))
 	mux.HandleFunc("DELETE /api/v1/push-subscriptions", handleUnregisterPush(d))
 
-	// Manual, permission-gated: only Admin / Receptionist may set it off.
+	// Manual, permission-gated: only Admin / Receptionist may set these off.
 	mux.HandleFunc("POST /api/v1/notifications/credit-expiry", handleCreditExpiry(d, svc))
+	mux.HandleFunc("POST /api/v1/notifications/low-credit", handleLowCredit(d, svc))
 }
 
 // ---- inbox ---------------------------------------------------------------
@@ -146,10 +151,20 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 			}
 			settings = append(settings, map[string]any{"type": typ, "channel": channel, "enabled": enabled != 0})
 		}
+		/* The school-level switch for every type, beside this person's own
+		   choices. The two are different settings: the school's says whether
+		   JTrax sends the type at all, the person's whether they want it. A
+		   type the school has off is simply not offered — the person's saved
+		   choice is kept, and applies again when the school turns it back on. */
+		school := map[string]bool{}
+		for _, typ := range allTypes {
+			school[typ] = notify.SchoolEnabled(d, typ)
+		}
 		httpx.JSON(w, http.StatusOK, map[string]any{
-			"settings": settings,
-			"types":    []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement},
-			"channels": notify.Channels,
+			"settings":      settings,
+			"types":         []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypeClassCancelled},
+			"channels":      notify.Channels,
+			"schoolEnabled": school,
 		})
 	}
 }
@@ -177,6 +192,12 @@ func handlePutSettings(d *sql.DB) http.HandlerFunc {
 		}
 		if !validType(in.Type) || !validChannel(in.Channel) {
 			httpx.Error(w, http.StatusBadRequest, "unknown type or channel", nil)
+			return
+		}
+		// The school's switch is the master: nobody opts in to a type the
+		// school does not send. Opting out is always allowed.
+		if in.Enabled && !notify.SchoolEnabled(d, in.Type) {
+			httpx.Error(w, http.StatusConflict, "the school has turned this notification off", nil)
 			return
 		}
 		enabled := 0
@@ -218,6 +239,13 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 		}
 		if (in.Channel != notify.ChannelWebPush && in.Channel != notify.ChannelMobile) || in.Endpoint == "" {
 			httpx.Error(w, http.StatusBadRequest, "channel must be webpush or mobile, with an endpoint", nil)
+			return
+		}
+		// A phone registers an Expo push token and nothing else: that is the
+		// only kind the sender can deliver to, and the column is not a place
+		// to park whatever a client sends.
+		if len(in.Endpoint) > 512 || (in.Channel == notify.ChannelMobile && !push.IsExpoToken(in.Endpoint)) {
+			httpx.Error(w, http.StatusBadRequest, "that is not a push token this server can use", nil)
 			return
 		}
 		// endpoint is UNIQUE: the same browser re-registering updates its owner
@@ -317,9 +345,9 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			   JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
 			   JOIN student s ON s.student_id = e.student_id
 			  WHERE ct.expiry_date IS NOT NULL
-			    AND date(ct.expiry_date) >= date('now')
-			    AND date(ct.expiry_date) <= date('now', '+' || ? || ' days')
-			  GROUP BY e.student_id, s.name`, days)
+			    AND date(ct.expiry_date) >= ?
+			    AND date(ct.expiry_date) <= date(?, '+' || ? || ' days')
+			  GROUP BY e.student_id, s.name`, today(), today(), days)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not find expiring credits", err)
 			return
@@ -399,6 +427,151 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 	}
 }
 
+// handleLowCredit asks the parents of students whose credit is at or under the
+// academy's low-credit line to top up. Manual and staff-only, the same shape as
+// handleCreditExpiry: `{"dry_run": true}` lists who it would reach, and
+// `{"student_ids": [...]}` narrows a send to those students. The list can only
+// shrink the eligible set; an id outside it comes back under `skipped`.
+//
+// A balance is counted the way the console counts it: the credits recorded
+// against an active course, plus the child's credits that sit in no course. A
+// child in two courses is low if either course is.
+func handleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := requireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		if !isStaff(id.Role) {
+			httpx.Error(w, http.StatusForbidden, "only admin or reception may send this", nil)
+			return
+		}
+		var req struct {
+			DryRun     bool     `json:"dry_run"`
+			StudentIDs []string `json:"student_ids"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		}
+		if len(req.StudentIDs) > 500 {
+			httpx.Error(w, http.StatusUnprocessableEntity, "too many student ids", nil)
+			return
+		}
+
+		line := lowCreditLine(d)
+		rows, err := d.Query(`
+			SELECT e.student_id, COALESCE(s.name, ''),
+			       COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
+			                  WHERE ct.enrollment_id = e.enrollment_id), 0)
+			     + COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
+			                  WHERE ct.enrollment_id IS NULL AND ct.student_id = e.student_id), 0)
+			  FROM student_enrollment e
+			  JOIN student s ON s.student_id = e.student_id
+			 WHERE e.status = 'Active'`)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
+			return
+		}
+		defer rows.Close()
+
+		type target struct {
+			studentID, studentName string
+			balance                float64
+		}
+		lowest := map[string]*target{}
+		var order []string
+		for rows.Next() {
+			var t target
+			if err := rows.Scan(&t.studentID, &t.studentName, &t.balance); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
+				return
+			}
+			if t.balance > line {
+				continue
+			}
+			if prev, seen := lowest[t.studentID]; seen {
+				if t.balance < prev.balance {
+					prev.balance = t.balance
+				}
+				continue
+			}
+			lowest[t.studentID] = &t
+			order = append(order, t.studentID)
+		}
+		rows.Close()
+		targets := make([]target, 0, len(order))
+		for _, sid := range order {
+			targets = append(targets, *lowest[sid])
+		}
+		// Lowest balance first: those are the families to call before a class.
+		sort.SliceStable(targets, func(i, j int) bool {
+			if targets[i].balance != targets[j].balance {
+				return targets[i].balance < targets[j].balance
+			}
+			return targets[i].studentName < targets[j].studentName
+		})
+
+		if req.DryRun {
+			list := []map[string]any{}
+			for _, t := range targets {
+				list = append(list, map[string]any{
+					"student_id":   t.studentID,
+					"student_name": t.studentName,
+					"parents":      parentNamesOf(d, t.studentID),
+					"balance":      t.balance,
+				})
+			}
+			httpx.JSON(w, http.StatusOK, map[string]any{"targets": list, "line": line})
+			return
+		}
+
+		chosen := map[string]bool{}
+		for _, sid := range req.StudentIDs {
+			chosen[sid] = true
+		}
+		skipped := []string{}
+		for _, sid := range req.StudentIDs {
+			if lowest[sid] == nil {
+				skipped = append(skipped, sid)
+			}
+		}
+
+		sent := 0
+		for _, t := range targets {
+			if len(chosen) > 0 && !chosen[t.studentID] {
+				continue
+			}
+			recipients := parentAccountsOf(d, t.studentID)
+			if len(recipients) == 0 {
+				continue
+			}
+			name := t.studentName
+			if name == "" {
+				name = "your child"
+			}
+			err := svc.Send(recipients, notify.Message{
+				Type:  notify.TypeLowCredit,
+				Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
+				Body: notify.Text{
+					EN: name + " has " + fmtCreditsShort(t.balance) + " credits remaining. " +
+						"Please top up to continue their classes without interruption.",
+					TH: name + " เหลือเครดิต " + fmtCreditsShort(t.balance) + " เครดิต " +
+						"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
+				},
+				Data: map[string]any{"studentId": t.studentID},
+				// Pressing Send twice in a day reaches a family once.
+				DedupeKey: "low_credit:" + t.studentID + ":" + today(),
+			})
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+				return
+			}
+			sent++
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "line": line, "skipped": skipped})
+	}
+}
+
 // ---- triggers on generic writes -----------------------------------------
 
 // attachNotificationHooks wires the check-in and announcement notifications
@@ -450,9 +623,10 @@ func attendanceHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[strin
 	}
 }
 
-// announcementHook fans a newly posted announcement out to every student and
-// parent. Staff-authored text is free-form and single-language, so the same
-// title/body goes to everyone regardless of their language preference.
+// announcementHook fans a newly posted announcement out to the parents it is
+// addressed to — every parent, or the ones resolved from its audience (see
+// announcements.go). Staff-authored text is free-form and single-language, so
+// the same title/body goes to everyone regardless of their language preference.
 func announcementHook(_ *sql.DB, svc *notify.Service) func(*sql.DB, *auth.Identity, map[string]any, bool) {
 	return func(d *sql.DB, _ *auth.Identity, row map[string]any, created bool) {
 		if !created {
@@ -464,7 +638,7 @@ func announcementHook(_ *sql.DB, svc *notify.Service) func(*sql.DB, *auth.Identi
 		if annID == "" {
 			return
 		}
-		recipients := allStudentAndParentAccounts(d)
+		recipients := announcementAccounts(d, annID, rowStr(row, "audience"))
 		if len(recipients) == 0 {
 			return
 		}
@@ -522,23 +696,6 @@ func parentNamesOf(d *sql.DB, studentID string) []string {
 	return names
 }
 
-func allStudentAndParentAccounts(d *sql.DB) []string {
-	rows, err := d.Query(
-		`SELECT user_account_id FROM user_account WHERE role IN ('Parent','Student')`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err == nil && uid != "" {
-			ids = append(ids, uid)
-		}
-	}
-	return ids
-}
-
 func studentDisplayName(d *sql.DB, studentID string) string {
 	var name sql.NullString
 	d.QueryRow(`SELECT name FROM student WHERE student_id = ?`, studentID).Scan(&name)
@@ -557,10 +714,17 @@ func rowStr(row map[string]any, key string) string {
 	return ""
 }
 
+// allTypes is the notification catalogue, in the order the settings screens
+// list it.
+var allTypes = []string{
+	notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditDeducted, notify.TypeLowCredit,
+	notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment, notify.TypeClassCancelled,
+}
+
 func validType(t string) bool {
 	switch t {
 	case notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditDeducted, notify.TypeLowCredit,
-		notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment:
+		notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypePayment, notify.TypeClassCancelled:
 		return true
 	}
 	return false
@@ -592,9 +756,9 @@ func nullable(s string) any {
 // to charge — falls back to the plain "has left class", because inventing a
 // zero-credit receipt would read as a free class rather than a gap.
 //
-// If the balance this leaves is at or under the academy's low-credit line, a
-// second, separate notification nudges the parent to top up. That one is
-// opt-in (see notify.DefaultEnabled) and held to once a day per student.
+// It no longer nudges a family whose balance ran low. The academy wants a
+// person to decide when that goes out, so it is a staff button now, beside the
+// expiry reminder: see handleLowCredit.
 func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []string, attID, studentID, name string) {
 	var used, remaining float64
 	var enrolmentID, start, end string
@@ -632,21 +796,6 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 		Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 		DedupeKey: "credit_deducted:" + attID,
 	})
-
-	if remaining <= lowCreditLine(d) {
-		svc.Send(recipients, notify.Message{
-			Type:  notify.TypeLowCredit,
-			Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
-			Body: notify.Text{
-				EN: name + " has " + fmtCreditsShort(remaining) + " credits remaining. " +
-					"Consider purchasing additional credits to continue their classes without interruption.",
-				TH: name + " เหลือเครดิต " + fmtCreditsShort(remaining) + " เครดิต " +
-					"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
-			},
-			Data:      map[string]any{"studentId": studentID},
-			DedupeKey: "low_credit:" + studentID + ":" + today(),
-		})
-	}
 }
 
 // lowCreditLine is the academy's own threshold, the same
@@ -698,12 +847,21 @@ func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
 	if paymentID == "" {
 		return
 	}
-	var studentID, enrolmentID sql.NullString
+	var studentID, enrolmentID, regID sql.NullString
 	var amount float64
+	var forWhat, method, paidOn, reference string
 	if err := d.QueryRow(
-		`SELECT student_id, enrollment_id, final_amount FROM payment WHERE payment_id = ?`,
-		paymentID).Scan(&studentID, &enrolmentID, &amount); err != nil {
+		`SELECT student_id, enrollment_id, final_amount, tournament_registration_id,
+		        COALESCE(class_name, ''), COALESCE(payment_method, ''), COALESCE(payment_date, ''),
+		        COALESCE(reference_number, '')
+		   FROM payment WHERE payment_id = ?`,
+		paymentID).Scan(&studentID, &enrolmentID, &amount, &regID, &forWhat, &method, &paidOn, &reference); err != nil {
 		return
+	}
+	// A tournament fee paid by somebody who entered on the public form: they
+	// may have no account at all, so the receipt goes to the address they gave.
+	if regID.Valid {
+		emailPublicEntrantReceipt(d, svc, regID.String, amount, forWhat)
 	}
 	if !studentID.Valid || studentID.String == "" {
 		return
@@ -727,19 +885,120 @@ func notifyPaymentPaid(d *sql.DB, svc *notify.Service, paymentID string) {
 	amt := fmtBaht(amount)
 	en := "Your payment of " + amt + " was successful."
 	th := "การชำระเงิน " + amt + " ของคุณสำเร็จแล้ว"
+	if regID.Valid && forWhat != "" {
+		// A tournament fee buys no credits, so what it was for is the news.
+		en = "Your payment of " + amt + " for " + name + "'s entry to " + forWhat + " was successful."
+		th = "ชำระค่าสมัคร " + forWhat + " ของ " + name + " จำนวน " + amt + " สำเร็จแล้ว"
+	}
 	if credits > 0 {
 		en += " " + fmtCreditsShort(credits) + " credits have been added to " + name +
 			"'s account. Current balance: " + fmtCreditsShort(balance) + " credits."
 		th += " เพิ่ม " + fmtCreditsShort(credits) + " เครดิตให้ " + name +
 			" แล้ว ยอดคงเหลือ " + fmtCreditsShort(balance) + " เครดิต"
 	}
+	/* The receipt, as the email's table. */
+	same := func(v string) notify.Text { return notify.Text{EN: v, TH: v} }
+	details := []notify.Detail{
+		{Label: notify.Text{EN: "Student", TH: "นักเรียน"}, Value: same(name)},
+	}
+	if forWhat != "" {
+		label := notify.Text{EN: "Course", TH: "คอร์ส"}
+		if regID.Valid {
+			label = notify.Text{EN: "Tournament", TH: "การแข่งขัน"}
+		}
+		details = append(details, notify.Detail{Label: label, Value: same(forWhat)})
+	}
+	details = append(details, notify.Detail{Label: notify.Text{EN: "Amount paid", TH: "ยอดชำระ"}, Value: same(amt)})
+	if method != "" {
+		details = append(details, notify.Detail{Label: notify.Text{EN: "Payment method", TH: "วิธีชำระเงิน"}, Value: same(paymentMethodLabel(method))})
+	}
+	if paidOn != "" {
+		details = append(details, notify.Detail{Label: notify.Text{EN: "Date", TH: "วันที่"}, Value: same(fmtDay(paidOn))})
+	}
+	if reference != "" {
+		details = append(details, notify.Detail{Label: notify.Text{EN: "Reference", TH: "เลขอ้างอิง"}, Value: same(reference)})
+	}
+	if credits > 0 {
+		details = append(details,
+			notify.Detail{Label: notify.Text{EN: "Credits added", TH: "เครดิตที่เพิ่ม"}, Value: same(fmtCreditsShort(credits))},
+			notify.Detail{Label: notify.Text{EN: "New balance", TH: "ยอดคงเหลือ"}, Value: same(fmtCreditsShort(balance) + " credits")},
+		)
+	}
 	svc.Send(recipients, notify.Message{
-		Type:      notify.TypePayment,
-		Title:     notify.Text{EN: "Payment successful", TH: "ชำระเงินสำเร็จ"},
-		Body:      notify.Text{EN: en, TH: th},
+		Type:    notify.TypePayment,
+		Title:   notify.Text{EN: "Payment successful", TH: "ชำระเงินสำเร็จ"},
+		Body:    notify.Text{EN: en, TH: th},
+		Details: details,
+		EmailIntro: notify.Text{
+			EN: "Thank you. We've received your payment for " + name + ". Here is your receipt.",
+			TH: "ขอบคุณค่ะ เราได้รับการชำระเงินสำหรับ " + name + " แล้ว รายละเอียดอยู่ด้านล่าง",
+		},
 		Data:      map[string]any{"paymentId": paymentID, "studentId": studentID.String},
 		DedupeKey: "payment_received:" + paymentID,
 	})
+}
+
+// emailPublicEntrantReceipt confirms a paid tournament fee to the address a
+// public entrant registered with. Parent and desk entries have no such address
+// (their family is told through the inbox above), and an address that already
+// belongs to one of the child's parents is skipped, so nobody gets it twice.
+func emailPublicEntrantReceipt(d *sql.DB, svc *notify.Service, regID string, amount float64, tournament string) {
+	var email, participant, source string
+	var studentID sql.NullString
+	if err := d.QueryRow(`
+		SELECT COALESCE(contact_email, ''), participant_name, COALESCE(source, ''), student_id
+		  FROM tournament_registration WHERE tournament_registration_id = ?`, regID).
+		Scan(&email, &participant, &source, &studentID); err != nil {
+		return
+	}
+	if source != "Public" || email == "" {
+		return
+	}
+	if studentID.Valid {
+		var n int
+		d.QueryRow(`
+			SELECT COUNT(*) FROM user_account u
+			  JOIN parent p ON p.user_account_id = u.user_account_id
+			  JOIN student_parent sp ON sp.parent_id = p.parent_id
+			 WHERE sp.student_id = ? AND lower(trim(u.email)) = lower(trim(?))`,
+			studentID.String, email).Scan(&n)
+		if n > 0 {
+			return
+		}
+	}
+	amt := fmtBaht(amount)
+	svc.Email(email, "Payment received: "+tournament, mail.Email{
+		Heading:  "Payment received",
+		Greeting: "Hello,",
+		Paragraphs: []string{
+			"We have received your payment for " + participant + "'s entry to " + tournament + ". The entry is paid; there is nothing more to do.",
+			"เราได้รับค่าสมัคร " + tournament + " ของ " + participant + " จำนวน " + amt + " เรียบร้อยแล้ว ไม่ต้องดำเนินการใดเพิ่มเติม",
+		},
+		Details: []mail.Detail{
+			{Label: "Participant", Value: participant},
+			{Label: "Tournament", Value: tournament},
+			{Label: "Amount paid", Value: amt},
+		},
+	})
+}
+
+// paymentMethodLabel reads the stored method ("BankTransfer") as people say it.
+func paymentMethodLabel(method string) string {
+	switch method {
+	case "CreditCard":
+		return "Credit card"
+	case "BankTransfer":
+		return "Bank transfer"
+	}
+	return method
+}
+
+// fmtDay writes a stored date as "27 Sep 2026", or leaves it be.
+func fmtDay(iso string) string {
+	if t, err := time.Parse("2006-01-02", iso[:min(len(iso), 10)]); err == nil {
+		return t.Format("2 Jan 2006")
+	}
+	return iso
 }
 
 // fmtBaht writes an amount with a thousands separator and the ISO code —

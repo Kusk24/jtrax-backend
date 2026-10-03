@@ -53,7 +53,9 @@ func scanServer(t *testing.T, scanner ocr.Provider) *httptest.Server {
 }
 
 // postScan uploads bytes as the named part and returns status plus decoded body.
-func postScan(t *testing.T, srv *httptest.Server, token string, field string, data []byte) (int, map[string]any) {
+// path is optional and defaults to the staff form scanner, so the ID-card
+// tests can reuse the multipart plumbing without a second copy of it.
+func postScan(t *testing.T, srv *httptest.Server, token string, field string, data []byte, path ...string) (int, map[string]any) {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -64,7 +66,11 @@ func postScan(t *testing.T, srv *httptest.Server, token string, field string, da
 	part.Write(data)
 	mw.Close()
 
-	req, _ := http.NewRequest("POST", srv.URL+"/api/v1/registrations/scan", &buf)
+	target := "/api/v1/registrations/scan"
+	if len(path) > 0 {
+		target = path[0]
+	}
+	req, _ := http.NewRequest("POST", srv.URL+target, &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

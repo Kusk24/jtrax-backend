@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -288,6 +287,8 @@ func TestSigningInIsRequiredForPuzzles(t *testing.T) {
 
 // A pupil is never set the same puzzle twice, and is told when that means
 // there is nothing left rather than being handed a silently empty day.
+// With Lichess unreachable (the suite's default, see main_test.go) nothing can
+// top the bank up, so the seeded sixty run out and the portal is told.
 func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 	d := newDB(t)
 	srv := newServerOn(t, d)
@@ -312,9 +313,9 @@ func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 			break
 		}
 		if _, err := d.Exec(
-			`UPDATE puzzle_attempt SET assigned_on = date('now', ?)
-			  WHERE student_id = 'stu_penny' AND assigned_on = date('now')`,
-			fmt.Sprintf("-%d days", day+1)); err != nil {
+			`UPDATE puzzle_attempt SET assigned_on = ?
+			  WHERE student_id = 'stu_penny' AND assigned_on = ?`,
+			academyDay(-(day + 1)), academyDay(0)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -330,16 +331,16 @@ func TestPuzzlesAreNeverRepeatedAndExhaustionIsSaidOutLoud(t *testing.T) {
 	}
 }
 
-// Puzzles come from inside the pupil's rating band while the band has any
-// left. Penny has no FIDE rating, so she is treated as 800.
+// Puzzles come from inside the pupil's band while the band has any left.
+// Penny's level is Beginner and she has no FIDE rating, so her band is the
+// Beginner one: under 800.
 func TestPuzzlesComeFromTheRatingBandFirst(t *testing.T) {
 	pupil := &client{t: t, srv: newServer(t)}
 	pupil.login("penny@jca.ac.th")
 
 	for _, p := range dailySet(t, pupil) {
-		r, _ := p["rating"].(float64)
-		if diff := r - 800; diff > 250 || diff < -250 {
-			t.Errorf("puzzle rated %v is outside the ±250 band around 800", r)
+		if r, _ := p["rating"].(float64); r >= 800 {
+			t.Errorf("a Beginner was set a %v-rated puzzle", r)
 		}
 	}
 }

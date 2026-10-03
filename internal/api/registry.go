@@ -20,6 +20,18 @@ func byOwnStudent(col string) ScopeFn {
 	return func(id *auth.Identity) (string, []any) { return col + " = ?", []any{id.StudentID} }
 }
 
+// notDeleted narrows an enrolment scope to the rows the office has not
+// deleted — those are kept only for the console's history.
+func notDeleted(scope ScopeFn) ScopeFn {
+	return func(id *auth.Identity) (string, []any) {
+		where, args := scope(id)
+		return "(" + where + ") AND deleted_date IS NULL", args
+	}
+}
+
+// notCancelled hides sessions the office has called off.
+func notCancelled(*auth.Identity) (string, []any) { return "cancelled_at IS NULL", nil }
+
 func byOwnParent(col string) ScopeFn {
 	return func(id *auth.Identity) (string, []any) { return col + " = ?", []any{id.ParentID} }
 }
@@ -57,6 +69,7 @@ var (
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
 	// Public sign-ups arrive Pending; staff entry has always meant Approved.
 	registrationStat = []string{"Pending", "Approved", "Rejected", "Withdrawn"}
+	arrivalStatus    = []string{"Pending", "Confirmed", "NotAttending"}
 	contactTypes     = []string{"phone", "email", "line_id"}
 )
 
@@ -206,7 +219,18 @@ func Registry() []*Resource {
 				{Name: "duration_hours", Kind: "real"},
 				{Name: "session_status", Kind: "text", Enum: sessionStatus},
 			},
+			// When the office called it off (migration 0053). Read-only: only
+			// the cancel endpoint sets it, since cancelling also refunds and
+			// tells the families.
+			Derived:   []Derived{{Name: "cancelled_at", Expr: "cancelled_at"}},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
+			// A cancelled class is the office's record, not a class anyone
+			// goes to: teachers and families never see it.
+			Scope: map[string]ScopeFn{
+				"Teacher": notCancelled,
+				"Parent":  notCancelled,
+				"Student": notCancelled,
+			},
 			// The form collects a start and an end and never worked out the
 			// difference, so every session staff created carried a NULL
 			// length — and a length is what an hour of class costs.
@@ -224,11 +248,18 @@ func Registry() []*Resource {
 				// the question a Withdrawn row cannot: whether they left the
 				// academy or moved up.
 				{Name: "moved_from_class_id", Kind: "text"},
+				// The office's own note on this enrolment (migration 0042).
+				{Name: "notes", Kind: "text"},
+				// The day it stopped being Active (migration 0043).
+				{Name: "ended_date", Kind: "text"},
+				// Set when the office deletes it (migration 0044). The row is
+				// kept for the student's history; the family does not see it.
+				{Name: "deleted_date", Kind: "text"},
 			},
 			ReadRoles: everyone,
 			Scope: map[string]ScopeFn{
-				"Parent":  byParentStudents("student_id"),
-				"Student": byOwnStudent("student_id"),
+				"Parent":  notDeleted(byParentStudents("student_id")),
+				"Student": notDeleted(byOwnStudent("student_id")),
 			},
 		},
 		{
@@ -250,6 +281,7 @@ func Registry() []*Resource {
 			// session lasts. Here rather than in the console because the front
 			// desk, the teacher's roster and Class History all write these
 			// rows, and three clients would keep three versions of the rule.
+			AfterInsert:  refuseClashingAttendance,
 			AfterWrite:   chargeAttendance,
 			BeforeDelete: refundAttendance,
 		},
@@ -279,6 +311,9 @@ func Registry() []*Resource {
 				{Name: "student_id", Kind: "text"},
 				{Name: "enrollment_id", Kind: "text"},
 				{Name: "credit_package_id", Kind: "text"},
+				// Credits this payment bought (migration 0054): a package's
+				// count, or a custom number the desk typed in.
+				{Name: "credit_amount", Kind: "real"},
 				// Snapshots of who and what, written when the money changed
 				// hands. Renaming a class later must not rewrite old receipts.
 				{Name: "student_name", Kind: "text"},
@@ -291,6 +326,10 @@ func Registry() []*Resource {
 				{Name: "status", Kind: "text", Enum: payStatus},
 				{Name: "payment_date", Kind: "text", Required: true},
 				{Name: "reference_number", Kind: "text"},
+				// Set when the money is a tournament entry fee rather than a
+				// credit package. The portal reads it to tell a family which
+				// of their registrations is still owed for.
+				{Name: "tournament_registration_id", Kind: "text"},
 			},
 			ReadRoles: []string{"Parent", "Student"},
 			Scope: map[string]ScopeFn{
@@ -347,14 +386,38 @@ func Registry() []*Resource {
 				{Name: "author_user_account_id", Kind: "text", Required: true},
 				{Name: "posted_at", Kind: "text"},
 				{Name: "has_attachment", Kind: "bool"},
+				// Who it is for (see 0041): every parent, the parents of some
+				// classes, or some parents by name — audience_ids holds the
+				// classes or parents picked, as a JSON array.
+				{Name: "audience", Kind: "text", Enum: []string{"all", "classes", "parents"}},
+				{Name: "audience_ids", Kind: "text"},
 			},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
+			Check: checkAnnouncementAudience,
+			// Resolved once, when it is posted: see resolveAnnouncementAudience.
+			AfterWrite: resolveAnnouncementAudience,
+			Scope: map[string]ScopeFn{
+				// Everything addressed to every parent, and whatever was
+				// addressed to this one.
+				"Parent": func(id *auth.Identity) (string, []any) {
+					return `(audience = 'all' OR announcement_id IN
+						(SELECT announcement_id FROM announcement_recipient WHERE parent_id = ?))`,
+						[]any{id.ParentID}
+				},
+				// Announcements are for families; students are not an audience.
+				"Student": func(id *auth.Identity) (string, []any) {
+					return `1 = 0`, nil
+				},
+			},
 		},
 		{
 			Name: "tournaments", Table: "tournament", IDCol: "tournament_id", IDPrefix: "trn",
 			Cols: []Col{
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "tournament_status", Kind: "text", Enum: tournamentStat},
+				// Set when the office picks a status by hand (migration
+				// 0056); otherwise the dates decide (tournamentstatus.go).
+				{Name: "status_locked", Kind: "bool"},
 				{Name: "start_date", Kind: "text"},
 				{Name: "end_date", Kind: "text"},
 				{Name: "venue_name", Kind: "text"},
@@ -375,6 +438,9 @@ func Registry() []*Resource {
 				{Name: "registration_website_url", Kind: "text"},
 				{Name: "registration_qr_code_image", Kind: "text"},
 				{Name: "regulations_document_url", Kind: "text"},
+				// Days before the start to ask entrants whether they are
+				// coming (migration 0055). Empty or 0: no reminder.
+				{Name: "arrival_reminder_days", Kind: "int"},
 				// Opt-in, and staff-only to change: turning it on publishes
 				// children's names and scores to anyone with the link.
 				{Name: "results_public", Kind: "bool"},
@@ -382,12 +448,36 @@ func Registry() []*Resource {
 				// anyone with the link.
 				{Name: "public_registration", Kind: "bool"},
 				{Name: "student_discount_pct", Kind: "int"},
+				// Which reductions a JCA student gets at this event — the
+				// discount above, the early-bird price, both or neither (0035).
+				{Name: "student_gets_discount", Kind: "bool"},
+				{Name: "student_gets_early_bird", Kind: "bool"},
 				// The chess-results.com event this tournament is published as,
 				// when the standings are somebody else's to author. Read here so
 				// the console's list can say which events follow an arbiter.
 				{Name: "chess_results_id", Kind: "int"},
+				// Saved by the create wizard before the organiser has reviewed
+				// it, and taken live only by /publish (see tournamentdraft.go).
+				{Name: "draft", Kind: "bool"},
 			},
-			ReadRoles: everyone,
+			Derived: []Derived{
+				// Whether the organiser uploaded a banner; without one the
+				// pages draw their own (see banner.go).
+				{Name: "has_banner", Roles: everyone,
+					Expr: "EXISTS(SELECT 1 FROM tournament_banner b WHERE b.tournament_id = tournament.tournament_id)"},
+			},
+			AfterWrite: tournamentStatusAfterWrite,
+			ReadRoles:  everyone,
+			// A draft is the organiser's until it is published.
+			Scope: map[string]ScopeFn{
+				"Teacher": notDraft,
+				"Parent":  notDraft,
+				"Student": notDraft,
+			},
+			// What a JCA student is charged today, from the same rule the
+			// server charges by — so the portals show a price rather than
+			// work one out (see pricing.go).
+			Decorate: withStudentFee,
 		},
 		{
 			Name: "tournament-categories", Table: "tournament_category", IDCol: "tournament_category_id", IDPrefix: "tcat",
@@ -395,7 +485,8 @@ func Registry() []*Resource {
 				{Name: "tournament_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
 			},
-			ReadRoles: everyone,
+			ReadRoles:    everyone,
+			BeforeDelete: releaseCategoryEntrants,
 		},
 		{
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",
@@ -417,13 +508,56 @@ func Registry() []*Resource {
 				{Name: "contact_phone", Kind: "text"},
 				{Name: "fee_quoted", Kind: "real"},
 				{Name: "student_discount_applied", Kind: "bool"},
+				// What the family said about their own child. Medical notes are
+				// for the day; remarks are a request for the office.
+				{Name: "medical_notes", Kind: "text"},
+				{Name: "remarks", Kind: "text"},
+				// Called across the hall and printed on the pairing card.
+				{Name: "nickname", Kind: "text"},
+				// As claimed on the entry form. Kept alongside the date of
+				// birth rather than derived from it: the interesting case for
+				// an age-limited group is when the two disagree.
+				{Name: "participant_age", Kind: "int"},
+				// As printed on a Thai ID card; a passport holder has none.
+				{Name: "participant_name_th", Kind: "text"},
+				// Which chess-results player this entry is, when staff picked
+				// one because the names did not match (0052). Empty means the
+				// console matches by name.
+				{Name: "results_section_id", Kind: "int"},
+				{Name: "results_player_name", Kind: "text"},
+				// Whether they are coming (migration 0055): Pending until they
+				// answer the reminder, or the desk records a phone call.
+				{Name: "arrival_status", Kind: "text", Enum: arrivalStatus},
 			},
-			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Parent"},
+			// terms_accepted_at is readable and not writable. It is a record of
+			// consent, and a consent record staff can set by hand is one that
+			// cannot be relied on for the question it exists to answer.
+			Derived: []Derived{
+				{Name: "terms_accepted_at", Expr: "terms_accepted_at"},
+				{Name: "arrival_reminded_at", Expr: "arrival_reminded_at"},
+				{Name: "arrival_answered_at", Expr: "arrival_answered_at"},
+				// What the ID card scan read, beside what was submitted —
+				// evidence for staff checking an age group, so not editable.
+				{Name: "ocr_name", Expr: "ocr_name"},
+				{Name: "ocr_date_of_birth", Expr: "ocr_date_of_birth"},
+				{Name: "id_document_type", Expr: "id_document_type"},
+				// The early-bird and closing-date rules' own record of what
+				// they did (entryrules.go).
+				{Name: "early_bird_applied", Expr: "early_bird_applied"},
+				{Name: "early_bird_lapsed_at", Expr: "early_bird_lapsed_at"},
+				{Name: "released_at", Expr: "released_at"},
+			},
+			// Staff write here; a parent enters their child through
+			// `tournaments/{id}/entries`, which prices the entry itself. This
+			// door used to take the fee and status from the parent's own
+			// request, so a family could register at a price they chose.
+			ReadRoles: []string{"Parent", "Student"},
 			Scope: map[string]ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
-			Own: ownChild,
+			Check:      checkRegistrationNotes,
+			AfterWrite: syncRegistrationPayment,
 		},
 		{
 			Name: "practice-activities", Table: "practice_activity", IDCol: "activity_id", IDPrefix: "act",

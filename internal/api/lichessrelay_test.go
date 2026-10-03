@@ -32,6 +32,7 @@ type playStub struct {
 	moves      []stubMove
 	resigns    []string
 	aborts     []string
+	draws      []string
 	// streams lets a test drive what Lichess says about a live game.
 	streams map[string]chan string
 	// done releases every open stream handler at the end of a test.
@@ -121,6 +122,12 @@ func newPlayStub(t *testing.T) *playStub {
 	mux.HandleFunc("POST /api/board/game/{id}/resign", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.resigns = append(s.resigns, r.PathValue("id"))
+		s.mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("POST /api/board/game/{id}/draw/yes", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.draws = append(s.draws, s.names[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")])
 		s.mu.Unlock()
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
@@ -222,6 +229,12 @@ func (s *playStub) resignList() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.resigns...)
+}
+
+func (s *playStub) drawList() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.draws...)
 }
 
 func (s *playStub) abortList() []string {
@@ -631,4 +644,75 @@ func waitForRoom(t *testing.T, c *client, roomID string, done func(map[string]an
 	}
 	t.Fatalf("room never reached the expected state: %v", room)
 	return nil
+}
+
+/* ---- clock and draws ---- */
+
+// The clock Lichess is running reaches our board, with the moment it was true,
+// so pupil and coach can see the time that is deciding the game.
+func TestTheLichessClockReachesTheRoom(t *testing.T) {
+	base, stub := newPlayServer(t)
+	penny := grantPlay(t, base, "penny@jca.ac.th", "PennyPlays")
+	uri := grantPlay(t, base, "uri@jca.ac.th", "UriPlays")
+	roomID := pairInRoom(t, base, penny, uri)
+
+	stub.push("game1", `{"type":"gameState","moves":"","wtime":598000,"btime":600000,"status":"started"}`)
+	// Wait for this state's clock, not the first one: the stream opens with a
+	// gameFull whose state carries no times, which the relay records too, so
+	// waiting for any clock at all raced the pushed update.
+	room := waitForRoom(t, penny, roomID, func(r map[string]any) bool {
+		c, _ := r["clock"].(map[string]any)
+		return c != nil && c["whiteMs"] == float64(598000)
+	})
+	clock := room["clock"].(map[string]any)
+	if clock["whiteMs"] != float64(598000) || clock["blackMs"] != float64(600000) || clock["at"] == "" {
+		t.Fatalf("clock = %v, want White 598000, Black 600000 and when", clock)
+	}
+}
+
+// A draw agreed on our board is agreed on Lichess too: the offer from the side
+// that made it, then the accept from the other.
+func TestAnAgreedDrawIsForwardedToLichess(t *testing.T) {
+	base, stub := newPlayServer(t)
+	penny := grantPlay(t, base, "penny@jca.ac.th", "PennyPlays")
+	uri := grantPlay(t, base, "uri@jca.ac.th", "UriPlays")
+	roomID := pairInRoom(t, base, penny, uri)
+
+	if s, obj, _ := uri.do("POST", "/api/v1/game-rooms/"+roomID+"/draw/offer", nil); s != 200 {
+		t.Fatalf("offer: %d (%v)", s, obj)
+	}
+	if s, obj, _ := penny.do("POST", "/api/v1/game-rooms/"+roomID+"/draw/accept", nil); s != 200 {
+		t.Fatalf("accept: %d (%v)", s, obj)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := stub.drawList(); len(got) == 2 {
+			if got[0] != "UriPlays" || got[1] != "PennyPlays" {
+				t.Fatalf("draw calls = %v, want Uri's offer then Penny's accept", got)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the draw never reached Lichess: %v", stub.drawList())
+}
+
+// Lichess cannot pause a game, so stopping a rated one ends it there and the
+// board carries on unrated, saying why.
+func TestStoppingARatedGameMakesItUnrated(t *testing.T) {
+	base, _ := newPlayServer(t)
+	penny := grantPlay(t, base, "penny@jca.ac.th", "PennyPlays")
+	uri := grantPlay(t, base, "uri@jca.ac.th", "UriPlays")
+	roomID := pairInRoom(t, base, penny, uri)
+
+	admin := asStudent(t, base, "admin@jca.ac.th")
+	if s, obj, _ := admin.do("POST", "/api/v1/game-rooms/"+roomID+"/stop", nil); s != 200 {
+		t.Fatalf("stop: %d (%v)", s, obj)
+	}
+	_, got, _ := penny.do("GET", "/api/v1/game-rooms/"+roomID, nil)
+	r := got["room"].(map[string]any)
+	if r["lichessRated"] != false || r["lichessDetachedReason"] != "stopped" {
+		t.Fatalf("rated %v, detached %v — want unrated because it was stopped",
+			r["lichessRated"], r["lichessDetachedReason"])
+	}
 }

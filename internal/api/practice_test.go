@@ -3,8 +3,18 @@ package api_test
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 )
+
+// academyDay is the academy's calendar day `offset` days from today — the
+// same clock the server dates practice and puzzles by. SQLite's date('now') is
+// UTC, which for the first seven hours of a Bangkok morning is yesterday.
+func academyDay(offset int) string {
+	return academytime.Now().AddDate(0, 0, offset).Format(academytime.DayLayout)
+}
 
 // practised writes a practice row `back` days ago.
 func practised(t *testing.T, d *sql.DB, studentID string, back, puzzles int) {
@@ -12,9 +22,9 @@ func practised(t *testing.T, d *sql.DB, studentID string, back, puzzles int) {
 	if _, err := d.Exec(
 		`INSERT OR REPLACE INTO practice_activity
 		   (activity_id, student_id, activity_date, minutes_practiced, puzzles_completed, points_earned, streak_count)
-		 VALUES (?,?,date('now', ?),0,?,0,0)`,
+		 VALUES (?,?,?,0,?,0,0)`,
 		fmt.Sprintf("act_%s_%d", studentID, back), studentID,
-		fmt.Sprintf("-%d days", back), puzzles); err != nil {
+		academyDay(-back), puzzles); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -146,22 +156,7 @@ func TestSolvingAPuzzleRecordsPracticeOnTheServer(t *testing.T) {
 
 	set := dailySet(t, penny)
 	id, _ := set[0]["puzzleId"].(string)
-	var solution string
-	if err := d.QueryRow(`SELECT moves FROM puzzle WHERE puzzle_id = ?`, id).Scan(&solution); err != nil {
-		t.Fatal(err)
-	}
-	first := solution
-	for i, ch := range solution {
-		if ch == ' ' {
-			first = solution[:i]
-			break
-		}
-	}
-	status, obj, _ := penny.do("POST", "/api/v1/puzzles/"+id+"/attempt",
-		map[string]any{"move": first, "played": []string{}})
-	if status != 200 || obj["correct"] != true {
-		t.Fatalf("solving: status %d, %v", status, obj)
-	}
+	solveFirstMove(t, d, penny, id)
 
 	sum := summaryFor(t, penny)
 	if got, _ := sum["streak"].(float64); got != 1 {
@@ -172,7 +167,7 @@ func TestSolvingAPuzzleRecordsPracticeOnTheServer(t *testing.T) {
 	}
 	var n int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM practice_activity
-	                      WHERE student_id = 'stu_penny' AND activity_date = date('now')`).Scan(&n); err != nil {
+	                      WHERE student_id = 'stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -226,7 +221,7 @@ func TestPracticeMinutesAreMeasuredFromWhenThePuzzleWasOpened(t *testing.T) {
 
 	var mins int
 	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 6 {
@@ -254,7 +249,7 @@ func TestAnAbandonedPuzzleCannotLogHours(t *testing.T) {
 
 	var mins int
 	if err := d.QueryRow(`SELECT minutes_practiced FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 15 {
@@ -278,7 +273,7 @@ func TestAPuzzleNeverOpenedContributesNoMinutes(t *testing.T) {
 
 	var mins, puzzles int
 	if err := d.QueryRow(`SELECT minutes_practiced, puzzles_completed FROM practice_activity
-	                      WHERE student_id='stu_penny' AND activity_date = date('now')`).Scan(&mins, &puzzles); err != nil {
+	                      WHERE student_id='stu_penny' AND activity_date = ?`, academyDay(0)).Scan(&mins, &puzzles); err != nil {
 		t.Fatal(err)
 	}
 	if mins != 0 || puzzles != 1 {
@@ -286,23 +281,24 @@ func TestAPuzzleNeverOpenedContributesNoMinutes(t *testing.T) {
 	}
 }
 
-// solveFirstMove plays the first move of a puzzle's stored solution.
+// solveFirstMove solves a puzzle by playing the pupil's side of its stored
+// solution. It once played only the first move, which was enough for the
+// one-move puzzles an 800-rated default drew; a Beginner's band holds longer
+// ones, so it plays them all.
 func solveFirstMove(t *testing.T, d *sql.DB, c *client, puzzleID string) {
 	t.Helper()
 	var solution string
 	if err := d.QueryRow(`SELECT moves FROM puzzle WHERE puzzle_id = ?`, puzzleID).Scan(&solution); err != nil {
 		t.Fatal(err)
 	}
-	first := solution
-	for i, ch := range solution {
-		if ch == ' ' {
-			first = solution[:i]
-			break
+	moves := strings.Fields(solution)
+	played := []string{}
+	for i := 0; i < len(moves); i += 2 {
+		status, obj, _ := c.do("POST", "/api/v1/puzzles/"+puzzleID+"/attempt",
+			map[string]any{"move": moves[i], "played": played})
+		if status != 200 || obj["correct"] != true {
+			t.Fatalf("solving %s: status %d, %v", puzzleID, status, obj)
 		}
-	}
-	status, obj, _ := c.do("POST", "/api/v1/puzzles/"+puzzleID+"/attempt",
-		map[string]any{"move": first, "played": []string{}})
-	if status != 200 || obj["correct"] != true {
-		t.Fatalf("solving %s: status %d, %v", puzzleID, status, obj)
+		played = append(played, moves[i])
 	}
 }

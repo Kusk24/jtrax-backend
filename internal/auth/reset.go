@@ -16,6 +16,11 @@ import (
 // matters more than the inconvenience of asking for a second link.
 const ResetTTL = 60 * time.Minute
 
+// InviteTTL is how long a welcome link lasts. Longer than a reset: nobody asked
+// for this one, so it waits in an inbox until the family gets round to it.
+// It is still single-use, and the office can send a fresh one.
+const InviteTTL = 7 * 24 * time.Hour
+
 var ErrResetInvalid = errors.New("reset token is invalid or has expired")
 
 // HashResetToken is exported so tests can look up a row by token without
@@ -28,12 +33,17 @@ func HashResetToken(token string) string {
 // CreateReset issues a token for the account and returns the raw value, which
 // is the only time it exists in readable form.
 func CreateReset(d *sql.DB, userAccountID string) (string, error) {
+	return CreateResetFor(d, userAccountID, ResetTTL)
+}
+
+// CreateResetFor is CreateReset with its own lifetime — an invite's.
+func CreateResetFor(d *sql.DB, userAccountID string, ttl time.Duration) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	token := hex.EncodeToString(raw)
-	expires := time.Now().UTC().Add(ResetTTL).Format(time.RFC3339)
+	expires := time.Now().UTC().Add(ttl).Format(time.RFC3339)
 	_, err := d.Exec(`INSERT INTO password_reset (token_hash, user_account_id, expires_at) VALUES (?,?,?)`,
 		HashResetToken(token), userAccountID, expires)
 	if err != nil {
@@ -89,6 +99,47 @@ func ConsumeReset(d *sql.DB, token, newPassword string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ErrWrongPassword is a change refused because the current password did not match.
+var ErrWrongPassword = errors.New("the current password is not right")
+
+// ChangePassword replaces a signed-in person's password, given their current
+// one. Every other session for the account ends — a phone left signed in
+// somewhere is exactly what a person changing their password is worried
+// about — but keepToken, the session making the change, stays signed in.
+// Any reset link still outstanding is voided too.
+func ChangePassword(d *sql.DB, userAccountID, current, next, keepToken string) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var hash string
+	if err := tx.QueryRow(`SELECT password_hash FROM user_account WHERE user_account_id = ?`, userAccountID).Scan(&hash); err != nil {
+		return err
+	}
+	if !VerifyPassword(current, hash) {
+		return ErrWrongPassword
+	}
+	newHash, err := HashPassword(next)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`UPDATE user_account SET password_hash = ? WHERE user_account_id = ?`, newHash, userAccountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE password_reset SET used_at = ? WHERE user_account_id = ? AND used_at IS NULL`, now, userAccountID); err != nil {
+		return err
+	}
+	// Sessions are stored as the hash of their token (migration 0041), so the
+	// one to keep is matched by its hash.
+	if _, err := tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ? AND token_hash <> ?`, userAccountID, hashSessionToken(keepToken)); err != nil {
 		return err
 	}
 	return tx.Commit()

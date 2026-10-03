@@ -14,14 +14,17 @@
 package notify
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 )
 
 // Channels a notification can go out over.
@@ -45,13 +48,16 @@ const (
 	TypeCreditExpiry   = "credit_expiry"
 	TypeAnnouncement   = "announcement"
 	TypePayment        = "payment_received"
+	// A class called off by the office, to the families who were due at it.
+	TypeClassCancelled = "class_cancelled"
 )
 
 // DefaultEnabled says whether a person receives this type without ever having
-// touched their settings. Everything defaults on except the low-credit nudge,
-// which the academy decided is opt-in — a parent asks for it, it is not
-// assumed.
-func DefaultEnabled(typ string) bool { return typ != TypeLowCredit }
+// touched their settings. Everything defaults on. The low-credit nudge used to
+// be opt-in, back when it fired by itself at every check-out; since 2026-09-24
+// staff send it by hand, like the expiry reminder, and a reminder the desk
+// chose to send should reach the family unless they switched it off.
+func DefaultEnabled(typ string) bool { return true }
 
 // Text is one string in both supported languages. The sender picks per
 // recipient from user_account.language_preference, so a family that reads Thai
@@ -77,6 +83,18 @@ type Message struct {
 	// of this Type whose data.dedupe matches — so a check-in row patched twice
 	// notifies once. Empty means every send is delivered.
 	DedupeKey string
+	// Details, when set, is shown as a table in the email — a receipt's
+	// amount, credits and balance. The in-app notification keeps to Body.
+	Details []Detail
+	// EmailIntro replaces Body in the email when Details already say the
+	// rest — so a receipt's figures are not written out twice.
+	EmailIntro Text
+}
+
+// Detail is one row of an email's details table, in both languages.
+type Detail struct {
+	Label Text
+	Value Text
 }
 
 // Service sends notifications. It holds the mail sender so the email channel
@@ -86,7 +104,19 @@ type Service struct {
 	db      *sql.DB
 	mail    mail.Sender
 	mailCfg mail.Config
+	// push delivers to phones. Nil leaves phone deliveries pending, which is
+	// what they were before there was a sender.
+	push Pusher
 }
+
+// Pusher hands phone notifications to a push service and says, per message,
+// whether each reached it. *push.Client is the real one.
+type Pusher interface {
+	Send(ctx context.Context, msgs []push.Message) []push.Result
+}
+
+// SetPush turns phone delivery on.
+func (s *Service) SetPush(p Pusher) { s.push = p }
 
 func New(db *sql.DB, sender mail.Sender, cfg mail.Config) *Service {
 	return &Service{db: db, mail: sender, mailCfg: cfg}
@@ -126,8 +156,12 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		return nil
 	}
 
-	type emailJob struct{ deliveryID, notifID, addr, subject, body string }
+	type emailJob struct {
+		deliveryID, notifID, addr, subject string
+		email                              mail.Email
+	}
 	var emails []emailJob
+	var phones []pushJob
 
 	for _, uid := range recipients {
 		if !prefEnabled(tx, uid, msg.Type, ChannelInApp) {
@@ -162,16 +196,19 @@ func (s *Service) Send(recipients []string, msg Message) error {
 				if s.mailCfg.Configured() && addr != "" {
 					// Queue the actual send for after commit; the row stays
 					// 'pending' until that succeeds or fails.
-					emails = append(emails, emailJob{deliveryID, notifID, addr, title, body})
+					emails = append(emails, emailJob{deliveryID, notifID, addr, title, s.emailFor(tx, uid, lang, title, body, msg)})
 				}
 				// No SMTP yet, or no address: left 'pending' so a sender that
 				// runs later can pick it up, not 'failed'.
 			case ch == ChannelWebPush || ch == ChannelMobile:
 				if !hasSubscription(tx, uid, ch) {
 					status = "skipped_by_preference"
+				} else if ch == ChannelMobile && s.push != nil {
+					// Sent after the commit, like email; the row stays
+					// 'pending' until Expo has answered.
+					phones = append(phones, pushJob{deliveryID, uid, notifID, msg.Type, title, body, msg.Data})
 				}
-				// else 'pending': a push worker delivers it out of band. The
-				// VAPID/Expo send path is deliberately not inlined here.
+				// Browser push has no sender yet, so it stays 'pending'.
 			}
 			if err := insertDelivery(tx, deliveryID, notifID, ch, status); err != nil {
 				return err
@@ -185,14 +222,91 @@ func (s *Service) Send(recipients []string, msg Message) error {
 
 	// After the lock is released: attempt the emails and record the outcome.
 	for _, j := range emails {
-		if err := s.mail.Send(j.addr, j.subject, j.body); err != nil {
+		if err := mail.Deliver(s.mail, j.addr, j.subject, j.email); err != nil {
 			log.Printf("notify: email to %s failed: %v", redactAddr(j.addr), err)
 			s.markDelivery(j.deliveryID, "failed", err.Error())
 			continue
 		}
 		s.markDelivery(j.deliveryID, "sent", "")
 	}
+	s.sendToPhones(phones)
 	return nil
+}
+
+// pushJob is one notification waiting to go to one person's phones.
+type pushJob struct {
+	deliveryID, uid, notifID, typ, title, body string
+	data                                       map[string]any
+}
+
+// sendToPhones delivers each job to every phone its person has registered, in
+// one call to the push service. A delivery is 'sent' if it reached at least
+// one of that person's phones. A phone the service says is no longer
+// registered (the app was removed) is marked failed, so it is not tried again.
+func (s *Service) sendToPhones(jobs []pushJob) {
+	if len(jobs) == 0 || s.push == nil {
+		return
+	}
+	type target struct {
+		job            int
+		subscriptionID string
+	}
+	var msgs []push.Message
+	var targets []target
+	for i, j := range jobs {
+		rows, err := s.db.Query(
+			`SELECT push_subscription_id, endpoint FROM push_subscription
+			  WHERE user_account_id = ? AND channel = ? AND failed_at IS NULL`, j.uid, ChannelMobile)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var subID, token string
+			if rows.Scan(&subID, &token) != nil || !push.IsExpoToken(token) {
+				continue
+			}
+			data := map[string]any{"notificationId": j.notifID, "type": j.typ}
+			for k, v := range j.data {
+				data[k] = v
+			}
+			msgs = append(msgs, push.Message{To: token, Title: j.title, Body: j.body, Data: data})
+			targets = append(targets, target{i, subID})
+		}
+		rows.Close()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	results := s.push.Send(ctx, msgs)
+
+	reached := make([]bool, len(jobs))
+	reason := make([]string, len(jobs))
+	for n, r := range results {
+		if n >= len(targets) {
+			break
+		}
+		t := targets[n]
+		if r.OK {
+			reached[t.job] = true
+			continue
+		}
+		reason[t.job] = r.Error
+		if r.Unregistered {
+			s.db.Exec(`UPDATE push_subscription SET failed_at = datetime('now')
+			            WHERE push_subscription_id = ?`, t.subscriptionID)
+		}
+	}
+	for i, j := range jobs {
+		switch {
+		case reached[i]:
+			s.markDelivery(j.deliveryID, "sent", "")
+		case reason[i] != "":
+			s.markDelivery(j.deliveryID, "failed", reason[i])
+		default:
+			// Registered, but no token this sender can reach.
+			s.markDelivery(j.deliveryID, "failed", "no Expo push token")
+		}
+	}
 }
 
 func (s *Service) encodeData(msg Message) any {
@@ -223,6 +337,43 @@ func (s *Service) alreadySent(tx *sql.Tx, uid, typ, key string) bool {
 		 WHERE user_account_id = ? AND type = ? AND json_extract(data,'$.dedupe') = ?`,
 		uid, typ, key).Scan(&n)
 	return n > 0
+}
+
+// Email sends one message straight to an address that has no account behind
+// it — a public tournament entrant, say — so there is no inbox or preference to
+// go through. A deployment with no mail configured sends nothing; a failure is
+// logged with the address redacted and never returned, because the caller's
+// work is already done.
+func (s *Service) Email(to, subject string, e mail.Email) {
+	// mail.New returns no sender at all when SMTP is not configured, so a
+	// sender being here is what "mail is on" means.
+	if s.mail == nil || to == "" {
+		return
+	}
+	if err := mail.Deliver(s.mail, to, subject, e); err != nil {
+		log.Printf("notify: email to %s failed: %v", redactAddr(to), err)
+	}
+}
+
+// emailFor lays a notification out as an email: addressed to the person by
+// name, the message, any details as a table, and a way into the app.
+func (s *Service) emailFor(tx *sql.Tx, uid, lang, title, body string, msg Message) mail.Email {
+	var name, role string
+	tx.QueryRow(`SELECT COALESCE(display_name,''), role FROM user_account WHERE user_account_id = ?`, uid).Scan(&name, &role)
+	if intro := msg.EmailIntro.pick(lang); intro != "" {
+		body = intro
+	}
+	e := mail.Email{Heading: title, Paragraphs: []string{body}}
+	if name != "" {
+		e.Greeting = Text{EN: "Hello " + name + ",", TH: "สวัสดีค่ะ คุณ" + name}.pick(lang)
+	}
+	for _, d := range msg.Details {
+		e.Details = append(e.Details, mail.Detail{Label: d.Label.pick(lang), Value: d.Value.pick(lang)})
+	}
+	if url := s.mailCfg.PortalFor(role); url != "" {
+		e.Button = &mail.Button{Label: Text{EN: "Open JTrax", TH: "เปิด JTrax"}.pick(lang), URL: url}
+	}
+	return e
 }
 
 func (s *Service) markDelivery(id, status, errText string) {
@@ -277,8 +428,17 @@ func prefEnabled(tx *sql.Tx, uid, typ, channel string) bool {
 // system_configuration, and only an explicit "off" turns a type off — an
 // absent key is on, so a new type works before anyone visits Settings.
 func typeEnabledForSchool(tx *sql.Tx, typ string) bool {
+	return SchoolEnabled(tx, typ)
+}
+
+// SchoolEnabled is the same switch, readable outside a send: the school-level
+// setting is the master permission, so a parent's own settings screen lists
+// only the types it allows, and a parent cannot switch on one it has off.
+func SchoolEnabled(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, typ string) bool {
 	var value string
-	err := tx.QueryRow(
+	err := q.QueryRow(
 		`SELECT config_value FROM system_configuration WHERE config_key = ?`,
 		"notify_"+typ).Scan(&value)
 	if err != nil {

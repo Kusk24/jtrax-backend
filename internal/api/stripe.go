@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +30,12 @@ const minSatang = 1000
 // accepted by accident.
 func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/payments/{id}/stripe-link", handleStripeLink(d, client, cfg))
+	// The parent portal's door to the same thing, for a tournament entry fee.
+	// Authenticated, so it sits outside the unauthenticated budget, but it
+	// spends a Stripe API call per request and opens a payment row on first
+	// ask — a tighter budget than a read deserves.
+	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/stripe-link",
+		httpx.RateLimit(20, handleRegistrationStripeLink(d, client, cfg)))
 	if client != nil && cfg.WebhookSecret != "" {
 		// Unauthenticated by nature — Stripe is not a signed-in user — so it
 		// carries the standard unauthenticated-route budget on top of the
@@ -40,7 +47,9 @@ func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg st
 	// no script and no data: the payment's state is what the webhook said, not
 	// which of these two URLs a browser happened to load.
 	mux.HandleFunc("GET /pay/done", payPage("Payment received — thank you! · ชำระเงินเรียบร้อยแล้ว ขอบคุณค่ะ"))
-	mux.HandleFunc("GET /pay/cancelled", payPage("Payment cancelled — nothing was charged. · ยกเลิกการชำระเงิน ยังไม่มีการตัดเงิน"))
+	// A tournament entry's cancel page says what happens to the unpaid place
+	// (entrynotice.go); any other payment's says nothing was charged.
+	mux.HandleFunc("GET /pay/cancelled", httpx.RateLimit(60, handlePayCancelled(d)))
 }
 
 func payPage(text string) http.HandlerFunc {
@@ -66,8 +75,9 @@ func returnBase(cfg stripepay.Config) string {
 }
 
 // handleStripeLink answers with a card-payment URL for one pending payment,
-// creating the Checkout session on first ask and returning the stored one
-// after — closing the tab must not mean a second link and a double charge.
+// at the desk's request. Who may ask is decided here; what the link is, and
+// whether one already exists, is `checkoutLink` — a parent paying their own
+// child's tournament fee reaches the same code by a different door.
 func handleStripeLink(d *sql.DB, client *stripepay.Client, cfg stripepay.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := requireIdentity(d, w, r)
@@ -82,63 +92,83 @@ func handleStripeLink(d *sql.DB, client *stripepay.Client, cfg stripepay.Config)
 			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not configured", nil)
 			return
 		}
-
-		paymentID := r.PathValue("id")
-		var status, studentName, className, existingURL string
-		var finalAmount float64
-		err := d.QueryRow(
-			`SELECT status, COALESCE(student_name,''), COALESCE(class_name,''),
-			        final_amount, COALESCE(stripe_checkout_url,'')
-			   FROM payment WHERE payment_id = ?`, paymentID).
-			Scan(&status, &studentName, &className, &finalAmount, &existingURL)
-		if err == sql.ErrNoRows {
-			httpx.Error(w, http.StatusNotFound, "no such payment", nil)
-			return
-		}
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read payment", err)
-			return
-		}
-		// Only money still owed gets a link. A Paid payment has nothing to
-		// collect and a Refunded one must never become chargeable again.
-		if status != "Pending" {
-			httpx.Error(w, http.StatusConflict, "only a pending payment can take a card link", nil)
-			return
-		}
-		if existingURL != "" {
-			httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
-			return
-		}
-		satang := int64(math.Round(finalAmount * 100))
-		if satang < minSatang {
-			httpx.Error(w, http.StatusUnprocessableEntity, "amount is below the ฿10 card minimum", nil)
-			return
-		}
-
-		name := "JCA Chess Academy"
-		if className != "" {
-			name += " — " + className
-		}
-		if studentName != "" {
-			name += " (" + studentName + ")"
-		}
-		base := returnBase(cfg)
-		session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
-			base+"/pay/done", base+"/pay/cancelled")
-		if err != nil {
-			// The Stripe error names the account; the log gets it, the client
-			// does not.
-			httpx.Error(w, http.StatusBadGateway, "could not create the payment link", err)
-			return
-		}
-		if _, err := d.Exec(
-			`UPDATE payment SET stripe_session_id = ?, stripe_checkout_url = ? WHERE payment_id = ?`,
-			session.ID, session.URL, paymentID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not store the payment link", err)
-			return
-		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"url": session.URL})
+		checkoutLink(w, r, d, client, cfg, r.PathValue("id"))
 	}
+}
+
+// checkoutLink writes the card-payment URL for one pending payment, creating
+// the Checkout session on first ask and returning the stored one after —
+// closing the tab must not mean a second link and a double charge.
+//
+// It assumes the caller has already been allowed to pay this payment. It
+// decides nothing about authorization and must never be reached without that
+// check.
+func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, paymentID string) {
+	var status, studentName, className, existingURL string
+	var finalAmount float64
+	err := d.QueryRow(
+		`SELECT status, COALESCE(student_name,''), COALESCE(class_name,''),
+		        final_amount, COALESCE(stripe_checkout_url,'')
+		   FROM payment WHERE payment_id = ?`, paymentID).
+		Scan(&status, &studentName, &className, &finalAmount, &existingURL)
+	if err == sql.ErrNoRows {
+		httpx.Error(w, http.StatusNotFound, "no such payment", nil)
+		return
+	}
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read payment", err)
+		return
+	}
+	// Only money still owed gets a link. A Paid payment has nothing to
+	// collect and a Refunded one must never become chargeable again.
+	if status != "Pending" {
+		httpx.Error(w, http.StatusConflict, "only a pending payment can take a card link", nil)
+		return
+	}
+	if existingURL != "" {
+		httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
+		return
+	}
+	satang := int64(math.Round(finalAmount * 100))
+	if satang < minSatang {
+		httpx.Error(w, http.StatusUnprocessableEntity, "amount is below the ฿10 card minimum", nil)
+		return
+	}
+
+	name := "JCA Chess Academy"
+	if className != "" {
+		name += " — " + className
+	}
+	if studentName != "" {
+		name += " (" + studentName + ")"
+	}
+	// A public entrant gave an email on the form, so it is filled in for them
+	// on Stripe's page. Nothing else is known about them to pass.
+	var email, entry string
+	d.QueryRow(`SELECT COALESCE(r.contact_email,''), r.tournament_registration_id FROM payment p
+	              JOIN tournament_registration r
+	                ON r.tournament_registration_id = p.tournament_registration_id
+	             WHERE p.payment_id = ?`, paymentID).Scan(&email, &entry)
+	base := returnBase(cfg)
+	cancelled := base + "/pay/cancelled"
+	if entry != "" {
+		cancelled += "?entry=" + url.QueryEscape(entry)
+	}
+	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
+		base+"/pay/done", cancelled, email)
+	if err != nil {
+		// The Stripe error names the account; the log gets it, the client
+		// does not.
+		httpx.Error(w, http.StatusBadGateway, "could not create the payment link", err)
+		return
+	}
+	if _, err := d.Exec(
+		`UPDATE payment SET stripe_session_id = ?, stripe_checkout_url = ? WHERE payment_id = ?`,
+		session.ID, session.URL, paymentID); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not store the payment link", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"url": session.URL})
 }
 
 // stripeEvent is the slice of a webhook event this server reads.
@@ -156,7 +186,7 @@ type stripeEvent struct {
 }
 
 // handleStripeWebhook marks a payment Paid — and releases its credits — when
-// Stripe reports its Checkout session completed.
+// Stripe reports the money for its Checkout session collected.
 //
 // Everything here assumes the caller is hostile until the signature says
 // otherwise, and assumes Stripe will deliver the same event more than once,
@@ -181,10 +211,16 @@ func handleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.Han
 			httpx.Error(w, http.StatusBadRequest, "malformed event", nil)
 			return
 		}
-		// Everything else Stripe can send — expiries, refbacks, the async
-		// events of methods the academy does not take — is acknowledged and
-		// dropped. Answering non-200 would just make Stripe resend it.
-		if ev.Type != "checkout.session.completed" || ev.Data.Object.PaymentStatus != "paid" {
+		// Two events can settle a payment. A card pays at once, so its
+		// `checkout.session.completed` already says "paid". PromptPay does not:
+		// the session completes "unpaid" when the QR is shown, and the money is
+		// confirmed later by `checkout.session.async_payment_succeeded`. Only
+		// the first was read, so every PromptPay payment stayed Pending.
+		// Everything else — expiries, failures, an "unpaid" completion — is
+		// acknowledged and dropped; answering non-200 would make Stripe resend.
+		settles := ev.Type == "checkout.session.completed" ||
+			ev.Type == "checkout.session.async_payment_succeeded"
+		if !settles || ev.Data.Object.PaymentStatus != "paid" {
 			httpx.JSON(w, http.StatusOK, map[string]string{"received": "ignored"})
 			return
 		}

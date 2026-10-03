@@ -131,7 +131,7 @@ func TestEnsureStaffIsIdempotentAndResetsThePassword(t *testing.T) {
 	if err := d.QueryRow(`SELECT user_account_id FROM user_account WHERE email = ?`, "head@jca.ac.th").Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Exec(`INSERT INTO auth_session (token, user_account_id, expires_at) VALUES (?,?,?)`,
+	if _, err := d.Exec(`INSERT INTO auth_session (token_hash, user_account_id, expires_at) VALUES (?,?,?)`,
 		"tok", userID, "2099-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}

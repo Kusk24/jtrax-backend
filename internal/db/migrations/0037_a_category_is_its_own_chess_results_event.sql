@@ -1,0 +1,17 @@
+-- 0037 — each age group is its own chess-results.com event.
+--
+-- 0015 put chess_results_id on the tournament, on the assumption that one of
+-- the academy's tournaments is one event over there. It is not. A JCA chessfest
+-- runs OPEN, U18, U12, U10 and U08 on the same day in the same hall, and the
+-- arbiter publishes each as a separate tournament with its own link, its own
+-- pairings and its own ranked list.
+--
+-- Under the old assumption the console could follow exactly one of them, and
+-- the other four had nowhere to go — so "the results" for a five-group event
+-- meant the results for whichever group somebody pasted first.
+--
+-- The tournament's own column stays. Some events really are one list: a club
+-- night, or a single-section rapid. A category link overrides it where present,
+-- which also means nothing has to be migrated — an event linked as a whole
+-- keeps working exactly as it did.
+ALTER TABLE tournament_category ADD COLUMN chess_results_id INTEGER;

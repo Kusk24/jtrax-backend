@@ -200,3 +200,71 @@ func TestChallengeListIsScopedToTheCaller(t *testing.T) {
 	}
 	_ = uri
 }
+
+// A game that has ended is not "ready": once somebody resigns, the accepted
+// challenge leaves both players' lists. It used to stay, so the Challenge
+// screen still offered to open a finished board.
+func TestAFinishedChallengeGameLeavesTheList(t *testing.T) {
+	penny, uri, _, uriID := twoStudents(t)
+	_, sent, _ := penny.do("POST", "/api/v1/challenges", map[string]any{"studentId": uriID})
+	_, acc, _ := uri.do("POST", "/api/v1/challenges/"+sent["challengeId"].(string)+"/accept", nil)
+	roomID := acc["gameRoomId"].(string)
+
+	listed := func(c *client) int {
+		_, out, _ := c.do("GET", "/api/v1/challenges", nil)
+		list, _ := out["challenges"].([]any)
+		return len(list)
+	}
+	if listed(penny) != 1 || listed(uri) != 1 {
+		t.Fatalf("while the game is on, both players should see it")
+	}
+
+	if status, out, _ := penny.do("POST", "/api/v1/game-rooms/"+roomID+"/resign", nil); status != 200 {
+		t.Fatalf("resign: %d (%v)", status, out)
+	}
+	if n, m := listed(penny), listed(uri); n != 0 || m != 0 {
+		t.Fatalf("after the resignation the game is still listed: penny %d, uri %d", n, m)
+	}
+
+	// And the pair can play again.
+	if status, _, _ := uri.do("POST", "/api/v1/challenges", map[string]any{"studentId": "stu_penny"}); status != 201 {
+		t.Fatalf("a new challenge after a finished game: %d", status)
+	}
+}
+
+// A "no" reaches the child who asked: the declined challenge stays on their
+// list, marked Declined, until they dismiss it. The one who declined never
+// sees it again.
+func TestADeclineIsShownToTheChallengerUntilDismissed(t *testing.T) {
+	penny, uri, _, uriID := twoStudents(t)
+	_, sent, _ := penny.do("POST", "/api/v1/challenges", map[string]any{"studentId": uriID})
+	cid := sent["challengeId"].(string)
+	uri.do("POST", "/api/v1/challenges/"+cid+"/decline", nil)
+
+	list := func(c *client) []any {
+		_, out, _ := c.do("GET", "/api/v1/challenges", nil)
+		l, _ := out["challenges"].([]any)
+		return l
+	}
+	got := list(penny)
+	if len(got) != 1 || got[0].(map[string]any)["status"] != "Declined" {
+		t.Fatalf("the challenger should see the decline, got %v", got)
+	}
+	if n := len(list(uri)); n != 0 {
+		t.Fatalf("the player who declined still sees %d challenges", n)
+	}
+
+	// Only the challenger can dismiss it.
+	if status, _, _ := uri.do("POST", "/api/v1/challenges/"+cid+"/dismiss", nil); status != 404 {
+		t.Fatalf("the other player dismissing: want 404, got %d", status)
+	}
+	if status, _, _ := penny.do("POST", "/api/v1/challenges/"+cid+"/dismiss", nil); status != 200 {
+		t.Fatalf("dismiss: want 200, got %d", status)
+	}
+	if n := len(list(penny)); n != 0 {
+		t.Fatalf("after dismissing, the decline is still listed (%d)", n)
+	}
+	if status, _, _ := penny.do("POST", "/api/v1/challenges/"+cid+"/dismiss", nil); status != 404 {
+		t.Fatalf("dismissing twice: want 404, got %d", status)
+	}
+}

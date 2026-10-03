@@ -9,6 +9,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
+	"github.com/Kusk24/jtrax-backend/internal/push"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -52,25 +53,51 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// each accepted call sends mail to somebody else's inbox.
 	mux.HandleFunc("POST /api/v1/auth/forgot-password", httpx.RateLimit(60, handleForgotPassword(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/reset-password", httpx.RateLimit(10, handleResetPassword(d)))
+	mux.HandleFunc("POST /api/v1/auth/change-password", httpx.RateLimit(30, handleChangePassword(d)))
+	// Staff only: a new parent chooses their own password from this link.
+	mux.HandleFunc("POST /api/v1/user-accounts/{id}/invite", httpx.RateLimit(60, handleInvite(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/logout", handleLogout(d))
 	mux.HandleFunc("GET /api/v1/auth/me", handleMe(d))
 	mux.HandleFunc("PATCH /api/v1/auth/me", handleUpdateMe(d))
+
+	// Built early: the desk's tournament fee and the notification endpoints
+	// below both send through it.
+	notifier := notify.New(d, sender, mailCfg)
+	// Phones get pushes through Expo, which needs no key to be switched on.
+	notifier.SetPush(push.New(push.FromEnv()))
 
 	mountUserAccounts(mux, d)
 	relay := mountGameRooms(mux, d)
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)
-	mountFreePlay(mux, d)
+	mountPuzzleBank(mux, d)
 	mountPractice(mux, d)
+	mountProgress(mux, d)
 	mountHistory(mux, d)
 	mountLine(mux, d)
 	mountLichess(mux, d)
 	// Chess-results first: the public results route refreshes through its deps.
 	crDeps := mountChessResults(mux, d)
 	mountTournamentResults(mux, d, crDeps)
-	mountPublicRegistration(mux, d)
+	// Read here rather than beside mountStripe: the public form needs to know
+	// whether card payment is on, to offer it and to email the pay link.
+	stripeCfg := stripepay.FromEnv()
+	stripeClient := stripepay.New(stripeCfg)
+	mountPublicRegistration(mux, &publicEntryDeps{
+		db: d, sender: sender, mail: mailCfg, stripe: stripeClient, stripeCfg: stripeCfg,
+	})
+	mountArrival(mux, d, mailCfg, sender)
+	mountDashboardActivity(mux, d)
 	mountTournamentRegulation(mux, d)
+	mountTournamentBanner(mux, d)
+	mountAcademyContact(mux, d)
+	mountTournamentDraft(mux, d, stripeClient != nil)
 	mountRegistrationQueue(mux, d)
+	// A parent's own entry, priced by the server, and the desk recording a fee
+	// paid at the counter. Both are tournament-registration writes the generic
+	// resource must not make: one decides a price, the other asserts money.
+	mountTournamentEntry(mux, d)
+	mountDeskPayment(mux, d, notifier)
 	// Before the registry: `/students/{id}/cascade` is a more specific pattern
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
@@ -78,18 +105,20 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Reads a photographed paper form and hands the fields back for staff to
 	// confirm. Writes nothing, so it sits outside the registry.
 	mountRegistrationScan(mux, d, scanner)
+	mountIDCardScan(mux, d, scanner)
+	mountOCRSettings(mux, d, scanner)
 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a
 	// new announcement turns into a notification through the existing writes.
-	notifier := notify.New(d, sender, mailCfg)
 	mountNotifications(mux, d, notifier)
+	// Calling a class off refunds it and tells the families, in one request.
+	mountClassCancel(mux, d, notifier)
 	// Card payments: a checkout link for a pending payment, and the webhook
 	// that settles it — and, through the notifier, sends the receipt. Off —
 	// including the webhook route — until the Stripe keys are in the
 	// environment.
-	stripeCfg := stripepay.FromEnv()
-	mountStripe(mux, d, stripepay.New(stripeCfg), stripeCfg, notifier)
+	mountStripe(mux, d, stripeClient, stripeCfg, notifier)
 	resources := Registry()
 	attachNotificationHooks(resources, d, notifier)
 	for _, rs := range resources {

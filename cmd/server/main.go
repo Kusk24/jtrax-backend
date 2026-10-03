@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -14,10 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
 func main() {
@@ -47,13 +50,45 @@ func main() {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
 	}
 	handler := httpx.CORS(origins, api.NewHandler(d))
+	// An unpaid entry's early-bird price and place lapse on their dates
+	// (internal/api/entryrules.go); this applies them through the day.
+	api.StartEntrySweeper(context.Background(), d)
+	mailCfg := mail.FromEnv()
+	api.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 	log.Printf("jtrax-backend listening on :%s (db %s)", port, db.Redact(dsn))
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	log.Fatal(newHTTPServer(":"+port, handler).ListenAndServe())
+}
+
+// readHeaderTimeout is how long a connection may take to send its request
+// line and headers. Real clients send them in one packet; ten seconds is
+// generous for a phone on a bad signal.
+const readHeaderTimeout = 10 * time.Second
+
+// newHTTPServer is the server with the limits a public API needs.
+// http.ListenAndServe has none: a client that sends its headers a byte at a
+// time holds a connection open for as long as it likes, and a few hundred of
+// them tie the server up ("slowloris").
+//
+// Only the header read and idle keep-alive time are limited. ReadTimeout and
+// WriteTimeout are deliberately left at zero: they bound the whole request,
+// and the live game board and the LINE inbox are event streams that stay open
+// for as long as somebody is watching — a write deadline would cut them off
+// mid-game. Request bodies are already capped per handler (MaxBytesReader),
+// and nginx buffers a body before it passes it on, so a slow upload never
+// reaches this process.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // seed loads the development dataset. A local file database seeds itself so a
@@ -114,7 +149,7 @@ func importRoster(d *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	written, err := db.ImportRoster(d, roster, password, time.Now())
+	written, err := db.ImportRoster(d, roster, password, academytime.Now())
 	if err != nil {
 		return err
 	}

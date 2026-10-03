@@ -83,8 +83,13 @@ type Session struct {
 // CreateCheckoutSession opens a hosted card-payment page for one payment row.
 // The amount is in satang — Stripe takes THB in its minor unit — and the
 // payment id rides in the metadata so the webhook can find its way back.
-func (c *Client) CreateCheckoutSession(ctx context.Context, paymentID, productName string, amountSatang int64, successURL, cancelURL string) (Session, error) {
+// customerEmail, when known, is filled in on the page so the payer does not
+// type it twice; empty leaves the box for them.
+func (c *Client) CreateCheckoutSession(ctx context.Context, paymentID, productName string, amountSatang int64, successURL, cancelURL, customerEmail string) (Session, error) {
 	form := url.Values{}
+	if customerEmail != "" {
+		form.Set("customer_email", customerEmail)
+	}
 	form.Set("mode", "payment")
 	form.Set("client_reference_id", paymentID)
 	form.Set("metadata[payment_id]", paymentID)

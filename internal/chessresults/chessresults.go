@@ -51,6 +51,16 @@ type Row struct {
 	Rating     int
 	Points     float64
 	Club       string
+	// Type is Swiss-Manager's "Typ" column: the category a player is entered
+	// in — U14, G14, OPEN. Empty on the many events that do not use it.
+	//
+	// This is the whole reason an academy can publish an age-group event under
+	// one link. Swiss-Manager can either split the groups into separate
+	// tournaments, each with its own tnr number, or keep them in one file and
+	// mark each player's group in this column. Arbiters do both, and a console
+	// that only understood the first would show "WCIB CHESS CHAMPIONSHIP 2025
+	// [U14 + G14]" as one undivided list of twenty children.
+	Type string
 }
 
 // Tournament is what one fetch learns about an event.
@@ -178,9 +188,19 @@ func (c *Client) Fetch(id int) (*Tournament, error) {
 }
 
 func (c *Client) get(u string) (string, error) {
+	page, _, err := c.getFinal(u)
+	return page, err
+}
+
+// getFinal is get, also returning the address the page was finally served
+// from. chess-results.com redirects every visitor to one of its servers
+// (S2.chess-results.com, S3…), and a form on the page has to be posted back
+// there: posting to the first address is redirected again, and a redirected
+// POST arrives as a plain GET with the form lost.
+func (c *Client) getFinal(u string) (string, string, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// A plain browser agent. The site's robots rules single out scrapers that
 	// hammer it; a school checking one tournament a few times a day is the
@@ -188,17 +208,17 @@ func (c *Client) get(u string) (string, error) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; JTrax school portal)")
 	res, err := c.http().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("chessresults: unreachable: %w", err)
+		return "", "", fmt.Errorf("chessresults: unreachable: %w", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("chessresults: status %d", res.StatusCode)
+		return "", "", fmt.Errorf("chessresults: status %d", res.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, maxPageBytes))
 	if err != nil {
-		return "", fmt.Errorf("chessresults: read: %w", err)
+		return "", "", fmt.Errorf("chessresults: read: %w", err)
 	}
-	return string(raw), nil
+	return string(raw), res.Request.URL.String(), nil
 }
 
 /* ---- parsing ----
@@ -279,6 +299,13 @@ func parseRanking(table string) ([]Row, error) {
 	fideCol := colIndex(cols, "fideid")
 	rtgCol := colIndex(cols, "rtg")
 	ptsCol := colIndex(cols, "pts.")
+	// "Typ" in every language the site serves the ranking in — the header is
+	// not translated, but an arbiter can rename the column in Swiss-Manager,
+	// so "group" is accepted as the other name it comes back as.
+	typeCol := colIndex(cols, "typ")
+	if typeCol < 0 {
+		typeCol = colIndex(cols, "group")
+	}
 
 	rows := trPattern.FindAllStringSubmatch(table, -1)
 	out := []Row{}
@@ -312,6 +339,7 @@ func parseRanking(table string) ([]Row, error) {
 			FideID:     cell(texts, fideCol),
 			Rating:     atoiSafe(cell(texts, rtgCol)),
 			Points:     decimal(cell(texts, ptsCol)),
+			Type:       cell(texts, typeCol),
 		})
 	}
 	if len(out) == 0 {

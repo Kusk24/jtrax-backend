@@ -74,7 +74,7 @@ func TestCreateCheckoutSession(t *testing.T) {
 
 	c := New(Config{SecretKey: "sk_test_x", BaseURL: stub.URL})
 	s, err := c.CreateCheckoutSession(context.Background(), "pay_9", "JCA — Beginner (Penny)", 450000,
-		"https://api/pay/done", "https://api/pay/cancelled")
+		"https://api/pay/done", "https://api/pay/cancelled", "parent@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +89,7 @@ func TestCreateCheckoutSession(t *testing.T) {
 		"metadata%5Bpayment_id%5D=pay_9",
 		"unit_amount%5D=450000",
 		"currency%5D=thb",
+		"customer_email=parent%40example.com",
 	} {
 		if !strings.Contains(gotBody, want) {
 			t.Fatalf("request body missing %q:\n%s", want, gotBody)

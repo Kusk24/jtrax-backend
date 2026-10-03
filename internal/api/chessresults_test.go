@@ -25,14 +25,22 @@ func newCRStub(t *testing.T) *crStub {
 	s.stage.Store("Rank after Round 4")
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.visits.Add(1)
+		// The details view: the event's sections, the way the real site lists
+		// them — the others linked, the one being viewed in bold.
+		if r.URL.Query().Get("turdet") == "YES" {
+			fmt.Fprint(w, `<h2>Bangkok Open 2026 [U14 + G14]</h2>
+			<table><tr><td class="CR">Number of rounds</td><td class="CR">7</td></tr></table>
+			<table><tr valign="top"><td class="CRnowrap b">Tournament selection</td><td class="CR"><a href="https://chess-results.com/tnr123455.aspx?lan=1&amp;art=0&amp;turdet=YES">U12 + G12</a>, <i><b>U14 + G14</b></i>, <a href="https://chess-results.com/tnr123457.aspx?lan=1&amp;art=0&amp;turdet=YES">U16</a></td></tr></table>`)
+			return
+		}
 		switch r.URL.Query().Get("art") {
 		case "1":
 			fmt.Fprintf(w, `<h2>Bangkok Open 2026</h2><h2>%s</h2>
 			<table class="CRs1">
-			<tr><th>Rk.</th><th>Name</th><th>FED</th><th>Rtg</th><th>Pts.</th></tr>
-			<tr><td>1</td><td>Somchai, Niran</td><td>THA</td><td>1650</td><td>4</td></tr>
-			<tr><td>2</td><td>Penny</td><td>THA</td><td>1200</td><td>3,5</td></tr>
-			<tr><td>3</td><td>Stranger, Alice</td><td>SGP</td><td>1400</td><td>2</td></tr>
+			<tr><th>Rk.</th><th>Name</th><th>Typ</th><th>FED</th><th>Rtg</th><th>Pts.</th></tr>
+			<tr><td>1</td><td>Somchai, Niran</td><td>U14</td><td>THA</td><td>1650</td><td>4</td></tr>
+			<tr><td>2</td><td>Penny</td><td>G14</td><td>THA</td><td>1200</td><td>3,5</td></tr>
+			<tr><td>3</td><td>Stranger, Alice</td><td>U14</td><td>SGP</td><td>1400</td><td>2</td></tr>
 			</table>`, s.stage.Load())
 		case "3":
 			fmt.Fprint(w, `<h2>Bangkok Open 2026</h2><h2>Alphabetical list</h2>

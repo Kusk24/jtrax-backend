@@ -134,3 +134,12 @@ func TestGeminiHandlesNoCandidate(t *testing.T) {
 		t.Error("an empty candidate list should be an error")
 	}
 }
+
+// A key made today gets a 404 for the 2.5 models, so a default of one of them
+// is a scanner that fails on every new deployment.
+func TestGeminiDefaultsToAModelNewKeysCanUse(t *testing.T) {
+	g := NewGemini("test-key", "")
+	if g.Name() != "gemini/gemini-3.8-flash" {
+		t.Fatalf("default model: got %s", g.Name())
+	}
+}

@@ -2,15 +2,28 @@
 //
 // Everything here is unauthenticated, which makes it the widest door in the
 // product and the only place where a row is created by somebody the academy has
-// never met. Four things hold that door:
+// never met. Three things hold that door:
 //
 //   - a tournament is closed until an organiser opens it (public_registration),
 //     exactly like results_public;
-//   - every submission lands as Pending and a member of staff approves it, so
-//     nothing a stranger types becomes a participant on its own;
 //   - the deadline and the capacity are enforced inside the write transaction,
 //     not read beforehand and hoped about;
 //   - it is rate-limited, and one email may hold one live place per event.
+//
+// # The fourth used to be approval, and is gone on purpose
+//
+// A submission used to land as Pending and wait for a member of staff, so
+// nothing a stranger typed became a participant on its own. The academy takes
+// every entry, so that queue was a step that only ever ended one way — and an
+// unworked queue is worse than none, because a place nobody has confirmed is
+// indistinguishable from a place nobody has looked at.
+//
+// What it cost is real and worth naming: a stranger's submission is now a
+// participant immediately. What replaces it is validation at the door rather
+// than judgement behind it — the category must belong to this event, the age
+// rule in the category's name is enforced against the given date of birth, and
+// a claimed student discount must name a student that exists. The desk's
+// remaining power is to correct a fee or withdraw an entry, not to admit one.
 //
 // # Why the discount is claimed rather than detected
 //
@@ -18,16 +31,15 @@
 // that claim alone. The server does look their email up against the academy's
 // own records, but it never says so in the reply: if the discount appeared only
 // for addresses that matched, this endpoint would be a way to test whether a
-// given child is a pupil here, one guess at a time. The match is passed to the
-// approval queue instead, where it belongs — staff see "claimed, and we found a
-// matching student" or "claimed, no match" and decide.
+// given child is a pupil here, one guess at a time. The match is surfaced only
+// in the staff roster, where "claimed, and we found a matching student" versus
+// "claimed, no match" is a thing the desk can act on afterwards.
 package api
 
 import (
 	"database/sql"
 	"errors"
 	"io"
-	"math"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -35,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -63,39 +76,48 @@ const publicTournamentSelect = `
 	       COALESCE(t.regular_fee, t.early_bird_fee, 0),
 	       COALESCE(t.early_bird_fee, 0), COALESCE(t.early_bird_deadline, ''),
 	       EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = t.tournament_id),
-	       t.student_discount_pct, t.max_participants,
+	       EXISTS(SELECT 1 FROM tournament_banner b WHERE b.tournament_id = t.tournament_id),
+	       t.student_discount_pct, t.student_gets_discount, t.student_gets_early_bird,
+	       t.max_participants,
 	       (SELECT COUNT(*) FROM tournament_registration r
 	         WHERE r.tournament_id = t.tournament_id
 	           AND r.status IN ('Pending','Approved'))
 	FROM tournament t`
 
 type publicTournament struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`
-	StartDate    string  `json:"startDate"`
-	EndDate      string  `json:"endDate"`
-	VenueName    string  `json:"venueName"`
-	VenueAddress string  `json:"venueAddress"`
-	VenueMapURL  string  `json:"venueMapUrl,omitempty"`
-	Deadline     string  `json:"registrationDeadline"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	StartDate    string `json:"startDate"`
+	EndDate      string `json:"endDate"`
+	VenueName    string `json:"venueName"`
+	VenueAddress string `json:"venueAddress"`
+	VenueMapURL  string `json:"venueMapUrl,omitempty"`
+	Deadline     string `json:"registrationDeadline"`
 	/* Fee is what an outside participant pays if they register right now —
 	   the early-bird price while its window is open, the regular price after.
-	   Students pay StudentFee (the discount off the regular price) either
-	   way: the two discounts are for different people and never stack. */
+	   Students pay StudentFee, by whichever reductions the organiser chose
+	   for this event (see pricing.go). */
 	Fee             float64 `json:"fee"`
 	RegularFee      float64 `json:"regularFee"`
 	EarlyBirdFee    float64 `json:"earlyBirdFee,omitempty"`
 	EarlyBirdUntil  string  `json:"earlyBirdUntil,omitempty"`
 	EarlyBirdActive bool    `json:"earlyBirdActive"`
 	HasRegulation   bool    `json:"hasRegulation"`
-	StudentFee      float64 `json:"studentFee"`
+	// An uploaded banner. Without one the page draws its own from the name,
+	// the date and the venue.
+	HasBanner    bool    `json:"hasBanner"`
+	StudentFee   float64 `json:"studentFee"`
 	DiscountPct  int     `json:"studentDiscountPct"`
 	Capacity     *int    `json:"capacity"`
-	Taken        int     `json:"taken"`
-	SpotsLeft    *int    `json:"spotsLeft"`
-	Open         bool    `json:"open"`
-	ClosedReason string  `json:"closedReason,omitempty"`
+	price        tournamentPrice
+	Taken        int    `json:"taken"`
+	SpotsLeft    *int   `json:"spotsLeft"`
+	Open         bool   `json:"open"`
+	ClosedReason string `json:"closedReason,omitempty"`
+	/* Whether "Pay & Register" can send the family to Stripe. Without it the
+	   page registers and says to pay at the desk. */
+	CardPayments bool `json:"cardPayments"`
 }
 
 // scanPublicTournament reads one row of publicTournamentSelect and works out
@@ -105,15 +127,16 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	var capacity sql.NullInt64
 	if err := sc.Scan(&t.ID, &t.Name, &t.Status, &t.StartDate, &t.EndDate,
 		&t.VenueName, &t.VenueAddress, &t.VenueMapURL, &t.Deadline, &t.RegularFee,
-		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation,
-		&t.DiscountPct, &capacity, &t.Taken); err != nil {
+		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation, &t.HasBanner,
+		&t.DiscountPct, &t.price.StudentDiscount, &t.price.StudentEarlyBird,
+		&capacity, &t.Taken); err != nil {
 		return nil, err
 	}
-	t.EarlyBirdActive = t.EarlyBirdFee > 0 && t.EarlyBirdUntil != "" && todayISO() <= t.EarlyBirdUntil
-	t.Fee = t.RegularFee
-	if t.EarlyBirdActive {
-		t.Fee = t.EarlyBirdFee
-	}
+	t.price.Regular, t.price.EarlyBird = t.RegularFee, t.EarlyBirdFee
+	t.price.EarlyBirdUntil, t.price.DiscountPct = t.EarlyBirdUntil, t.DiscountPct
+	day := today()
+	t.EarlyBirdActive = t.price.earlyBirdOpen(day)
+	t.Fee = t.price.OutsiderFee(day)
 	if capacity.Valid {
 		n := int(capacity.Int64)
 		t.Capacity = &n
@@ -123,25 +146,16 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 		}
 		t.SpotsLeft = &left
 	}
-	t.StudentFee = discounted(t.RegularFee, t.DiscountPct)
+	t.StudentFee = t.price.StudentFee(day)
 	t.Open, t.ClosedReason = registrationOpen(t.Deadline, t.Capacity, t.Taken)
 	return &t, nil
-}
-
-// discounted applies a percentage off, rounded to the nearest whole unit of
-// currency. Fees here are whole baht; half a baht is not a price anybody quotes.
-func discounted(fee float64, pct int) float64 {
-	if pct <= 0 || fee <= 0 {
-		return fee
-	}
-	return math.Round(fee * float64(100-pct) / 100)
 }
 
 // registrationOpen reports whether entries are still being taken, and if not,
 // which of the two reasons applies. The reason is shown to the public, so it is
 // a fact about the event rather than about anybody who registered.
 func registrationOpen(deadline string, capacity *int, taken int) (bool, string) {
-	if deadline != "" && todayISO() > deadline {
+	if deadline != "" && today() > deadline {
 		return false, "deadline"
 	}
 	if capacity != nil && taken >= *capacity {
@@ -150,16 +164,11 @@ func registrationOpen(deadline string, capacity *int, taken int) (bool, string) 
 	return true, ""
 }
 
-// todayISO is the date the deadline is compared against. Dates in this schema
-// are stored as plain YYYY-MM-DD with no zone, so the comparison is a string
-// one and the boundary is local midnight — the same day the poster says.
-func todayISO() string { return time.Now().Format("2006-01-02") }
-
 // handlePublicTournamentList serves every event currently open to the public.
 func handlePublicTournamentList(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rows, err := d.Query(publicTournamentSelect + `
-			WHERE t.public_registration = 1
+			WHERE t.public_registration = 1 AND t.draft = 0
 			  AND t.tournament_status <> 'Completed'
 			ORDER BY COALESCE(t.start_date,'9999') ASC, t.name ASC`)
 		if err != nil {
@@ -185,11 +194,11 @@ func handlePublicTournamentList(d *sql.DB) http.HandlerFunc {
 }
 
 // handlePublicTournament serves one open event, with its categories.
-func handlePublicTournament(d *sql.DB) http.HandlerFunc {
+func handlePublicTournament(d *sql.DB, cardPayments bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		row := d.QueryRow(publicTournamentSelect+`
-			WHERE t.tournament_id = ? AND t.public_registration = 1`, id)
+			WHERE t.tournament_id = ? AND t.public_registration = 1 AND t.draft = 0`, id)
 		t, err := scanPublicTournament(row)
 		if errors.Is(err, sql.ErrNoRows) {
 			// A closed event is indistinguishable from one that does not
@@ -206,6 +215,7 @@ func handlePublicTournament(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load tournament", err)
 			return
 		}
+		t.CardPayments = cardPayments
 		httpx.JSON(w, http.StatusOK, map[string]any{"tournament": t, "categories": cats})
 	}
 }
@@ -245,6 +255,30 @@ type registerInput struct {
 	/* Required when IsStudent: the discount is only quoted against a student
 	   id the academy can actually find. */
 	StudentID string `json:"studentId"`
+
+	/* Called across the hall and printed on the pairing card. Every Thai
+	   junior event uses one. */
+	Nickname string `json:"nickname"`
+	/* The form asks for an age, not a date of birth, so it is stored as given
+	   rather than derived. The date of birth is what the ID card says; the
+	   interesting case for an age-limited group is when the two disagree. */
+	Age int `json:"age"`
+	/* The five numbered conditions on the entry form — no refunds, the
+	   organiser may change the schedule, the organiser is not liable. Recorded
+	   rather than assumed: "did this person agree not to be refunded" is
+	   exactly the question somebody asks three weeks later. */
+	AcceptTerms bool `json:"acceptTerms"`
+
+	/* The player's name in Thai script, as a Thai ID card prints it. Optional:
+	   a player entering on a passport has none. */
+	NameTh string `json:"nameTh"`
+	// "thai-id" or "passport" — which document the family said they hold.
+	DocumentType string `json:"documentType"`
+	/* What the ID card scan read, kept beside what was finally submitted so
+	   staff can check an age group against the document. Empty when the
+	   family did not scan. */
+	ScannedName        string `json:"scannedName"`
+	ScannedDateOfBirth string `json:"scannedDateOfBirth"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -256,6 +290,10 @@ func (in *registerInput) validate() string {
 	in.DateOfBirth = strings.TrimSpace(in.DateOfBirth)
 	in.CategoryID = strings.TrimSpace(in.CategoryID)
 	in.StudentID = strings.TrimSpace(in.StudentID)
+	in.Nickname = strings.TrimSpace(in.Nickname)
+	in.NameTh = strings.TrimSpace(in.NameTh)
+	in.ScannedName = strings.TrimSpace(in.ScannedName)
+	in.ScannedDateOfBirth = strings.TrimSpace(in.ScannedDateOfBirth)
 
 	switch {
 	case len([]rune(in.Name)) < 2 || len([]rune(in.Name)) > maxNameLen:
@@ -278,6 +316,34 @@ func (in *registerInput) validate() string {
 	if in.IsStudent && (in.StudentID == "" || len(in.StudentID) > 40) {
 		return "please give the JCA student ID so we can apply the discount"
 	}
+	if len([]rune(in.Nickname)) > maxNameLen {
+		return "that nickname is too long"
+	}
+	if len([]rune(in.NameTh)) > maxNameLen || len([]rune(in.ScannedName)) > maxNameLen {
+		return "that name is too long"
+	}
+	switch in.DocumentType {
+	case "", "thai-id", "passport":
+	default:
+		return "that document type is not one we know"
+	}
+	if in.ScannedDateOfBirth != "" {
+		if _, err := time.Parse("2006-01-02", in.ScannedDateOfBirth); err != nil {
+			in.ScannedDateOfBirth = "" // a misread is not the entrant's mistake
+		}
+	}
+	/* Refused rather than defaulted. An entry recorded as having accepted
+	   terms nobody ticked is worse than no record at all — it is a false one,
+	   and the record only has value if it can only mean yes. */
+	if !in.AcceptTerms {
+		return "please accept the terms and conditions to enter"
+	}
+	/* 0 is "not given", which is allowed — the age limit below is enforced on
+	   the date of birth. A negative or implausible age is a typo worth
+	   catching here, where the message can say so. */
+	if in.Age < 0 || in.Age > 120 {
+		return "that age does not look right"
+	}
 	return ""
 }
 
@@ -295,14 +361,11 @@ func categoryAgeLimit(name string) int {
 	return n
 }
 
-// ageOn is completed years on a date — the tournament's start day, because
-// that is the day the age matters.
-func ageOn(dob, on time.Time) int {
-	years := on.Year() - dob.Year()
-	if on.YearDay() < dob.YearDay() {
-		years--
-	}
-	return years
+// bornInTime reports whether somebody born on dob may play an under-`limit`
+// category at an event held in `year`: born in year-limit or later. "U10" in
+// 2026 is born on or after 1 January 2016.
+func bornInTime(dob time.Time, year, limit int) bool {
+	return dob.Year() >= year-limit
 }
 
 // handlePublicRegister takes one entry.
@@ -312,7 +375,8 @@ func ageOn(dob, on time.Time) int {
 // already holds a place — are made inside it. Reading the count first and
 // inserting afterwards would let two people take the last seat at once, which
 // on the day means turning a child away at the door.
-func handlePublicRegister(d *sql.DB) http.HandlerFunc {
+func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
+	d := deps.db
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
 
@@ -321,14 +385,25 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusRequestEntityTooLarge, "the file is too large (10 MB max)", nil)
 			return
 		}
+		// age arrives as a form string like every other field here; an empty
+		// or unparsable one is 0, "not given", which is exactly what the old
+		// JSON decode produced for an absent field.
+		age, _ := strconv.Atoi(r.FormValue("age"))
 		in := registerInput{
-			Name:        r.FormValue("name"),
-			Email:       r.FormValue("email"),
-			Phone:       r.FormValue("phone"),
-			DateOfBirth: r.FormValue("dateOfBirth"),
-			CategoryID:  r.FormValue("categoryId"),
-			IsStudent:   r.FormValue("isStudent") == "true",
-			StudentID:   r.FormValue("studentId"),
+			Name:               r.FormValue("name"),
+			Email:              r.FormValue("email"),
+			Phone:              r.FormValue("phone"),
+			DateOfBirth:        r.FormValue("dateOfBirth"),
+			CategoryID:         r.FormValue("categoryId"),
+			IsStudent:          r.FormValue("isStudent") == "true",
+			StudentID:          r.FormValue("studentId"),
+			Nickname:           r.FormValue("nickname"),
+			Age:                age,
+			AcceptTerms:        r.FormValue("acceptTerms") == "true",
+			NameTh:             r.FormValue("nameTh"),
+			DocumentType:       r.FormValue("documentType"),
+			ScannedName:        r.FormValue("scannedName"),
+			ScannedDateOfBirth: r.FormValue("scannedDateOfBirth"),
 		}
 		if msg := in.validate(); msg != "" {
 			httpx.Error(w, http.StatusBadRequest, msg, nil)
@@ -348,7 +423,7 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		defer tx.Rollback()
 
 		row := tx.QueryRow(publicTournamentSelect+`
-			WHERE t.tournament_id = ? AND t.public_registration = 1`, tournamentID)
+			WHERE t.tournament_id = ? AND t.public_registration = 1 AND t.draft = 0`, tournamentID)
 		t, err := scanPublicTournament(row)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)
@@ -370,8 +445,8 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 		// A category, when given, has to belong to *this* event — otherwise the
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
+		var catName string
 		if in.CategoryID != "" {
-			var catName string
 			err := tx.QueryRow(`SELECT name FROM tournament_category
 			                    WHERE tournament_category_id = ? AND tournament_id = ?`,
 				in.CategoryID, tournamentID).Scan(&catName)
@@ -383,24 +458,36 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 				return
 			}
-			// The age rule lives in the category's name: "U8" is under 8 on
-			// the tournament's start day. The page disables ineligible
-			// categories, but the page is a courtesy — this is the rule.
+			// The age rule lives in the category's name, and goes by birth year
+			// as chess events do: "U10" at an event in 2026 is anybody born
+			// in 2016 or later. The page disables ineligible categories, but
+			// the page is a courtesy — this is the rule.
 			if limit := categoryAgeLimit(catName); limit > 0 {
+				/* The academy's year, not the server's: a tournament in
+				   Bangkok is dated by the poster, and a UTC clock turns the
+				   year over seven hours early. */
+				year := academytime.Now().Year()
+				if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
+					year = parsed.Year()
+				}
+				/* The date of birth is the rule, because it is what an ID card
+				   proves and an age is what somebody typed. A claimed age is
+				   accepted only when there is no date of birth at all. */
 				if in.DateOfBirth == "" {
-					httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
-					return
-				}
-				dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
-				on := time.Now()
-				if t.StartDate != "" {
-					if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
-						on = parsed
+					if in.Age == 0 {
+						httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
+						return
 					}
-				}
-				if ageOn(dob, on) >= limit {
-					httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-					return
+					if in.Age > limit {
+						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
+						return
+					}
+				} else {
+					dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
+					if !bornInTime(dob, year, limit) {
+						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
+						return
+					}
 				}
 			}
 			categoryID = in.CategoryID
@@ -438,24 +525,52 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		// Two prices for two audiences, never stacked: a verified student
-		// pays the discounted regular fee; an outsider pays the early-bird
-		// price while its window is open and the regular price after.
+		// A verified student pays by whichever reductions the organiser
+		// chose; an outsider pays the early-bird price while its window is
+		// open and the regular price after. Both come from pricing.go, the
+		// same rule the parent portal is charged by.
 		fee := t.Fee
+		earlyBird := t.EarlyBirdActive
 		if in.IsStudent {
-			fee = discounted(t.RegularFee, t.DiscountPct)
+			fee = t.StudentFee
+			earlyBird = t.price.StudentEarlyBird && t.EarlyBirdActive
 		}
 
 		regID := newID("treg")
+		// The entrant's right to pay for this entry later, from the email.
+		// Only the hash is stored; the code itself goes back once, below.
+		payCode, payCodeHash, err := newPayCode()
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		// fee_charged is set here because approving used to set it, and there
+		// is no approving any more. A quote that never becomes a charge would
+		// leave every public entry owing nothing on the desk's own roster —
+		// the two columns still differ in meaning, and staff may still correct
+		// fee_charged afterwards, but its starting value is what we quoted.
 		_, err = tx.Exec(`INSERT INTO tournament_registration (
 			tournament_registration_id, tournament_id, student_id, participant_name,
 			participant_date_of_birth, tournament_category_id, registered_at,
-			status, source, contact_email, contact_phone, fee_quoted,
-			student_discount_applied
-		) VALUES (?,?,?,?,?,?,?,'Pending','Public',?,?,?,?)`,
+			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
+			student_discount_applied, nickname, participant_age, terms_accepted_at,
+			pay_code_hash, early_bird_applied, priced_as_student,
+			participant_name_th, id_document_type, ocr_name, ocr_date_of_birth
+		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			regID, tournamentID, studentID, in.Name,
 			nullIfEmpty(in.DateOfBirth), categoryID, sqliteNow(),
-			in.Email, in.Phone, fee, boolToInt(in.IsStudent))
+			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent),
+			in.Nickname, nullIfZero(in.Age),
+			/* Stamped here rather than taken from the request: the time the
+			   terms were accepted is the server's fact, and a client-supplied
+			   timestamp on a consent record is worth nothing. validate()
+			   refuses the entry unless AcceptTerms is true, so reaching this
+			   line is what "accepted" means. */
+			sqliteNow(), payCodeHash,
+			/* How it was priced, for the early-bird rule (entryrules.go). */
+			boolToInt(earlyBird), boolToInt(in.IsStudent),
+			nullIfEmpty(in.NameTh), nullIfEmpty(in.DocumentType),
+			nullIfEmpty(in.ScannedName), nullIfEmpty(in.ScannedDateOfBirth))
 		if err != nil {
 			// The partial unique indexes are the last word on duplicates, and
 			// they are reached rather than pre-checked so that two simultaneous
@@ -484,13 +599,30 @@ func handlePublicRegister(d *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Off the request, so a slow mail server does not hold the entrant at a
+		// spinner after their place is already theirs.
+		ebUntil := ""
+		if earlyBird {
+			ebUntil = t.EarlyBirdUntil
+		}
+		go sendEntryConfirmation(deps, in.Email, tournamentID, t.Name, regID, in.Name, catName, fee, payCode, ebUntil, t.Deadline)
+
 		httpx.JSON(w, http.StatusCreated, map[string]any{
 			"registered": true,
-			"status":     "Pending",
+			"status":     "Approved",
 			"feeQuoted":  fee,
-			// Said plainly so nobody turns up on the day assuming a place: the
-			// desk still has to confirm it.
-			"needsApproval": true,
+			// What the done screen needs to offer "Pay now" straight away. The
+			// code is shown to this caller once and never again; the email
+			// carries the same one.
+			"registrationId": regID,
+			"payCode":        payCode,
+			"cardPayments":   deps.stripe != nil && fee > 0,
+			"emailed":        deps.sender != nil,
+			// Kept, and false, rather than dropped: a portal still running the
+			// previous build reads this to decide whether to say "we will
+			// confirm your place". Removing the key would leave it undefined,
+			// which is falsey by accident rather than on purpose.
+			"needsApproval": false,
 		})
 	}
 }
@@ -543,11 +675,31 @@ func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT FAILED")
 }
 
-func mountPublicRegistration(mux *http.ServeMux, d *sql.DB) {
+func mountPublicRegistration(mux *http.ServeMux, deps *publicEntryDeps) {
+	d := deps.db
 	const p = "/api/v1/public/tournaments"
 	// Reads are cheap and cacheable; the write is the one that costs something,
 	// so it carries the tighter budget.
 	mux.HandleFunc("GET "+p, httpx.RateLimit(60, handlePublicTournamentList(d)))
-	mux.HandleFunc("GET "+p+"/{id}", httpx.RateLimit(60, handlePublicTournament(d)))
-	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(d)))
+	mux.HandleFunc("GET "+p+"/{id}", httpx.RateLimit(60, handlePublicTournament(d, deps.stripe != nil)))
+	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(deps)))
+
+	// The pay link's two calls. The code is the whole of the authorization,
+	// and it is 256 bits, so the limit is a flood guard rather than what
+	// stops guessing. Paying spends a Stripe API call, so it gets less.
+	const e = "/api/v1/public/tournament-registrations/{id}"
+	mux.HandleFunc("POST "+e, httpx.RateLimit(30, handlePublicEntry(deps)))
+	mux.HandleFunc("POST "+e+"/pay", httpx.RateLimit(20, handlePublicEntryPay(deps)))
+}
+
+// nullIfZero keeps "not given" out of the database as NULL rather than 0.
+//
+// An age of 0 would be a claim about a newborn; the column has to be able to
+// say nothing at all, because the form allows an entrant to give a date of
+// birth instead.
+func nullIfZero(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
