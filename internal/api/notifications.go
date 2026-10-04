@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
@@ -761,14 +762,16 @@ func nullable(s string) any {
 // expiry reminder: see handleLowCredit.
 func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []string, attID, studentID, name string) {
 	var used, remaining float64
-	var enrolmentID, start, end string
+	var enrolmentID, start, end, day string
+	var checkIn, checkOut sql.NullString
 	err := d.QueryRow(
-		`SELECT -ct.amount, ct.enrollment_id, cs.start_time, cs.end_time
+		`SELECT -ct.amount, ct.enrollment_id, cs.start_time, cs.end_time, cs.session_date,
+		        a.check_in_time, a.check_out_time
 		   FROM credit_transaction ct
 		   JOIN attendance a ON a.attendance_id = ct.attendance_id
 		   JOIN class_session cs ON cs.session_id = a.session_id
 		  WHERE ct.attendance_id = ? AND ct.transaction_type = 'consumption'`,
-		attID).Scan(&used, &enrolmentID, &start, &end)
+		attID).Scan(&used, &enrolmentID, &start, &end, &day, &checkIn, &checkOut)
 	if err != nil {
 		svc.Send(recipients, notify.Message{
 			Type:      notify.TypeCheckOut,
@@ -784,18 +787,44 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 		enrolmentID).Scan(&remaining)
 
 	when := start + " – " + end
+	stayEN, stayTH := attendedPart(day, start, end, checkIn.String, checkOut.String)
 	svc.Send(recipients, notify.Message{
 		Type:  notify.TypeCreditDeducted,
 		Title: notify.Text{EN: "Class credit deducted", TH: "หักเครดิตคลาสเรียนแล้ว"},
 		Body: notify.Text{
-			EN: name + " has completed their chess class. Class time: " + when +
-				". Credit used: " + fmtCreditsShort(used) + ". Remaining credit: " + fmtCreditsShort(remaining) + ".",
-			TH: name + " เรียนจบคลาสแล้ว เวลาเรียน " + when +
+			EN: name + " has completed their chess class. Class time: " + when + "." + stayEN +
+				" Credit used: " + fmtCreditsShort(used) + ". Remaining credit: " + fmtCreditsShort(remaining) + ".",
+			TH: name + " เรียนจบคลาสแล้ว เวลาเรียน " + when + stayTH +
 				" ใช้ไป " + fmtCreditsShort(used) + " เครดิต คงเหลือ " + fmtCreditsShort(remaining) + " เครดิต",
 		},
 		Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 		DedupeKey: "credit_deducted:" + attID,
 	})
+}
+
+// attendedPart says when the child actually was in class, when that is what
+// the credits were charged for: a check-out before the end charges from the
+// start (or a later arrival) to the check-out (attendedHours), so a "1 credit"
+// for a two-hour class needs its times beside it. Empty when they stayed to
+// the end, which charges the class's full length.
+func attendedPart(day, start, end, checkIn, checkOut string) (en, th string) {
+	out, ok := academytime.Moment(checkOut)
+	if !ok {
+		return "", ""
+	}
+	finish, ok := academytime.At(day, end)
+	if !ok || !out.Before(finish) {
+		return "", ""
+	}
+	left := out.In(academytime.Location()).Format("15:04")
+	if begin, ok := academytime.At(day, start); ok {
+		if in, ok := academytime.Moment(checkIn); ok && in.After(begin) {
+			arrived := in.In(academytime.Location()).Format("15:04")
+			return " Attended: " + arrived + " – " + left + " (arrived late, left early).",
+				" เข้าเรียนจริง " + arrived + " – " + left + " (มาสายและกลับก่อนเวลา)"
+		}
+	}
+	return " Left early at " + left + ".", " กลับก่อนเวลาเมื่อ " + left
 }
 
 // lowCreditLine is the academy's own threshold, the same

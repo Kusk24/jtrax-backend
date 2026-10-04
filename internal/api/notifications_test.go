@@ -216,6 +216,10 @@ func TestCheckOutSendsTheCreditDeduction(t *testing.T) {
 			t.Fatalf("deduction body missing %q: %s", want, body)
 		}
 	}
+	// Stayed to the end: the class time is the whole story.
+	if contains(body, "Left early") {
+		t.Fatalf("a full class says it was left early: %s", body)
+	}
 	// The plain checkout message is superseded, not doubled.
 	if got := countType(in, "check_out"); got != 0 {
 		t.Fatalf("plain check_out still sent alongside the deduction: %d", got)
@@ -513,3 +517,28 @@ func TestAParentCannotSwitchOnATypeTheSchoolHasOff(t *testing.T) {
 		t.Fatalf("switching on once the school allows it: want 200, got %d", s)
 	}
 }
+
+// Leaving early charges less than the class time, so the receipt says when
+// the child left — otherwise "1 credit" for a two-hour class reads as a
+// mistake.
+func TestAnEarlyCheckOutSaysWhenTheChildLeft(t *testing.T) {
+	srv := newServer(t)
+	teacher := &client{t: t, srv: srv}
+	teacher.login("serene@jca.ac.th")
+	_, obj, _ := teacher.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": "stu_penny", "session_id": "ses_b3", "check_in_time": "2026-05-20T13:59:00",
+	})
+	attID, _ := obj["attendance_id"].(string)
+	if status, _, _ := teacher.do("PATCH", "/api/v1/attendance/"+attID, map[string]any{
+		"check_out_time": "2026-05-20T14:30:00",
+	}); status != 200 {
+		t.Fatalf("check-out: %d", status)
+	}
+	body := bodyOfType(inbox(t, srv, "sandy01234@gmail.com"), "credit_deducted")
+	for _, want := range []string{"14:00 – 15:00", "Left early at 14:30."} {
+		if !contains(body, want) {
+			t.Fatalf("deduction body missing %q: %s", want, body)
+		}
+	}
+}
+
