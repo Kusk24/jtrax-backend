@@ -85,6 +85,21 @@ func TestAStudentWithAnEmailGetsAStudentPasswordLink(t *testing.T) {
 	}); status != 200 {
 		t.Fatalf("setting the password from the link: %d", status)
 	}
+
+	// And they really can sign in with that address — typed however they
+	// type it — and arrive as a student.
+	for _, typed := range []string{"mint.student@example.com", "  Mint.Student@Example.COM "} {
+		fresh := &client{t: t, srv: srv}
+		status, out, _ := fresh.do("POST", "/api/v1/auth/login", map[string]string{
+			"email": typed, "password": "Chosen-by-Mint-1",
+		})
+		if status != 200 {
+			t.Fatalf("student signing in with %q: %d (%v)", typed, status, out)
+		}
+		if user, _ := out["user"].(map[string]any); user["role"] != "Student" {
+			t.Fatalf("signed in as %v, want Student", out["user"])
+		}
+	}
 }
 
 func TestOnlyTheOfficeSendsInvites(t *testing.T) {
