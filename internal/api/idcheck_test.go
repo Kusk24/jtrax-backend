@@ -82,6 +82,7 @@ func TestAParentEntryIsVerifiedByTheChildsIDCard(t *testing.T) {
 	enter := func(student, category string) (int, map[string]any) {
 		s, row, _ := parent.do("POST", "/api/v1/tournaments/"+id+"/entries", map[string]any{
 			"student_id": student, "tournament_category_id": category, "id_check": check,
+			"nickname": "Pen", "accept_terms": true,
 		})
 		return s, row
 	}
@@ -93,7 +94,7 @@ func TestAParentEntryIsVerifiedByTheChildsIDCard(t *testing.T) {
 		t.Fatalf("born 2016 in U8: want 400, got %d (%v)", s, row)
 	}
 	if s, row, _ := parent.do("POST", "/api/v1/tournaments/"+id+"/entries", map[string]any{
-		"student_id": "stu_penny", "tournament_category_id": u10,
+		"student_id": "stu_penny", "tournament_category_id": u10, "nickname": "Pen", "accept_terms": true,
 	}); s != 400 {
 		t.Fatalf("no check: want 400, got %d (%v)", s, row)
 	}
@@ -116,7 +117,7 @@ func TestAParentMustChooseACategoryWhenThereAreSome(t *testing.T) {
 	_, out := postScan(t, srv, parent.token, "image", onePixelPNG,
 		"/api/v1/tournaments/"+id+"/scan-id?student_id=stu_penny")
 	if s, row, _ := parent.do("POST", "/api/v1/tournaments/"+id+"/entries", map[string]any{
-		"student_id": "stu_penny", "id_check": out["checkId"],
+		"student_id": "stu_penny", "id_check": out["checkId"], "nickname": "Pen", "accept_terms": true,
 	}); s != 400 {
 		t.Fatalf("no category: want 400, got %d (%v)", s, row)
 	}

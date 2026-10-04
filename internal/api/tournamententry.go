@@ -27,6 +27,11 @@ type entryRequest struct {
 	// child's date of birth for the age group comes from it.
 	IDCheck    string `json:"id_check"`
 	CategoryID string `json:"tournament_category_id"`
+	// What the public form asks too: the name called across the hall, the
+	// name in Thai script (optional), and the conditions of entry.
+	Nickname    string `json:"nickname"`
+	NameTh      string `json:"participant_name_th"`
+	AcceptTerms bool   `json:"accept_terms"`
 }
 
 // handleEnterTournament registers one of the caller's children for the
@@ -56,6 +61,22 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		in.Contact = strings.TrimSpace(in.Contact)
 		if in.StudentID == "" {
 			httpx.Error(w, http.StatusBadRequest, "student_id is required", nil)
+			return
+		}
+		in.Nickname = strings.TrimSpace(in.Nickname)
+		in.NameTh = strings.TrimSpace(in.NameTh)
+		if in.Nickname == "" {
+			httpx.Error(w, http.StatusBadRequest, "please give the player's nickname", nil)
+			return
+		}
+		if len([]rune(in.Nickname)) > maxNameLen || len([]rune(in.NameTh)) > maxNameLen {
+			httpx.Error(w, http.StatusBadRequest, "that name is too long", nil)
+			return
+		}
+		// Refused rather than defaulted, as on the public form: a record of
+		// agreement nobody gave is worse than none.
+		if !in.AcceptTerms {
+			httpx.Error(w, http.StatusBadRequest, "please accept the terms and conditions to enter", nil)
 			return
 		}
 		if len(in.Contact) > maxPhoneLen {
@@ -141,6 +162,23 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		var start string
 		tx.QueryRow(`SELECT COALESCE(start_date,'') FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&start)
 
+		/* The family's own contact details are already on file, so the
+		   portal does not ask again: the entry carries the parent's phone and
+		   email, as a public entry carries what its form gave. A phone the
+		   parent typed (older portals) still wins. */
+		var phone, email string
+		tx.QueryRow(`SELECT COALESCE((SELECT value FROM parent_contact
+		                               WHERE parent_id = ? AND contact_type = 'phone' LIMIT 1), '')`,
+			id.ParentID).Scan(&phone)
+		tx.QueryRow(`SELECT COALESCE((SELECT value FROM parent_contact
+		                               WHERE parent_id = ? AND contact_type = 'email' LIMIT 1),
+		                              (SELECT u.email FROM parent p JOIN user_account u
+		                                  ON u.user_account_id = p.user_account_id WHERE p.parent_id = ?), '')`,
+			id.ParentID, id.ParentID).Scan(&email)
+		if in.Contact == "" {
+			in.Contact = phone
+		}
+
 		// Quoted and charged are the same number: nobody reviews a family's
 		// own entry, so the quote is the charge from the start.
 		fee := price.StudentFee(today())
@@ -152,14 +190,16 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 				participant_contact, fee_quoted, fee_charged, student_discount_applied,
 				medical_notes, remarks, early_bird_applied, priced_as_student,
 				participant_date_of_birth, participant_age, tournament_category_id,
-				ocr_name, ocr_date_of_birth, id_document_type
-			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1,?,?,?,?,?,?)`,
+				ocr_name, ocr_date_of_birth, id_document_type,
+				nickname, participant_name_th, terms_accepted_at, contact_phone, contact_email
+			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`,
 			regID, tournamentID, in.StudentID, name, in.Contact, fee, fee,
 			in.MedicalNotes, in.Remarks,
 			// How it was priced, for the early-bird rule (entryrules.go).
 			boolToInt(price.StudentEarlyBird && price.earlyBirdOpen(today())),
 			card.DateOfBirth, nullIfZero(ageAt(card.DateOfBirth, start)), categoryID,
-			nullIfEmpty(card.Name), card.DateOfBirth, nullIfEmpty(card.DocumentType))
+			nullIfEmpty(card.Name), card.DateOfBirth, nullIfEmpty(card.DocumentType),
+			in.Nickname, nullIfEmpty(in.NameTh), sqliteNow(), nullIfEmpty(in.Contact), nullIfEmpty(email))
 		if isUniqueViolation(err) {
 			httpx.Error(w, http.StatusConflict, "this child is already entered", nil)
 			return

@@ -214,5 +214,45 @@ func verifiedEntry(t *testing.T, c *client, body map[string]any) map[string]any 
 	if _, ok := body["tournament_category_id"]; !ok {
 		body["tournament_category_id"] = "tcat_u10"
 	}
+	if _, ok := body["nickname"]; !ok {
+		body["nickname"] = "Pen"
+	}
+	if _, ok := body["accept_terms"]; !ok {
+		body["accept_terms"] = true
+	}
 	return withCheck(t, c, "trn_wellington", student, "2017-05-01", "id_check", body)
 }
+
+// The parent form asks what the public one does — a nickname and the
+// conditions of entry — and takes the family's contact details from file.
+func TestAParentEntryRecordsTermsNicknameAndTheFamilysContact(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("sandy01234@gmail.com")
+	path := "/api/v1/tournaments/trn_wellington/entries"
+
+	if s, _, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "accept_terms": false,
+	})); s != 400 {
+		t.Fatalf("terms not accepted: want 400, got %d", s)
+	}
+	if s, _, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "nickname": " ",
+	})); s != 400 {
+		t.Fatalf("no nickname: want 400, got %d", s)
+	}
+	s, out, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "participant_name_th": "เพนนี",
+	}))
+	if s != 201 {
+		t.Fatalf("enter: %d (%v)", s, out)
+	}
+	c.login("admin@jca.ac.th")
+	_, row, _ := c.do("GET", "/api/v1/tournament-registrations/"+out["tournament_registration_id"].(string), nil)
+	if row["nickname"] != "Pen" || row["participant_name_th"] != "เพนนี" || row["terms_accepted_at"] == nil {
+		t.Fatalf("not recorded: %v", row)
+	}
+	if row["contact_phone"] != "+66 12 345 6789" || row["contact_email"] != "sandy01234@gmail.com" {
+		t.Fatalf("family contact not on the entry: phone %v email %v", row["contact_phone"], row["contact_email"])
+	}
+}
+
