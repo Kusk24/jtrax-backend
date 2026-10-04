@@ -486,6 +486,10 @@ func Registry() []*Resource {
 				// pages draw their own (see banner.go).
 				{Name: "has_banner", Roles: everyone,
 					Expr: "EXISTS(SELECT 1 FROM tournament_banner b WHERE b.tournament_id = tournament.tournament_id)"},
+				// Whether a regulation file was uploaded, so the parent portal
+				// links it only when there is one to open (regulation.go).
+				{Name: "has_regulation", Roles: everyone,
+					Expr: "EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = tournament.tournament_id)"},
 			},
 			AfterWrite: tournamentStatusAfterWrite,
 			ReadRoles:  everyone,

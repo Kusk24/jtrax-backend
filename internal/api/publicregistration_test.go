@@ -442,6 +442,22 @@ func TestRegulationLifecycle(t *testing.T) {
 	if status, _, _ := staff.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
 		t.Fatalf("private regulation, staff: want 200, got %d", status)
 	}
+	// …and so do the academy's own families, whose portal links it, and
+	// whose tournament row says there is one to open.
+	parent := &client{t: t, srv: pub.srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
+		t.Fatalf("private regulation, signed-in parent: want 200, got %d", status)
+	}
+	// 1, as SQLite answers EXISTS — read as true, the same as has_banner.
+	if _, row, _ := parent.do("GET", "/api/v1/tournaments/"+id, nil); row["has_regulation"] != float64(1) && row["has_regulation"] != true {
+		t.Fatalf("has_regulation on the parent's tournament row: %v", row["has_regulation"])
+	}
+	// A draft stays the organiser's, signed in or not.
+	staff.do("PATCH", "/api/v1/tournaments/"+id, map[string]any{"draft": true})
+	if status, _, _ := parent.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 404 {
+		t.Fatalf("draft regulation, parent: want 404, got %d", status)
+	}
 }
 
 // A venue's map link is stored once, at tournament creation (see 0037), and
