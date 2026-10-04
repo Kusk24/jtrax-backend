@@ -97,6 +97,11 @@ func handleCancelClass(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 				return
 			}
 		}
+		/* A booking was never charged, so it goes with nothing to refund. */
+		if _, err := tx.Exec(`DELETE FROM session_booking WHERE session_id = ?`, sessionID); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not cancel the class", err)
+			return
+		}
 		if _, err := tx.Exec(`DELETE FROM attendance WHERE session_id = ?`, sessionID); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not cancel the class", err)
 			return
@@ -129,7 +134,9 @@ func studentsDueAt(tx *sql.Tx, classID, sessionID string) ([]string, error) {
 	rows, err := tx.Query(`
 		SELECT student_id FROM student_enrollment WHERE class_id = ? AND status = 'Active'
 		UNION
-		SELECT student_id FROM attendance WHERE session_id = ?`, classID, sessionID)
+		SELECT student_id FROM attendance WHERE session_id = ?
+		UNION
+		SELECT student_id FROM session_booking WHERE session_id = ?`, classID, sessionID, sessionID)
 	if err != nil {
 		return nil, err
 	}

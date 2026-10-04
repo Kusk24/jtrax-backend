@@ -235,6 +235,8 @@ func Registry() []*Resource {
 			// difference, so every session staff created carried a NULL
 			// length — and a length is what an hour of class costs.
 			AfterWrite: storeSessionHours,
+			// Bookings go with the class; attendance has its own refunds.
+			BeforeDelete: dropSessionBookings,
 		},
 		{
 			Name: "enrollments", Table: "student_enrollment", IDCol: "enrollment_id", IDPrefix: "enr",
@@ -281,9 +283,25 @@ func Registry() []*Resource {
 			// session lasts. Here rather than in the console because the front
 			// desk, the teacher's roster and Class History all write these
 			// rows, and three clients would keep three versions of the rule.
-			AfterInsert:  refuseClashingAttendance,
+			AfterInsert:  attendanceAfterInsert,
 			AfterWrite:   chargeAttendance,
 			BeforeDelete: refundAttendance,
+		},
+		{
+			// Who will be in a class that has not started (migration 0060).
+			// Free until the start, when classstart.go checks each one in.
+			Name: "session-bookings", Table: "session_booking", IDCol: "booking_id", IDPrefix: "bkg",
+			Cols: []Col{
+				{Name: "session_id", Kind: "text", Required: true},
+				{Name: "student_id", Kind: "text", Required: true},
+			},
+			Derived:   []Derived{{Name: "booked_at", Expr: "booked_at"}, {Name: "failed_reason", Expr: "failed_reason"}},
+			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
+			Scope: map[string]ScopeFn{
+				"Parent":  byParentStudents("student_id"),
+				"Student": byOwnStudent("student_id"),
+			},
+			AfterInsert: refuseBooking,
 		},
 		{
 			Name: "credit-packages", Table: "credit_package", IDCol: "credit_package_id", IDPrefix: "pkg",

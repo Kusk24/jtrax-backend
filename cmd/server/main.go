@@ -55,6 +55,9 @@ func main() {
 	api.StartEntrySweeper(context.Background(), d)
 	mailCfg := mail.FromEnv()
 	api.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
+	// A class made for later checks its booked students in when it starts,
+	// and only then are their credits spent (internal/api/classstart.go).
+	api.StartClassStarts(context.Background(), d)
 
 	port := os.Getenv("PORT")
 	if port == "" {
