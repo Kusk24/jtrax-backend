@@ -16,22 +16,20 @@
 //     insert is microseconds of ours.
 //   - The image is capped before it is read, so one request cannot make the
 //     server hold an arbitrary amount.
-//   - The reply is a **suggestion**. Nothing is written, nothing is trusted,
-//     and an entrant who skips the scan enters exactly as before — so turning
-//     this off, or having it fail, costs nobody their entry.
+//   - The scan is required: the entry's date of birth, and so its age group,
+//     comes from what the card said (idcheck.go).
 //
 // # Nothing is kept
 //
 // The bytes are read, sent, and dropped with the request. There is no column
 // for them and no file written: a store of children's identity documents is a
 // thing to leak, and a thing somebody would later have to be asked to delete.
-// What survives the call is a name and a date of birth, in a form field the
-// entrant can see and correct before they submit.
+// What survives the call is what was read — the date of birth, the name, the
+// document type — in id_card_check, until the entry uses it.
 package api
 
 import (
 	"database/sql"
-	"io"
 	"net/http"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -41,6 +39,9 @@ import (
 func mountIDCardScan(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
 	mux.HandleFunc("POST /api/v1/public/tournaments/{id}/scan-id",
 		httpx.RateLimit(5, handleScanIDCard(d, provider)))
+	// The parent portal's own scan, for one of the caller's children.
+	mux.HandleFunc("POST /api/v1/tournaments/{id}/scan-id",
+		httpx.RateLimit(5, handleParentScanIDCard(d, provider)))
 }
 
 func handleScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
@@ -57,63 +58,22 @@ func handleScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 
-		provider := scannerFor(d, provider)
-		reader, ok := provider.(ocr.IDCardReader)
-		if provider == nil || !ok {
-			// Not an error the entrant caused, and not one they can fix. The
-			// form falls back to typing, which is what it did before.
-			httpx.Error(w, http.StatusServiceUnavailable,
-				"card reading is not available — please type your details", nil)
+		card := readIDCard(d, provider, w, r)
+		if card == nil {
 			return
 		}
-
-		// Cap what can be read before parsing, not after.
-		r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
-		if err := r.ParseMultipartForm(maxScanBytes); err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge,
-				"image is too large (10 MB maximum)", err)
-			return
-		}
-		defer r.MultipartForm.RemoveAll()
-
-		file, _, err := r.FormFile("image")
+		// What the card said is kept for the entry; the photo is not.
+		checkID, err := saveIDCheck(d, r.PathValue("id"), "", card)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "expected an image field named 'image'", err)
-			return
-		}
-		defer file.Close()
-
-		data, err := io.ReadAll(file)
-		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "could not read the uploaded image", err)
-			return
-		}
-		if len(data) == 0 {
-			httpx.Error(w, http.StatusBadRequest, "the uploaded image is empty", nil)
-			return
-		}
-
-		// Sniff the bytes rather than trust the declared type: the browser's
-		// content type is caller-supplied, and this decides what is sent on to
-		// a third party.
-		mime := http.DetectContentType(data)
-		if !scannableTypes[mime] {
-			httpx.Error(w, http.StatusUnsupportedMediaType,
-				"upload a photo of the card (JPEG, PNG, WebP or HEIC)", nil)
-			return
-		}
-
-		card, err := reader.ExtractIDCard(r.Context(), data, mime)
-		if err != nil {
-			// The provider's error can quote the request, which is the child's
-			// identity document, so it stays internal.
-			httpx.Error(w, http.StatusBadGateway,
-				"could not read the card — try a clearer, straighter photo, or type your details", err)
+			httpx.Error(w, http.StatusInternalServerError, "could not save the ID card check", err)
 			return
 		}
 
 		httpx.JSON(w, http.StatusOK, map[string]any{
 			"fields": card,
+			// Named by the entry: the date of birth the age group is
+			// decided by comes from here, not from the form.
+			"checkId": checkID,
 			// Answerable which service saw the document.
 			"provider": provider.Name(),
 		})

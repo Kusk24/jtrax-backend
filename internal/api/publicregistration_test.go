@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,14 +62,20 @@ var testIDPhoto = []byte{
 	0x00, 0xFF, 0xD9,
 }
 
-// register submits a public registration the only way the endpoint accepts
-// since 0036: multipart/form-data, with an ID photo required alongside the
-// fields `entry` already builds. `client.do` posts JSON and cannot express
-// this, so this is `TestRegulationLifecycle`'s own hand-built-request pattern,
-// generalised to carry fields plus a file and decode the reply the same way
-// `do` does.
-func register(t *testing.T, c *client, tournamentID string, fields map[string]any, attachDocument bool) (int, map[string]any) {
+// register submits a public registration the way the form does:
+// multipart/form-data, after an ID card scan. With `verified`, it writes the
+// ID card check a scan would have — the date of birth is the entry's
+// dateOfBirth, or a child's when it gives none — and names it, as the form
+// does; without, it sends no check.
+func register(t *testing.T, c *client, tournamentID string, fields map[string]any, verified bool) (int, map[string]any) {
 	t.Helper()
+	if verified {
+		dob, _ := fields["dateOfBirth"].(string)
+		if dob == "" {
+			dob = "2015-06-01"
+		}
+		fields = withCheck(t, c, tournamentID, "", dob, "idCheck", fields)
+	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	for k, v := range fields {
@@ -77,10 +84,6 @@ func register(t *testing.T, c *client, tournamentID string, fields map[string]an
 			continue
 		}
 		mw.WriteField(k, fmt.Sprint(v))
-	}
-	if attachDocument {
-		fw, _ := mw.CreateFormFile("idDocument", "id.jpg")
-		fw.Write(testIDPhoto)
 	}
 	mw.Close()
 	req, _ := http.NewRequest(
@@ -458,46 +461,50 @@ func TestPublicTournamentCarriesTheVenueMapLink(t *testing.T) {
 	}
 }
 
-// The ID photo is not optional paperwork — see 0036 — so a registration
-// submitted without one must be refused outright rather than stored with
-// nothing for the desk to check a face against.
-func TestPublicRegistrationRequiresTheIDDocument(t *testing.T) {
+// The ID card step is required: an entry without an ID card check is
+// refused, whatever date of birth it typed.
+func TestPublicRegistrationRequiresTheIDCardCheck(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
-	status, out := register(t, pub, id, entry(nil), false)
+	status, out := register(t, pub, id, entry(map[string]any{"dateOfBirth": "2015-01-01"}), false)
 	if status != 400 {
-		t.Fatalf("no attachment: want 400, got %d (%v)", status, out)
+		t.Fatalf("no ID card check: want 400, got %d (%v)", status, out)
 	}
 }
 
-// A stranger's national ID or passport photo exists so staff can check a face
-// at the desk, and for nobody else — there is no version of "public when the
-// tournament is public" that is right for this file (see 0036).
-func TestRegistrationDocumentIsStaffOnly(t *testing.T) {
+// A check is spent by the entry that uses it: it cannot be kept and named
+// again for somebody else.
+func TestAnIDCardCheckIsUsedOnce(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	body := withCheck(t, pub, id, "", "2015-01-01", "idCheck", entry(nil))
+	if status, out := register(t, pub, id, body, false); status != 201 {
+		t.Fatalf("first entry: %d (%v)", status, out)
+	}
+	body["email"] = "someone.else@example.com"
+	if status, _ := register(t, pub, id, body, false); status != 400 {
+		t.Fatalf("reused check: want 400, got %d", status)
+	}
+}
+
+// The photo itself is not kept anywhere: there is no table for it and no
+// endpoint that serves one.
+func TestAnIDCardPhotoIsNotKept(t *testing.T) {
 	pub, id := openEvent(t, nil)
 	status, reg := register(t, pub, id, entry(nil), true)
 	if status != 201 {
 		t.Fatalf("register: want 201, got %d (%v)", status, reg)
 	}
-
+	v, _ := serverDBs.Load(pub.srv.URL)
+	var n int
+	v.(*sql.DB).QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'tournament_registration_document'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("the ID photo table still exists")
+	}
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
 	regID := firstRegistrationID(t, staff, id)
-
-	if res, err := http.Get(pub.srv.URL + "/api/v1/tournaments/registrations/" + regID + "/document"); err != nil {
-		t.Fatal(err)
-	} else if res.StatusCode != 401 && res.StatusCode != 403 {
-		t.Fatalf("anonymous read: want 401/403, got %d", res.StatusCode)
-	}
-
-	parent := &client{t: t, srv: pub.srv}
-	parent.login("sandy01234@gmail.com")
-	if status, _, _ := parent.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status != 403 {
-		t.Fatalf("parent read: want 403, got %d", status)
-	}
-
-	if status, _, _ := staff.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status != 200 {
-		t.Fatalf("staff read: want 200, got %d", status)
+	if status, _, _ := staff.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status == 200 {
+		t.Fatal("an ID photo is still served")
 	}
 }
 
@@ -551,27 +558,26 @@ func TestAcceptingTheTermsIsRecordedWithATime(t *testing.T) {
 	}
 }
 
-// The form asks for an age and not a date of birth, so an age-limited group
-// has to be enforceable on the age alone — otherwise everyone who skips the
-// card scan is refused. By birth year, somebody who says they are 12 may be
-// born in the event's year minus 12, so U12 takes them; 13 is too old.
-func TestAClaimedAgeIsCheckedAgainstTheGroupWhenThereIsNoDateOfBirth(t *testing.T) {
-	pub, id := openEvent(t, nil)
+// The age group is decided by the ID card's date of birth, not by what the
+// form typed: by birth year, somebody born in the event's year minus 12 may
+// play U12; a year earlier is too old.
+func TestTheIDCardDecidesTheAgeGroup(t *testing.T) {
+	pub, id := openEvent(t, map[string]any{"start_date": "2026-11-01"})
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
-	u12 := categoryOf(t, staff, id, "U12 Junior")
+	u12 := categoryOf(t, staff, id, "Under 12")
 
 	for _, tc := range []struct {
-		age  int
+		card string
 		want int
-	}{{11, 201}, {12, 201}, {13, 400}, {15, 400}} {
-		body := entry(map[string]any{
-			"categoryId": u12, "age": tc.age,
-			"email": fmt.Sprintf("age%d@example.com", tc.age),
-		})
-		status, out := register(t, pub, id, body, true)
+	}{{"2015-12-31", 201}, {"2014-01-01", 201}, {"2013-12-31", 400}} {
+		body := withCheck(t, pub, id, "", tc.card, "idCheck", entry(map[string]any{
+			"categoryId": u12, "dateOfBirth": "2020-01-01", // typed: ignored
+			"email":      "born" + tc.card + "@example.com",
+		}))
+		status, out := register(t, pub, id, body, false)
 		if status != tc.want {
-			t.Errorf("age %d: want %d, got %d (%v)", tc.age, tc.want, status, out)
+			t.Errorf("card %s: want %d, got %d (%v)", tc.card, tc.want, status, out)
 		}
 	}
 }
@@ -613,4 +619,35 @@ func TestAnImplausibleAgeIsRefused(t *testing.T) {
 			t.Errorf("age %d: want 400, got %d", age, status)
 		}
 	}
+}
+
+// withCheck writes an ID card check for the tournament (and child, when one
+// is named) and returns fields with its id added under key — "idCheck" on
+// the public form, "id_check" from the parent portal.
+func withCheck(t *testing.T, c *client, tournamentID, studentID, dob, key string, fields map[string]any) map[string]any {
+	t.Helper()
+	v, ok := serverDBs.Load(c.srv.URL)
+	if !ok {
+		t.Fatal("register: server has no database on record (use newServerOn)")
+	}
+	d := v.(*sql.DB)
+	id := fmt.Sprintf("idc_test_%d", time.Now().UnixNano())
+	// A child who does not exist cannot be named (the foreign key); the
+	// entry is refused for that before the check is looked at.
+	var student any
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`, studentID).Scan(&n)
+	if n > 0 {
+		student = studentID
+	}
+	if _, err := d.Exec(`INSERT INTO id_card_check (id_card_check_id, tournament_id, student_id, date_of_birth, name)
+	                     VALUES (?,?,?,?, 'Read Off Card')`, id, tournamentID, student, dob); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]any{}
+	for k, v := range fields {
+		out[k] = v
+	}
+	out[key] = id
+	return out
 }

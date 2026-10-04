@@ -44,6 +44,7 @@ func publicPayServer(t *testing.T, withStripe bool) *payFixture {
 	}
 	cfg := mail.Config{AppURL: "https://portal.example"}
 	f.srv = httptest.NewServer(api.NewHandlerWith(f.d, cfg, f.mail, nil))
+	serverDBs.Store(f.srv.URL, f.d)
 	t.Cleanup(f.srv.Close)
 
 	staff := &client{t: t, srv: f.srv}

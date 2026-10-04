@@ -23,6 +23,10 @@ type entryRequest struct {
 	Contact      string `json:"participant_contact"`
 	MedicalNotes string `json:"medical_notes"`
 	Remarks      string `json:"remarks"`
+	// The ID card check the scan returned (idcheck.go): required, and the
+	// child's date of birth for the age group comes from it.
+	IDCheck    string `json:"id_check"`
+	CategoryID string `json:"tournament_category_id"`
 }
 
 // handleEnterTournament registers one of the caller's children for the
@@ -99,6 +103,44 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
 		}
+		/* The ID card check, for this child and this tournament. Its date of
+		   birth decides which category the child may enter. */
+		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, in.StudentID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		if msg != "" {
+			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			return
+		}
+		var categoryID any
+		var hasCategories int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM tournament_category WHERE tournament_id = ?`,
+			tournamentID).Scan(&hasCategories); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		in.CategoryID = strings.TrimSpace(in.CategoryID)
+		if in.CategoryID == "" && hasCategories > 0 {
+			httpx.Error(w, http.StatusBadRequest, "please choose a category", nil)
+			return
+		}
+		if in.CategoryID != "" {
+			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, card.DateOfBirth)
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				return
+			}
+			if msg != "" {
+				httpx.Error(w, http.StatusBadRequest, msg, nil)
+				return
+			}
+			categoryID = in.CategoryID
+		}
+		var start string
+		tx.QueryRow(`SELECT COALESCE(start_date,'') FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&start)
+
 		// Quoted and charged are the same number: nobody reviews a family's
 		// own entry, so the quote is the charge from the start.
 		fee := price.StudentFee(today())
@@ -108,12 +150,16 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			INSERT INTO tournament_registration (
 				tournament_registration_id, tournament_id, student_id, participant_name,
 				participant_contact, fee_quoted, fee_charged, student_discount_applied,
-				medical_notes, remarks, early_bird_applied, priced_as_student
-			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1)`,
+				medical_notes, remarks, early_bird_applied, priced_as_student,
+				participant_date_of_birth, participant_age, tournament_category_id,
+				ocr_name, ocr_date_of_birth, id_document_type
+			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1,?,?,?,?,?,?)`,
 			regID, tournamentID, in.StudentID, name, in.Contact, fee, fee,
 			in.MedicalNotes, in.Remarks,
 			// How it was priced, for the early-bird rule (entryrules.go).
-			boolToInt(price.StudentEarlyBird && price.earlyBirdOpen(today())))
+			boolToInt(price.StudentEarlyBird && price.earlyBirdOpen(today())),
+			card.DateOfBirth, nullIfZero(ageAt(card.DateOfBirth, start)), categoryID,
+			nullIfEmpty(card.Name), card.DateOfBirth, nullIfEmpty(card.DocumentType))
 		if isUniqueViolation(err) {
 			httpx.Error(w, http.StatusConflict, "this child is already entered", nil)
 			return
@@ -133,6 +179,8 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			"participant_name":           name,
 			"status":                     "Approved",
 			"fee_charged":                fee,
+			"tournament_category_id":     categoryID,
+			"participant_date_of_birth":  card.DateOfBirth,
 		})
 	}
 }

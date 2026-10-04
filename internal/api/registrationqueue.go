@@ -14,7 +14,6 @@ package api
 
 import (
 	"database/sql"
-	"errors"
 	"net/http"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -98,33 +97,4 @@ func handleRegistrationQueue(d *sql.DB) http.HandlerFunc {
 func mountRegistrationQueue(mux *http.ServeMux, d *sql.DB) {
 	const p = "/api/v1/tournaments"
 	mux.HandleFunc("GET "+p+"/{id}/registrations", handleRegistrationQueue(d))
-	mux.HandleFunc("GET "+p+"/registrations/{regId}/document", handleRegistrationDocument(d))
-}
-
-// handleRegistrationDocument serves the ID photo a registrant attached.
-// Staff only, unconditionally — see 0036: unlike a regulation, this is a
-// stranger's own identification, and there is no version of "public when the
-// tournament is public" that is right for a passport photo.
-func handleRegistrationDocument(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if requireStaff(d, w, r) == nil {
-			return
-		}
-		var filename, mime string
-		var data []byte
-		err := d.QueryRow(
-			`SELECT filename, content_type, bytes FROM tournament_registration_document
-			  WHERE tournament_registration_id = ?`, r.PathValue("regId")).Scan(&filename, &mime, &data)
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
-			return
-		}
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load the document", err)
-			return
-		}
-		w.Header().Set("Content-Type", mime)
-		w.Header().Set("Content-Disposition", `inline; filename="`+filename+`"`)
-		w.Write(data)
-	}
 }

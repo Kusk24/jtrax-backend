@@ -105,16 +105,18 @@ func TestTheScanAndTheThaiNameAreKeptWithTheEntry(t *testing.T) {
 	pub, tid := openEvent(t, nil)
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
+	// What the card said wins over what the form claims it said.
 	s, out := register(t, pub, tid, entry(map[string]any{
 		"dateOfBirth": "2015-04-02", "nameTh": "สมชาย นิรันดร์", "documentType": "thai-id",
-		"scannedName": "Somchai Niran", "scannedDateOfBirth": "2015-04-20",
+		"scannedName": "Typed Name", "scannedDateOfBirth": "2015-04-20",
 	}), true)
 	if s != 201 {
 		t.Fatalf("register: %d (%v)", s, out)
 	}
 	_, row, _ := staff.do("GET", "/api/v1/tournament-registrations/"+out["registrationId"].(string), nil)
 	if row["participant_name_th"] != "สมชาย นิรันดร์" || row["id_document_type"] != "thai-id" ||
-		row["ocr_name"] != "Somchai Niran" || row["ocr_date_of_birth"] != "2015-04-20" {
+		row["ocr_name"] != "Read Off Card" || row["ocr_date_of_birth"] != "2015-04-02" ||
+		row["participant_date_of_birth"] != "2015-04-02" {
 		t.Fatalf("scan not kept: %v", row)
 	}
 	if s, _ := register(t, pub, tid, entry(map[string]any{

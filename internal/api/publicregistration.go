@@ -39,7 +39,6 @@ package api
 import (
 	"database/sql"
 	"errors"
-	"io"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -47,7 +46,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -61,9 +59,9 @@ const (
 	maxPhoneLen = 32
 )
 
-// A phone photo of an ID card or passport page is a couple of megabytes; ten
-// is generous and still bounds what one request can make the server hold.
-const maxIDDocumentBytes = 10 << 20
+// The entry form is text only — the ID card is read by the scan, not sent
+// with the entry — so this bounds a few fields.
+const maxEntryFormBytes = 64 << 10
 
 // publicTournamentSelect is the shape of an open event as the public sees it.
 // Deliberately narrow: no organiser contact, no internal ids beyond the one
@@ -279,6 +277,9 @@ type registerInput struct {
 	   family did not scan. */
 	ScannedName        string `json:"scannedName"`
 	ScannedDateOfBirth string `json:"scannedDateOfBirth"`
+	/* The ID card check the scan returned (idcheck.go). Required: the date
+	   of birth, and so the age group, comes from it. */
+	IDCheck string `json:"idCheck"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -347,10 +348,11 @@ func (in *registerInput) validate() string {
 	return ""
 }
 
-// categoryAgeLimit reads the age out of a category's name — "U8 Boys" means
-// under 8 — so the age rule lives in the name the organiser already wrote
-// rather than in a column nobody fills. 0 means the name carries no age.
-var categoryAgePattern = regexp.MustCompile(`(?i)\bU\s?(\d{1,2})\b`)
+// categoryAgeLimit reads the age out of a category's name — "U8 Boys",
+// "U08" and "Under 8" all mean under 8 — so the age rule lives in the name the
+// organiser already wrote rather than in a column nobody fills. 0 means the
+// name carries no age.
+var categoryAgePattern = regexp.MustCompile(`(?i)\bU(?:nder)?[\s-]?(\d{1,2})\b`)
 
 func categoryAgeLimit(name string) int {
 	m := categoryAgePattern.FindStringSubmatch(name)
@@ -380,9 +382,9 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
 
-		r.Body = http.MaxBytesReader(w, r.Body, maxIDDocumentBytes)
-		if err := r.ParseMultipartForm(maxIDDocumentBytes); err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "the file is too large (10 MB max)", nil)
+		r.Body = http.MaxBytesReader(w, r.Body, maxEntryFormBytes)
+		if err := r.ParseMultipartForm(maxEntryFormBytes); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "could not read the form — please try again", nil)
 			return
 		}
 		// age arrives as a form string like every other field here; an empty
@@ -404,17 +406,12 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			DocumentType:       r.FormValue("documentType"),
 			ScannedName:        r.FormValue("scannedName"),
 			ScannedDateOfBirth: r.FormValue("scannedDateOfBirth"),
+			IDCheck:            r.FormValue("idCheck"),
 		}
 		if msg := in.validate(); msg != "" {
 			httpx.Error(w, http.StatusBadRequest, msg, nil)
 			return
 		}
-		idFilename, idMime, idBytes, msg := readIDDocument(r)
-		if msg != "" {
-			httpx.Error(w, http.StatusBadRequest, msg, nil)
-			return
-		}
-
 		tx, err := d.Begin()
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
@@ -442,54 +439,40 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			return
 		}
 
+		/* The ID card check. The date of birth is the card's, not what was
+		   typed: it decides the age group, so it is the document's word. */
+		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, "")
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		if msg != "" {
+			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			return
+		}
+		in.DateOfBirth = card.DateOfBirth
+		in.ScannedDateOfBirth = card.DateOfBirth
+		in.ScannedName = card.Name
+		if card.DocumentType != "" {
+			in.DocumentType = card.DocumentType
+		}
+		in.Age = ageAt(card.DateOfBirth, t.StartDate)
+
 		// A category, when given, has to belong to *this* event — otherwise the
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
 		var catName string
 		if in.CategoryID != "" {
-			err := tx.QueryRow(`SELECT name FROM tournament_category
-			                    WHERE tournament_category_id = ? AND tournament_id = ?`,
-				in.CategoryID, tournamentID).Scan(&catName)
-			if errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(w, http.StatusBadRequest, "that category is not part of this tournament", nil)
-				return
-			}
+			name, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
 			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 				return
 			}
-			// The age rule lives in the category's name, and goes by birth year
-			// as chess events do: "U10" at an event in 2026 is anybody born
-			// in 2016 or later. The page disables ineligible categories, but
-			// the page is a courtesy — this is the rule.
-			if limit := categoryAgeLimit(catName); limit > 0 {
-				/* The academy's year, not the server's: a tournament in
-				   Bangkok is dated by the poster, and a UTC clock turns the
-				   year over seven hours early. */
-				year := academytime.Now().Year()
-				if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
-					year = parsed.Year()
-				}
-				/* The date of birth is the rule, because it is what an ID card
-				   proves and an age is what somebody typed. A claimed age is
-				   accepted only when there is no date of birth at all. */
-				if in.DateOfBirth == "" {
-					if in.Age == 0 {
-						httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
-						return
-					}
-					if in.Age > limit {
-						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-						return
-					}
-				} else {
-					dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
-					if !bornInTime(dob, year, limit) {
-						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-						return
-					}
-				}
+			if msg != "" {
+				httpx.Error(w, http.StatusBadRequest, msg, nil)
+				return
 			}
+			catName = name
 			categoryID = in.CategoryID
 		}
 
@@ -583,17 +566,6 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
 		}
-		// The document exists to be checked against a face at the venue, so it
-		// is tied to the registration it arrived with rather than stored under
-		// a name or email the desk would have to match by hand later.
-		if _, err := tx.Exec(
-			`INSERT INTO tournament_registration_document
-			        (tournament_registration_id, filename, content_type, bytes, uploaded_at)
-			 VALUES (?,?,?,?, datetime('now'))`,
-			regID, idFilename, idMime, idBytes); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
-			return
-		}
 		if err := tx.Commit(); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
@@ -625,31 +597,6 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			"needsApproval": false,
 		})
 	}
-}
-
-// readIDDocument pulls the required identification photo out of the
-// multipart form. The field name is "idDocument"; a message means refuse the
-// whole registration rather than write a row with nothing to check a face
-// against — an ID photo the desk never gets is not optional paperwork, it is
-// the one thing this field exists for.
-func readIDDocument(r *http.Request) (filename, mime string, data []byte, msg string) {
-	file, header, err := r.FormFile("idDocument")
-	if err != nil {
-		return "", "", nil, "please attach a photo of the player's ID card or passport"
-	}
-	defer file.Close()
-	data, err = io.ReadAll(file)
-	if err != nil {
-		return "", "", nil, "could not read the attached file"
-	}
-	// Sniffed from the bytes, never trusted from the request — same rule as
-	// the regulation upload, and the same accepted shapes: a photo of a card,
-	// or a scanned page.
-	mime = http.DetectContentType(data)
-	if !regulationTypes[mime] {
-		return "", "", nil, "the ID document must be a photo (JPEG, PNG, WebP) or a PDF"
-	}
-	return safeFilename(header.Filename), mime, data, ""
 }
 
 func nullIfEmpty(s string) any {
