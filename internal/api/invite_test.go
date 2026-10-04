@@ -57,6 +57,36 @@ func TestAChildCannotBeInvited(t *testing.T) {
 	}
 }
 
+// An older student with their own address gets a link too — worded for a
+// student, not the parent's welcome about "your child's" classes.
+func TestAStudentWithAnEmailGetsAStudentPasswordLink(t *testing.T) {
+	srv, cap := newResetServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	status, acct, _ := admin.do("POST", "/api/v1/user-accounts", map[string]any{
+		"email": "mint.student@example.com", "password": "Temp-Pass-12", "role": "Student", "display_name": "Mint",
+	})
+	if status != 201 {
+		t.Fatalf("creating a student account: %d (%v)", status, acct)
+	}
+	if status, got, _ := admin.do("POST", "/api/v1/user-accounts/"+acct["user_account_id"].(string)+"/invite", nil); status != 202 {
+		t.Fatalf("invite: %d (%v)", status, got)
+	}
+	to, body := cap.last()
+	if to != "mint.student@example.com" {
+		t.Fatalf("sent to %q", to)
+	}
+	if !strings.Contains(body, "your JTrax student account") || strings.Contains(body, "parent account") {
+		t.Fatalf("the student's email should be worded for a student:\n%s", body)
+	}
+	anon := &client{t: t, srv: srv}
+	if status, _, _ := anon.do("POST", "/api/v1/auth/reset-password", map[string]any{
+		"token": tokenFrom(body), "password": "Chosen-by-Mint-1",
+	}); status != 200 {
+		t.Fatalf("setting the password from the link: %d", status)
+	}
+}
+
 func TestOnlyTheOfficeSendsInvites(t *testing.T) {
 	srv, _ := newResetServer(t)
 	sandy := &client{t: t, srv: srv}

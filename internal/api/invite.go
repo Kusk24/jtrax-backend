@@ -76,8 +76,14 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 			httpx.JSON(w, http.StatusAccepted, map[string]any{"email": email, "delivered": false})
 			return
 		}
-		if err := mail.Deliver(sender, email, "Welcome to JCA Chess School: set your password",
-			inviteEmail(displayName, email, childNamesOf(d, accountID), link, in.StudentLogins)); err != nil {
+		subject, body := "Welcome to JCA Chess School: set your password",
+			inviteEmail(displayName, email, childNamesOf(d, accountID), link, in.StudentLogins)
+		if role == "Student" {
+			// An older student with their own address: the parent's welcome
+			// would tell them about "your child's" classes.
+			subject, body = "JCA Chess School: set your password", studentPasswordEmail(displayName, email, link)
+		}
+		if err := mail.Deliver(sender, email, subject, body); err != nil {
 			httpx.Error(w, http.StatusBadGateway, "the invite email could not be sent", err)
 			return
 		}
@@ -156,6 +162,23 @@ func inviteEmail(name, email string, children []string, link string, logins []st
 		Paragraphs: paragraphs,
 		Details:    details,
 		Button:     &mail.Button{Label: "Set your password", URL: link},
+		Note: "The link works once and expires in 7 days. If it has expired, ask the office to send a new one. " +
+			"If you weren't expecting this email, you can ignore it.",
+	}
+}
+
+// studentPasswordEmail is the link sent to a student who signs in with their
+// own email address, to choose a new password.
+func studentPasswordEmail(name, email, link string) mail.Email {
+	return mail.Email{
+		Heading:  "Set your password",
+		Greeting: "Hello " + name + ",",
+		Paragraphs: []string{
+			"JCA Chess School has sent you a link to choose a new password for your JTrax student account.",
+			"เราได้ส่งลิงก์สำหรับตั้งรหัสผ่านใหม่ของบัญชีนักเรียน JTrax ของคุณ",
+		},
+		Details: []mail.Detail{{Label: "Your sign-in email", Value: email}},
+		Button:  &mail.Button{Label: "Set your password", URL: link},
 		Note: "The link works once and expires in 7 days. If it has expired, ask the office to send a new one. " +
 			"If you weren't expecting this email, you can ignore it.",
 	}
