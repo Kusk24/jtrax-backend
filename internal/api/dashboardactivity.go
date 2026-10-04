@@ -42,12 +42,17 @@ func readDashboardActivity(d *sql.DB, now time.Time) (*dashboardActivity, error)
 	a := &dashboardActivity{ConsistentDays: consistentDays, WindowDays: consistentWindow}
 
 	// Stored times are UTC without a zone ("2026-09-27 15:47:07").
-	monday := weekStart(now).UTC().Format("2006-01-02 15:04:05")
+	// The week of `now`, Monday to Sunday — bounded at both ends so a past
+	// week counts only its own games.
+	week := weekStart(now)
+	monday := week.UTC().Format("2006-01-02 15:04:05")
+	nextMonday := week.AddDate(0, 0, 7).UTC().Format("2006-01-02 15:04:05")
 	if err := d.QueryRow(`SELECT COUNT(*) FROM game_room g
 	                       JOIN user_account ua ON ua.user_account_id = g.created_by
 	                      WHERE ua.role IN ('Admin', 'Receptionist')
-	                        AND replace(replace(g.created_at, 'T', ' '), 'Z', '') >= ?`,
-		monday).Scan(&a.GamesOpened); err != nil {
+	                        AND replace(replace(g.created_at, 'T', ' '), 'Z', '') >= ?
+	                        AND replace(replace(g.created_at, 'T', ' '), 'Z', '') < ?`,
+		monday, nextMonday).Scan(&a.GamesOpened); err != nil {
 		return nil, err
 	}
 
@@ -87,7 +92,18 @@ func handleDashboardActivity(d *sql.DB) http.HandlerFunc {
 		if requireStaff(d, w, r) == nil {
 			return
 		}
-		a, err := readDashboardActivity(d, academytime.Now())
+		// ?date=YYYY-MM-DD reads the week of that day (and the window
+		// ending on it), for the dashboard's date picker; without it, today.
+		now := academytime.Now()
+		if day := r.URL.Query().Get("date"); day != "" {
+			picked, err := time.ParseInLocation(academytime.DayLayout, day, academytime.Location())
+			if err != nil {
+				httpx.Error(w, http.StatusBadRequest, "date must be YYYY-MM-DD", nil)
+				return
+			}
+			now = picked.Add(12 * time.Hour)
+		}
+		a, err := readDashboardActivity(d, now)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not read game activity", err)
 			return
