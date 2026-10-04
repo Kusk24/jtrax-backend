@@ -302,6 +302,9 @@ func Registry() []*Resource {
 				{Name: "archived_at", Kind: "text"},
 			},
 			ReadRoles: everyone,
+			// Blank is "never expires"; 0 is refused rather than read as the
+			// same, because "0 days" says the opposite to whoever reads it.
+			Check: checkPackageValidity,
 		},
 		{
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",

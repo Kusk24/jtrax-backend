@@ -9,7 +9,11 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // tournamentPrice is everything about a tournament that bears on its fee.
@@ -118,4 +122,38 @@ func num(v any) float64 {
 		return n
 	}
 	return 0
+}
+
+// checkPackageValidity lets a credit package's validity be blank — never
+// expires — or a whole number of days from 1. Zero used to be accepted as a
+// second way of writing "never", which read as "expires at once" to anybody
+// who saw it; it is refused now, and 0061 cleared the ones already stored.
+func checkPackageValidity(row map[string]any) error {
+	v, present := row["validity_days"]
+	if !present || v == nil || v == "" {
+		return nil
+	}
+	var days float64
+	switch n := v.(type) {
+	case float64:
+		days = n
+	case int64:
+		days = float64(n)
+	case int:
+		days = float64(n)
+	case json.Number:
+		days, _ = n.Float64()
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return errors.New("validity must be a number of days, or blank for never expires")
+		}
+		days = f
+	default:
+		return errors.New("validity must be a number of days, or blank for never expires")
+	}
+	if days < 1 || days != math.Trunc(days) {
+		return errors.New("validity must be at least 1 day — leave it blank for credits that never expire")
+	}
+	return nil
 }
