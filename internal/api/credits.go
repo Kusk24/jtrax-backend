@@ -207,9 +207,11 @@ func chargeAttendance(tx *sql.Tx, attendanceID string) error {
 	// happened.
 	_, err = tx.Exec(`
 		INSERT INTO credit_transaction
-			(credit_transaction_id, enrollment_id, transaction_type, amount, transaction_date, attendance_id)
-		VALUES (?,?,'consumption',?,?,?)`,
-		newID("ctx"), enrolment, -hours, date, attendanceID)
+			(credit_transaction_id, enrollment_id, student_id, class_id,
+			 transaction_type, amount, transaction_date, attendance_id)
+		SELECT ?, e.enrollment_id, e.student_id, e.class_id, 'consumption', ?, ?, ?
+		  FROM student_enrollment e WHERE e.enrollment_id = ?`,
+		newID("ctx"), -hours, date, attendanceID, enrolment)
 	return err
 }
 

@@ -200,3 +200,20 @@ func TestOneClassAtATimeHoldsForBookingsToo(t *testing.T) {
 		t.Fatalf("booking an overlapping class: %d, want 409", status)
 	}
 }
+
+// The charge names the student, as a purchase does, so the parent's
+// "Credits used" (which reads the ledger by student) counts it.
+func TestAClassChargeNamesItsStudent(t *testing.T) {
+	date := day(6)
+	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 10)
+	book(t, c, studentID, sessionID)
+	api.RunClassStarts(d, at10(date, 0))
+	var who sql.NullString
+	if err := d.QueryRow(`SELECT student_id FROM credit_transaction
+	                       WHERE transaction_type = 'consumption' AND enrollment_id = ?`, enrolmentID).Scan(&who); err != nil {
+		t.Fatal(err)
+	}
+	if who.String != studentID {
+		t.Fatalf("charge names %q, want %q", who.String, studentID)
+	}
+}
