@@ -542,3 +542,26 @@ func TestAnEarlyCheckOutSaysWhenTheChildLeft(t *testing.T) {
 	}
 }
 
+
+// Arriving late is charged for the part of the class attended, and the
+// receipt says so: half an hour of a one-hour class is half a credit.
+func TestALateArrivalIsChargedForTheTimeAttended(t *testing.T) {
+	srv := newServer(t)
+	teacher := &client{t: t, srv: srv}
+	teacher.login("serene@jca.ac.th")
+	_, obj, _ := teacher.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": "stu_penny", "session_id": "ses_b3", "check_in_time": "2026-05-20T14:30:00",
+	})
+	attID, _ := obj["attendance_id"].(string)
+	if status, _, _ := teacher.do("PATCH", "/api/v1/attendance/"+attID, map[string]any{
+		"check_out_time": "2026-05-20T15:01:00",
+	}); status != 200 {
+		t.Fatalf("check-out: %d", status)
+	}
+	body := bodyOfType(inbox(t, srv, "sandy01234@gmail.com"), "credit_deducted")
+	for _, want := range []string{"Attended: 14:30 – 15:00 (arrived late).", "Credit used: 0.5.", "Remaining credit: 18.5."} {
+		if !contains(body, want) {
+			t.Fatalf("deduction body missing %q: %s", want, body)
+		}
+	}
+}

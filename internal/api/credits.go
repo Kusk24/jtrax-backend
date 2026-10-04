@@ -77,35 +77,36 @@ func sessionHours(tx *sql.Tx, sessionID string) (hours float64, date, start stri
 	return hoursBetween(startCol.String, end.String), dateCol.String, startCol.String, nil
 }
 
-// attendedHours is what a visit that ended before the class did costs: from
-// when the student arrived (or the class began, if they were early) to when
-// they left, rounded to the academy's step. A visit with no check-out, or one
-// that ran to the scheduled end or past it, costs the whole class — `hours`.
+// attendedHours is what a visit costs: the part of the class the student was
+// there for — from when they arrived (or the class began, if they were early)
+// to when they left (or the class ended, if they stayed on) — rounded to the
+// academy's step. Arriving late and leaving early each cost less; a visit
+// that covers the whole class costs the whole class, `hours`. With no
+// check-out yet, the student is counted to the end.
 func attendedHours(tx *sql.Tx, hours float64, date, start, checkIn, checkOut string) float64 {
-	out, ok := academytime.Moment(checkOut)
-	if !ok {
-		return hours
-	}
 	begin, ok := academytime.At(date, start)
 	if !ok {
 		return hours
 	}
 	end := begin.Add(time.Duration(hours * float64(time.Hour)))
-	if !out.Before(end) {
-		return hours
-	}
-	from := begin
+	from, to := begin, end
 	if in, ok := academytime.Moment(checkIn); ok && in.After(begin) {
 		from = in
 	}
-	minutes := out.Sub(from).Minutes()
+	if out, ok := academytime.Moment(checkOut); ok && out.Before(end) {
+		to = out
+	}
+	if from.Equal(begin) && to.Equal(end) {
+		return hours
+	}
+	minutes := to.Sub(from).Minutes()
 	if minutes <= 0 {
 		return 0
 	}
 	if step := checkoutRoundMinutes(tx); step > 0 {
 		minutes = math.Round(minutes/step) * step
 	}
-	// Rounding up must never cost more than staying to the end would have.
+	// Rounding up must never cost more than the whole class would have.
 	return math.Min(minutes/60, hours)
 }
 

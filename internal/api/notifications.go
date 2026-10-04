@@ -803,28 +803,34 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 }
 
 // attendedPart says when the child actually was in class, when that is what
-// the credits were charged for: a check-out before the end charges from the
-// start (or a later arrival) to the check-out (attendedHours), so a "1 credit"
-// for a two-hour class needs its times beside it. Empty when they stayed to
-// the end, which charges the class's full length.
+// the credits were charged for: arriving late or leaving early charges only
+// the part attended (attendedHours), so a "1 credit" for a two-hour class
+// needs its times beside it. Empty when they were there start to end.
 func attendedPart(day, start, end, checkIn, checkOut string) (en, th string) {
-	out, ok := academytime.Moment(checkOut)
-	if !ok {
+	begin, okB := academytime.At(day, start)
+	finish, okE := academytime.At(day, end)
+	if !okB || !okE {
 		return "", ""
 	}
-	finish, ok := academytime.At(day, end)
-	if !ok || !out.Before(finish) {
-		return "", ""
+	zone := academytime.Location()
+	in, okIn := academytime.Moment(checkIn)
+	late := okIn && in.After(begin)
+	out, okOut := academytime.Moment(checkOut)
+	early := okOut && out.Before(finish)
+	switch {
+	case late && early:
+		arrived, left := in.In(zone).Format("15:04"), out.In(zone).Format("15:04")
+		return " Attended: " + arrived + " – " + left + " (arrived late, left early).",
+			" เข้าเรียนจริง " + arrived + " – " + left + " (มาสายและกลับก่อนเวลา)"
+	case late:
+		arrived := in.In(zone).Format("15:04")
+		return " Attended: " + arrived + " – " + end + " (arrived late).",
+			" เข้าเรียนจริง " + arrived + " – " + end + " (มาสาย)"
+	case early:
+		left := out.In(zone).Format("15:04")
+		return " Left early at " + left + ".", " กลับก่อนเวลาเมื่อ " + left
 	}
-	left := out.In(academytime.Location()).Format("15:04")
-	if begin, ok := academytime.At(day, start); ok {
-		if in, ok := academytime.Moment(checkIn); ok && in.After(begin) {
-			arrived := in.In(academytime.Location()).Format("15:04")
-			return " Attended: " + arrived + " – " + left + " (arrived late, left early).",
-				" เข้าเรียนจริง " + arrived + " – " + left + " (มาสายและกลับก่อนเวลา)"
-		}
-	}
-	return " Left early at " + left + ".", " กลับก่อนเวลาเมื่อ " + left
+	return "", ""
 }
 
 // lowCreditLine is the academy's own threshold, the same
