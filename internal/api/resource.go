@@ -90,6 +90,9 @@ type Resource struct {
 	AfterInsert func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
+	// NoDelete, when set, refuses every delete with this message: a record
+	// kept for good, which is corrected by editing it instead.
+	NoDelete string
 	// AfterCommit runs once the row is committed and reloaded, OUTSIDE the
 	// write transaction — unlike AfterWrite, which is part of it. It is for a
 	// consequence that reaches beyond the database: a check-in becoming a
@@ -512,6 +515,10 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 		}
 		if !isStaff(id.Role) {
 			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			return
+		}
+		if rs.NoDelete != "" {
+			httpx.Error(w, http.StatusMethodNotAllowed, rs.NoDelete, nil)
 			return
 		}
 		del := "DELETE FROM " + rs.Table + " WHERE " + rs.IDCol + " = ?"
