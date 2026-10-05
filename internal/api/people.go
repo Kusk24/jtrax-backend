@@ -108,6 +108,8 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 		`DELETE FROM puzzle_list WHERE student_id = ?`,
 		`DELETE FROM tournament_registration WHERE student_id = ?`,
 		`DELETE FROM student_parent WHERE student_id = ?`,
+		/* The LINE chat stays; it is only no longer theirs. */
+		`UPDATE line_contact SET student_id = NULL WHERE student_id = ?`,
 		`DELETE FROM student WHERE student_id = ?`,
 	} {
 		if _, err := tx.Exec(q, studentID); err != nil {
@@ -134,6 +136,7 @@ func removeParent(tx *sql.Tx, parentID string, res *deleteResult) error {
 		`DELETE FROM parent_contact WHERE parent_id = ?`,
 		`DELETE FROM notification_preference WHERE parent_id = ?`,
 		`DELETE FROM student_parent WHERE parent_id = ?`,
+		`UPDATE line_contact SET parent_id = NULL WHERE parent_id = ?`,
 		`DELETE FROM parent WHERE parent_id = ?`,
 	} {
 		if _, err := tx.Exec(q, parentID); err != nil {

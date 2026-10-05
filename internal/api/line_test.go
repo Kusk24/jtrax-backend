@@ -660,3 +660,91 @@ func TestLineGroupEventsAreIgnored(t *testing.T) {
 		t.Fatalf("a group message became a 1:1 conversation: %v", list)
 	}
 }
+
+/* The office links a chat to a family; the list and the thread both say so. */
+func TestLineChatLinksToAParent(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, inboundText("m1", "hello", "rt1"))
+
+	status, obj, _ := c.do("PUT", "/api/v1/line/conversations/"+testUserID+"/link", map[string]string{"parentId": "par_sandy"})
+	if status != 200 || obj["parentId"] != "par_sandy" || obj["linkedName"] != "Sandy Jones" {
+		t.Fatalf("link: status %d, %v", status, obj)
+	}
+	_, _, list := c.do("GET", "/api/v1/line/conversations", nil)
+	if len(list) != 1 || list[0]["parentId"] != "par_sandy" || list[0]["linkedName"] != "Sandy Jones" {
+		t.Errorf("the list does not show the link: %v", list)
+	}
+	_, thread, _ := c.do("GET", "/api/v1/line/conversations/"+testUserID, nil)
+	if conv, _ := thread["conversation"].(map[string]any); conv["parentId"] != "par_sandy" {
+		t.Errorf("the thread does not show the link: %v", conv)
+	}
+
+	/* Re-linking to a student replaces the parent; empty unlinks. */
+	status, obj, _ = c.do("PUT", "/api/v1/line/conversations/"+testUserID+"/link", map[string]string{"studentId": "stu_penny"})
+	if status != 200 || obj["studentId"] != "stu_penny" || obj["parentId"] != nil || obj["linkedName"] != "Penny" {
+		t.Errorf("relink to a student: status %d, %v", status, obj)
+	}
+	status, obj, _ = c.do("PUT", "/api/v1/line/conversations/"+testUserID+"/link", map[string]string{})
+	if status != 200 || obj["studentId"] != nil || obj["linkedName"] != nil {
+		t.Errorf("unlink: status %d, %v", status, obj)
+	}
+}
+
+func TestLineChatLinkIsRefusedWhenAmbiguous(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, inboundText("m1", "hello", "rt1"))
+	other := inboundText("m2", "hi", "rt2")
+	other["source"] = map[string]any{"type": "user", "userId": "U00000000000000000000000000000002"}
+	c.webhook(testChannelSecret, other)
+	link := func(uid string, body map[string]string) int {
+		status, _, _ := c.do("PUT", "/api/v1/line/conversations/"+uid+"/link", body)
+		return status
+	}
+
+	if s := link(testUserID, map[string]string{"parentId": "par_sandy", "studentId": "stu_penny"}); s != 400 {
+		t.Errorf("both at once: status %d, want 400", s)
+	}
+	if s := link(testUserID, map[string]string{"parentId": "par_nobody"}); s != 404 {
+		t.Errorf("unknown parent: status %d, want 404", s)
+	}
+	if s := link("U_nobody", map[string]string{"parentId": "par_sandy"}); s != 404 {
+		t.Errorf("unknown chat: status %d, want 404", s)
+	}
+	if s := link(testUserID, map[string]string{"parentId": "par_sandy"}); s != 200 {
+		t.Fatalf("first link: status %d", s)
+	}
+	/* One chat per parent: a second chat cannot take Sandy. */
+	if s := link("U00000000000000000000000000000002", map[string]string{"parentId": "par_sandy"}); s != 409 {
+		t.Errorf("second chat for the same parent: status %d, want 409", s)
+	}
+}
+
+func TestLineChatLinkIsStaffOnly(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, inboundText("m1", "hello", "rt1"))
+	for _, who := range []string{"sandy01234@gmail.com", "penny@jca.ac.th"} {
+		other := &client{t: t, srv: c.srv}
+		other.login(who)
+		status, _, _ := other.do("PUT", "/api/v1/line/conversations/"+testUserID+"/link", map[string]string{"parentId": "par_sandy"})
+		if status != 403 {
+			t.Errorf("%s could link a chat: status %d, want 403", who, status)
+		}
+	}
+}
+
+/* Deleting the family keeps the chat, unlinked; it does not block the delete. */
+func TestLineChatOutlivesTheFamilyItWasLinkedTo(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, inboundText("m1", "hello", "rt1"))
+	if status, _, _ := c.do("PUT", "/api/v1/line/conversations/"+testUserID+"/link", map[string]string{"parentId": "par_sandy"}); status != 200 {
+		t.Fatalf("link: status %d", status)
+	}
+	if status, obj, _ := c.do("DELETE", "/api/v1/parents/par_sandy/cascade?children=delete", nil); status != 200 {
+		t.Fatalf("delete the family: status %d, %v", status, obj)
+	}
+	status, thread, _ := c.do("GET", "/api/v1/line/conversations/"+testUserID, nil)
+	conv, _ := thread["conversation"].(map[string]any)
+	if status != 200 || conv["parentId"] != nil {
+		t.Errorf("after the delete: status %d, conversation %v", status, conv)
+	}
+}
