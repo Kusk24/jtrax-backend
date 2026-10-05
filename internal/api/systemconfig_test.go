@@ -55,4 +55,3 @@ func TestTheCertificateMilestoneIsInHours(t *testing.T) {
 	}
 	t.Fatalf("certificate_hours is not set: %v", list)
 }
-
