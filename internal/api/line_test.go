@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -215,6 +216,43 @@ func TestLineWebhookRejectsAnUnsignedBody(t *testing.T) {
 	}
 }
 
+func TestLineInboxStreamOpensWithTheCurrentList(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, inboundText("m1", "hello", "rt1"))
+
+	// Nothing happens after connecting, so the list has to arrive by itself,
+	// long before the 25-second heartbeat. Until the server writes something
+	// the headers are not sent, and the console shows the stream as down. The
+	// bounded client in send() fails this rather than waiting for the ping.
+	res := c.send("GET", "/api/v1/line/events")
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", res.StatusCode)
+	}
+
+	lines := bufio.NewScanner(res.Body)
+	var event, data string
+	for data == "" && lines.Scan() {
+		line := lines.Text()
+		if v, ok := strings.CutPrefix(line, "event: "); ok {
+			event = v
+		}
+		if v, ok := strings.CutPrefix(line, "data: "); ok {
+			data = v
+		}
+	}
+	if event != "inbox" {
+		t.Fatalf("first event = %q, want inbox (%v)", event, lines.Err())
+	}
+	var snapshot struct {
+		Conversations []struct{ LineUserID string }
+	}
+	json.Unmarshal([]byte(data), &snapshot)
+	if len(snapshot.Conversations) != 1 || snapshot.Conversations[0].LineUserID != testUserID {
+		t.Errorf("snapshot = %s, want the one conversation", data)
+	}
+}
+
 func TestLineWebhookRecordsAnInboundMessage(t *testing.T) {
 	c, _ := newLineServer(t)
 
@@ -376,6 +414,22 @@ func TestLineChannelNeverReturnsTheAccessToken(t *testing.T) {
 	}
 	if !strings.Contains(body, `"configured":true`) {
 		t.Errorf("expected configured:true in %s", body)
+	}
+}
+
+// The webhook address the console shows is the public one. The console reaches
+// this API through its own server, on the internal address, so an address
+// built from the request named 127.0.0.1 — one LINE can never call.
+func TestLineChannelShowsThePublicWebhookAddress(t *testing.T) {
+	t.Setenv("PUBLIC_API_URL", "https://api.example.test/")
+	c, _ := newLineServer(t)
+
+	status, obj, _ := c.do("GET", "/api/v1/line/channel", nil)
+	if status != 200 {
+		t.Fatalf("channel settings: status %d", status)
+	}
+	if got, want := obj["webhookUrl"], "https://api.example.test/api/v1/line/webhook"; got != want {
+		t.Errorf("webhookUrl = %v, want %v", got, want)
 	}
 }
 
