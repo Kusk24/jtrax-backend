@@ -280,4 +280,3 @@ func entryClosed(q interface {
 	}
 	return "", nil
 }
-
