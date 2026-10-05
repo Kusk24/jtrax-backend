@@ -67,8 +67,9 @@ var (
 	// A course's level, apart from its type (0066).
 	classLevels = []string{"Beginner", "Intermediate", "Advanced"}
 	payMethods  = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
-	// Pending and Refunded are not revenue; the console totals only Paid.
-	payStatus      = []string{"Paid", "Pending", "Refunded"}
+	// Pending is not revenue; the console totals only Paid. There are no
+	// refunds — fees are non-refundable — so there is no Refunded.
+	payStatus      = []string{"Paid", "Pending"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
 	// Public sign-ups arrive Pending; staff entry has always meant Approved.
