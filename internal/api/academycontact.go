@@ -26,7 +26,6 @@ var academyContactKeys = map[string]string{
 	"instagram": "academy_instagram",
 	"website":   "academy_website",
 	"address":   "academy_address",
-	"hours":     "academy_hours",
 }
 
 func handleAcademyContact(d *sql.DB) http.HandlerFunc {
