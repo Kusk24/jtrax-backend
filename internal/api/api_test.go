@@ -118,7 +118,7 @@ func TestAdminCRUDLifecycle(t *testing.T) {
 	c.login("admin@jca.ac.th")
 
 	status, created, _ := c.do("POST", "/api/v1/classes", map[string]any{
-		"name": "Master Class", "class_type": "Master",
+		"name": "Master Class", "class_type": "Private", "level": "Advanced",
 	})
 	if status != 201 {
 		t.Fatalf("create: want 201, got %d (%v)", status, created)

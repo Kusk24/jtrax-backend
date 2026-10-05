@@ -61,8 +61,12 @@ var (
 	everyone      = []string{"Teacher", "Parent", "Student"}
 	sessionStatus = []string{"Scheduled", "Ongoing", "Completed"}
 	enrollStatus  = []string{"Active", "Completed", "Withdrawn"}
-	classTypes    = []string{"Private", "Group", "Master"}
-	payMethods    = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
+	// How a course is taught: one-to-one or a group. "Master" was a level
+	// and is now one (0066).
+	classTypes = []string{"Private", "Group"}
+	// A course's level, apart from its type (0066).
+	classLevels = []string{"Beginner", "Intermediate", "Advanced"}
+	payMethods  = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
 	// Pending and Refunded are not revenue; the console totals only Paid.
 	payStatus      = []string{"Paid", "Pending", "Refunded"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
@@ -198,7 +202,7 @@ func Registry() []*Resource {
 				// the icon: the names belong to the console's icon set, which
 				// moves with the design. See 0022.
 				{Name: "icon", Kind: "text"},
-				{Name: "badge", Kind: "text"},
+				{Name: "level", Kind: "text", Enum: classLevels},
 				// Set when the academy stops running this class. The row stays
 				// so last term's attendance and receipts still name it; every
 				// picker leaves it out. See 0020.

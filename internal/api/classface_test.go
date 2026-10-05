@@ -1,4 +1,4 @@
-// The icon and badge a class is shown with.
+// The icon and level a class is shown with.
 //
 // The Academy screen has offered an icon picker and a badge field since it was
 // built, and there was nowhere to put either: the console re-derived both from
@@ -8,26 +8,26 @@ package api_test
 
 import "testing"
 
-func TestClassKeepsItsIconAndBadge(t *testing.T) {
+func TestClassKeepsItsIconAndLevel(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
 
 	status, created, _ := c.do("POST", "/api/v1/classes", map[string]any{
 		"name":  "Saturday Juniors",
 		"icon":  "pawn",
-		"badge": "Juniors",
+		"level": "Intermediate",
 	})
 	if status != 201 {
 		t.Fatalf("create: want 201, got %d (%v)", status, created)
 	}
-	if created["icon"] != "pawn" || created["badge"] != "Juniors" {
-		t.Fatalf("icon and badge were discarded on create: %v", created)
+	if created["icon"] != "pawn" || created["level"] != "Intermediate" {
+		t.Fatalf("icon and level were discarded on create: %v", created)
 	}
 
 	id := created["class_id"].(string)
 
 	status, got, _ := c.do("GET", "/api/v1/classes/"+id, nil)
-	if status != 200 || got["icon"] != "pawn" || got["badge"] != "Juniors" {
+	if status != 200 || got["icon"] != "pawn" || got["level"] != "Intermediate" {
 		t.Fatalf("did not survive the round trip: %d %v", status, got)
 	}
 
@@ -36,17 +36,17 @@ func TestClassKeepsItsIconAndBadge(t *testing.T) {
 	// old one.
 	status, edited, _ := c.do("PATCH", "/api/v1/classes/"+id, map[string]any{
 		"icon":  "knight",
-		"badge": "Weekend",
+		"level": "Advanced",
 	})
-	if status != 200 || edited["icon"] != "knight" || edited["badge"] != "Weekend" {
+	if status != 200 || edited["icon"] != "knight" || edited["level"] != "Advanced" {
 		t.Fatalf("edit: %d (%v)", status, edited)
 	}
 
 	// Renaming must not quietly reset the face. A PATCH carries only what
 	// changed, and the columns it does not mention are left alone.
 	status, renamed, _ := c.do("PATCH", "/api/v1/classes/"+id, map[string]any{"name": "Sunday Juniors"})
-	if status != 200 || renamed["icon"] != "knight" || renamed["badge"] != "Weekend" {
-		t.Fatalf("rename cleared the icon or badge: %d (%v)", status, renamed)
+	if status != 200 || renamed["icon"] != "knight" || renamed["level"] != "Advanced" {
+		t.Fatalf("rename cleared the icon or level: %d (%v)", status, renamed)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestClassIconIsNotConstrainedToAList(t *testing.T) {
 // 0022 backfills the classes that predate it, which a freshly migrated
 // database never has — so the seed has to write both itself, or every class
 // the developer sees is the one case the console has to fall back for.
-func TestSeededClassesHaveAnIconAndABadge(t *testing.T) {
+func TestSeededClassesHaveAnIconAndALevel(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
 
@@ -87,8 +87,28 @@ func TestSeededClassesHaveAnIconAndABadge(t *testing.T) {
 		if row["icon"] == nil || row["icon"] == "" {
 			t.Errorf("%v has no icon", row["name"])
 		}
-		if row["badge"] == nil || row["badge"] == "" {
-			t.Errorf("%v has no badge", row["name"])
+		if row["level"] == nil || row["level"] == "" {
+			t.Errorf("%v has no level", row["name"])
 		}
+	}
+}
+
+// A course is a name, a level and a type: the level is one of three, and
+// "Master" is no longer a type (0066).
+func TestACourseHasALevelAndAPrivateOrGroupType(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	if s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "level": "Expert"}); s != 400 {
+		t.Fatalf("an unknown level: want 400, got %d (%v)", s, out)
+	}
+	if s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "class_type": "Master"}); s != 400 {
+		t.Fatalf("the Master type: want 400, got %d (%v)", s, out)
+	}
+	s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "level": "Advanced", "class_type": "Private"})
+	if s != 201 || out["level"] != "Advanced" || out["class_type"] != "Private" {
+		t.Fatalf("create: %d (%v)", s, out)
+	}
+	if _, has := out["badge"]; has {
+		t.Fatalf("the badge is still there: %v", out)
 	}
 }
