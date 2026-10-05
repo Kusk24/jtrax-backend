@@ -85,10 +85,17 @@ type Session struct {
 // payment id rides in the metadata so the webhook can find its way back.
 // customerEmail, when known, is filled in on the page so the payer does not
 // type it twice; empty leaves the box for them.
-func (c *Client) CreateCheckoutSession(ctx context.Context, paymentID, productName string, amountSatang int64, successURL, cancelURL, customerEmail string) (Session, error) {
+//
+// expiresAt, when set, closes the page early (Stripe allows 30 minutes to 24
+// hours; zero leaves Stripe's 24). A tournament entry uses it so a family
+// who walks away hears "your payment was not completed" within the hour.
+func (c *Client) CreateCheckoutSession(ctx context.Context, paymentID, productName string, amountSatang int64, successURL, cancelURL, customerEmail string, expiresAt time.Time) (Session, error) {
 	form := url.Values{}
 	if customerEmail != "" {
 		form.Set("customer_email", customerEmail)
+	}
+	if !expiresAt.IsZero() {
+		form.Set("expires_at", strconv.FormatInt(expiresAt.Unix(), 10))
 	}
 	form.Set("mode", "payment")
 	form.Set("client_reference_id", paymentID)
@@ -187,6 +194,29 @@ func (c *Client) GetCheckoutSession(ctx context.Context, id string) (SessionStat
 		ID: s.ID, Status: s.Status, PaymentStatus: s.PaymentStatus,
 		AmountTotal: s.AmountTotal, Currency: s.Currency, PaymentID: s.Metadata["payment_id"],
 	}, nil
+}
+
+// ExpireCheckoutSession closes a page that is still open, so it can no longer
+// take money — for an entry whose place has been released. Stripe refuses
+// to expire a page that is already complete or expired; that comes back as
+// an error the caller may ignore.
+func (c *Client) ExpireCheckoutSession(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/v1/checkout/sessions/"+url.PathEscape(id)+"/expire", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.key)
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("stripe: expiring session: %s: %s", res.Status, truncate(body, 300))
+	}
+	return nil
 }
 
 // Tolerance is how stale a webhook's timestamp may be. Five minutes is

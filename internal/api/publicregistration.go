@@ -39,6 +39,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -280,6 +281,11 @@ type registerInput struct {
 	/* The ID card check the scan returned (idcheck.go). Required: the date
 	   of birth, and so the age group, comes from it. */
 	IDCheck string `json:"idCheck"`
+
+	/* "now" sends the family straight to Stripe and holds the email until
+	   the payment either settles or does not; "later" emails the pay link at
+	   once. Empty is "later", which is what every form before this one did. */
+	PayChoice string `json:"payChoice"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -327,6 +333,11 @@ func (in *registerInput) validate() string {
 	case "", "thai-id", "passport":
 	default:
 		return "that document type is not one we know"
+	}
+	switch in.PayChoice {
+	case "", "now", "later":
+	default:
+		return "please choose whether to pay now or later"
 	}
 	if in.ScannedDateOfBirth != "" {
 		if _, err := time.Parse("2006-01-02", in.ScannedDateOfBirth); err != nil {
@@ -407,11 +418,23 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			ScannedName:        r.FormValue("scannedName"),
 			ScannedDateOfBirth: r.FormValue("scannedDateOfBirth"),
 			IDCheck:            r.FormValue("idCheck"),
+			PayChoice:          r.FormValue("payChoice"),
 		}
 		if msg := in.validate(); msg != "" {
 			httpx.Error(w, http.StatusBadRequest, msg, nil)
 			return
 		}
+
+		regID := newID("treg")
+		// The entrant's right to pay for this entry later, from the email.
+		// Only the hash is stored; the code itself goes back once, below.
+		// Made before the transaction: it may write its key on first use.
+		payCode, payCodeHash, err := entryPayCode(d, regID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+
 		tx, err := d.Begin()
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
@@ -461,9 +484,8 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 		// A category, when given, has to belong to *this* event — otherwise the
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
-		var catName string
 		if in.CategoryID != "" {
-			name, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
+			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
 			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 				return
@@ -472,7 +494,6 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 				httpx.Error(w, http.StatusBadRequest, msg, nil)
 				return
 			}
-			catName = name
 			categoryID = in.CategoryID
 		}
 
@@ -519,13 +540,14 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			earlyBird = t.price.StudentEarlyBird && t.EarlyBirdActive
 		}
 
-		regID := newID("treg")
-		// The entrant's right to pay for this entry later, from the email.
-		// Only the hash is stored; the code itself goes back once, below.
-		payCode, payCodeHash, err := newPayCode()
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
-			return
+		// Nothing to pay has no choice to make, and without card payments
+		// "now" is not on offer: both are recorded as what they amount to.
+		choice := in.PayChoice
+		switch {
+		case fee <= 0:
+			choice = ""
+		case deps.stripe == nil || choice == "":
+			choice = "later"
 		}
 		// fee_charged is set here because approving used to set it, and there
 		// is no approving any more. A quote that never becomes a charge would
@@ -538,8 +560,8 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
 			student_discount_applied, nickname, participant_age, terms_accepted_at,
 			pay_code_hash, early_bird_applied, priced_as_student,
-			participant_name_th, id_document_type, ocr_name, ocr_date_of_birth
-		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			participant_name_th, id_document_type, ocr_name, ocr_date_of_birth, pay_choice
+		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			regID, tournamentID, studentID, in.Name,
 			nullIfEmpty(in.DateOfBirth), categoryID, sqliteNow(),
 			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent),
@@ -553,7 +575,7 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			/* How it was priced, for the early-bird rule (entryrules.go). */
 			boolToInt(earlyBird), boolToInt(in.IsStudent),
 			nullIfEmpty(in.NameTh), nullIfEmpty(in.DocumentType),
-			nullIfEmpty(in.ScannedName), nullIfEmpty(in.ScannedDateOfBirth))
+			nullIfEmpty(in.ScannedName), nullIfEmpty(in.ScannedDateOfBirth), nullIfEmpty(choice))
 		if err != nil {
 			// The partial unique indexes are the last word on duplicates, and
 			// they are reached rather than pre-checked so that two simultaneous
@@ -571,13 +593,27 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			return
 		}
 
-		// Off the request, so a slow mail server does not hold the entrant at a
-		// spinner after their place is already theirs.
-		ebUntil := ""
-		if earlyBird {
-			ebUntil = t.EarlyBirdUntil
+		// The fee is Pending from the moment the place is taken, whichever way
+		// it will be paid, so a fee nobody pays has something to expire.
+		if fee > 0 {
+			sid, _ := studentID.(string)
+			if _, err := createTournamentPayment(d, regID, sql.NullString{String: sid, Valid: sid != ""},
+				in.Name, t.Name, fee); err != nil {
+				// The pay page makes it on first use; nothing is lost.
+				log.Printf("public entry %s: opening its payment: %v", regID, err)
+			}
 		}
-		go sendEntryConfirmation(deps, in.Email, tournamentID, t.Name, regID, in.Name, catName, fee, payCode, ebUntil, t.Deadline)
+
+		// Off the request, so a slow mail server does not hold the entrant at a
+		// spinner after their place is already theirs. "now" waits: the next
+		// email is "confirmed" or "payment not completed" (entryemails.go).
+		online := deps.stripe != nil
+		switch {
+		case fee <= 0:
+			go sendEntryNotice(d, deps.notifier, regID, noticeConfirmed, online)
+		case choice == "later" && claim(d, "reserved_emailed_at", regID):
+			go sendEntryNotice(d, deps.notifier, regID, noticeReserved, online)
+		}
 
 		httpx.JSON(w, http.StatusCreated, map[string]any{
 			"registered": true,
@@ -589,7 +625,10 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			"registrationId": regID,
 			"payCode":        payCode,
 			"cardPayments":   deps.stripe != nil && fee > 0,
-			"emailed":        deps.sender != nil,
+			"payChoice":      choice,
+			// Only what has gone: a "pay now" entry is emailed once the
+			// payment settles or fails, not here.
+			"emailed": deps.sender != nil && choice != "now",
 			// Kept, and false, rather than dropped: a portal still running the
 			// previous build reads this to decide whether to say "we will
 			// confirm your place". Removing the key would leave it undefined,

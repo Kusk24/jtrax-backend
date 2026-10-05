@@ -52,7 +52,7 @@ func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg st
 		"Payment received — thank you! · ชำระเงินเรียบร้อยแล้ว ขอบคุณค่ะ")))
 	// A tournament entry's cancel page says what happens to the unpaid place
 	// (entrynotice.go); any other payment's says nothing was charged.
-	mux.HandleFunc("GET /pay/cancelled", httpx.RateLimit(60, handlePayCancelled(d)))
+	mux.HandleFunc("GET /pay/cancelled", httpx.RateLimit(60, handlePayCancelled(d, svc, client != nil)))
 }
 
 func payPage(text string) http.HandlerFunc {
@@ -107,13 +107,13 @@ func handleStripeLink(d *sql.DB, client *stripepay.Client, cfg stripepay.Config)
 // decides nothing about authorization and must never be reached without that
 // check.
 func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, paymentID string) {
-	var status, studentName, className, existingURL string
+	var status, studentName, className, existingURL, existingSession string
 	var finalAmount float64
 	err := d.QueryRow(
 		`SELECT status, COALESCE(student_name,''), COALESCE(class_name,''),
-		        final_amount, COALESCE(stripe_checkout_url,'')
+		        final_amount, COALESCE(stripe_checkout_url,''), COALESCE(stripe_session_id,'')
 		   FROM payment WHERE payment_id = ?`, paymentID).
-		Scan(&status, &studentName, &className, &finalAmount, &existingURL)
+		Scan(&status, &studentName, &className, &finalAmount, &existingURL, &existingSession)
 	if err == sql.ErrNoRows {
 		httpx.Error(w, http.StatusNotFound, "no such payment", nil)
 		return
@@ -129,8 +129,13 @@ func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *str
 		return
 	}
 	if existingURL != "" {
-		httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
-		return
+		// A tournament page closes after half an hour; handing it back then
+		// would send the family to Stripe's "this page has expired".
+		s, err := client.GetCheckoutSession(r.Context(), existingSession)
+		if err != nil || s.Status != "expired" {
+			httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
+			return
+		}
 	}
 	satang := int64(math.Round(finalAmount * 100))
 	if satang < minSatang {
@@ -157,10 +162,17 @@ func checkoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client *str
 	if entry != "" {
 		cancelled += "?entry=" + url.QueryEscape(entry)
 	}
+	// A tournament entry's page closes after half an hour, so a family who
+	// walks away is told within the hour that the place is held but unpaid
+	// (entryemails.go). A course payment keeps Stripe's day.
+	var expires time.Time
+	if entry != "" {
+		expires = time.Now().Add(checkoutWindow)
+	}
 	// Stripe replaces {CHECKOUT_SESSION_ID} itself, so the return page can
 	// settle the payment without waiting for the webhook.
 	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
-		base+"/pay/done?session_id={CHECKOUT_SESSION_ID}", cancelled, email)
+		base+"/pay/done?session_id={CHECKOUT_SESSION_ID}", cancelled, email, expires)
 	if err != nil {
 		// The Stripe error names the account; the log gets it, the client
 		// does not.
@@ -251,6 +263,11 @@ func handleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.Han
 
 var errAmountMismatch = errors.New("amount mismatch")
 
+// checkoutWindow is how long a tournament entry's Stripe page stays open.
+// Stripe's floor is 30 minutes; the extra minute keeps a slow clock on either
+// side from putting the request under it.
+const checkoutWindow = 31 * time.Minute
+
 // settleCheckout marks a payment Paid for a Checkout session Stripe says is
 // paid, grants what it bought and sends the receipt. The webhook, the
 // thank-you page and the reconciler all settle through here, so it must be
@@ -287,13 +304,20 @@ func settleCheckout(d *sql.DB, svc *notify.Service, paymentID, sessionID string,
 		return "", errAmountMismatch
 	}
 
+	var was string
+	tx.QueryRow(`SELECT status FROM payment WHERE payment_id = ?`, paymentID).Scan(&was)
+	// Expired too: the money is real even when it arrived after the place was
+	// released, and the books must show it. Staff restore the place or refund.
 	res, err := tx.Exec(
 		`UPDATE payment SET status = 'Paid', payment_method = 'CreditCard',
 		        stripe_session_id = ?
-		  WHERE payment_id = ? AND status = 'Pending'`,
+		  WHERE payment_id = ? AND status IN ('Pending','Expired')`,
 		sessionID, paymentID)
 	if err != nil {
 		return "", err
+	}
+	if was == "Expired" {
+		log.Printf("stripe: %s was paid after its place was released — restore the entry or refund it", paymentID)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		// Already Paid (a retry, or the desk beat Stripe) — done.

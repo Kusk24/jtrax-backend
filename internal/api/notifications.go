@@ -21,7 +21,6 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
-	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/push"
 )
@@ -1001,20 +1000,9 @@ func emailPublicEntrantReceipt(d *sql.DB, svc *notify.Service, regID string, amo
 			return
 		}
 	}
-	amt := fmtBaht(amount)
-	svc.Email(email, "Payment received: "+tournament, mail.Email{
-		Heading:  "Payment received",
-		Greeting: "Hello,",
-		Paragraphs: []string{
-			"We have received your payment for " + participant + "'s entry to " + tournament + ". The entry is paid; there is nothing more to do.",
-			"เราได้รับค่าสมัคร " + tournament + " ของ " + participant + " จำนวน " + amt + " เรียบร้อยแล้ว ไม่ต้องดำเนินการใดเพิ่มเติม",
-		},
-		Details: []mail.Detail{
-			{Label: "Participant", Value: participant},
-			{Label: "Tournament", Value: tournament},
-			{Label: "Amount paid", Value: amt},
-		},
-	})
+	// "Registration Confirmed", with the date, venue and amount paid: the one
+	// email a family who paid gets, whether online or at the desk.
+	sendEntryNotice(d, svc, regID, noticeConfirmed, true)
 }
 
 // paymentMethodLabel reads the stored method ("BankTransfer") as people say it.

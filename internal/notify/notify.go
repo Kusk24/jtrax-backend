@@ -118,6 +118,10 @@ type Pusher interface {
 // SetPush turns phone delivery on.
 func (s *Service) SetPush(p Pusher) { s.push = p }
 
+// AppURL is the parent portal's address, for links in an email to somebody
+// with no account. Empty when it is not configured.
+func (s *Service) AppURL() string { return s.mailCfg.AppURL }
+
 func New(db *sql.DB, sender mail.Sender, cfg mail.Config) *Service {
 	return &Service{db: db, mail: sender, mailCfg: cfg}
 }

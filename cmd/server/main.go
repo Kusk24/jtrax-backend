@@ -68,7 +68,12 @@ func main() {
 	// Stripe (internal/api/stripe.go). Off until the Stripe key is set.
 	notifier := notify.New(d, mail.New(mailCfg), mailCfg)
 	notifier.SetPush(push.New(push.FromEnv()))
-	api.StartStripeReconciler(context.Background(), d, stripepay.New(stripepay.FromEnv()), notifier)
+	stripeClient := stripepay.New(stripepay.FromEnv())
+	api.StartStripeReconciler(context.Background(), d, stripeClient, notifier)
+	// The emails about an unpaid tournament entry: payment not completed,
+	// the day-before reminder, and the cancellation when its place is
+	// released (internal/api/entryemails.go).
+	api.StartEntryNotices(context.Background(), d, stripeClient, notifier)
 
 	port := os.Getenv("PORT")
 	if port == "" {

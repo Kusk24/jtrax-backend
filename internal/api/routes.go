@@ -87,6 +87,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	stripeClient := stripepay.New(stripeCfg)
 	mountPublicRegistration(mux, &publicEntryDeps{
 		db: d, sender: sender, mail: mailCfg, stripe: stripeClient, stripeCfg: stripeCfg,
+		notifier: notifier,
 	})
 	mountArrival(mux, d, mailCfg, sender)
 	mountDashboardActivity(mux, d)

@@ -18,12 +18,18 @@ import (
 
 const webhookSecret = "whsec_test_secret"
 
-// stripeStub plays Stripe's API: every session request answers with a fixed
-// checkout URL and remembers what was asked for.
+// stripeStub plays Stripe's API: every new session answers with a fixed
+// checkout URL and remembers what was asked for. Reading a session back says
+// it is still open, and is not counted — it opens nothing.
 func stripeStub(t *testing.T) (*httptest.Server, *[]string) {
 	t.Helper()
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprintf(w, `{"id":%q,"status":"open","payment_status":"unpaid"}`,
+				strings.TrimPrefix(r.URL.Path, "/v1/checkout/sessions/"))
+			return
+		}
 		b := make([]byte, r.ContentLength)
 		r.Body.Read(b)
 		bodies = append(bodies, string(b))
