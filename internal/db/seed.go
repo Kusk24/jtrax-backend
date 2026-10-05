@@ -96,10 +96,10 @@ func Seed(d *sql.DB, password string) error {
 		// icon and badge are how the class is drawn and labelled; a seeded
 		// class is written complete rather than relying on 0022's backfill,
 		// which only ever sees rows that predate it.
-		{`INSERT INTO class (class_id, name, description, class_type, icon, badge) VALUES (?,?,?,?,?,?)`,
-			[]any{"cls_beg101", "Beginner Chess (Sec 101)", "Fundamentals for new players", "Group", "pawn", "Beginner"}},
-		{`INSERT INTO class (class_id, name, description, class_type, icon, badge) VALUES (?,?,?,?,?,?)`,
-			[]any{"cls_int101", "Intermediate Chess (Sec 101)", "Tactics and openings", "Group", "knight", "Intermediate"}},
+		{`INSERT INTO class (class_id, name, description, class_type, icon, level) VALUES (?,?,?,?,?,?)`,
+			[]any{"cls_beg101", "JCA Starters", "Fundamentals for new players", "Group", "pawn", "Beginner"}},
+		{`INSERT INTO class (class_id, name, description, class_type, icon, level) VALUES (?,?,?,?,?,?)`,
+			[]any{"cls_int101", "JCA Juniors", "Tactics and openings", "Group", "knight", "Intermediate"}},
 		{`INSERT INTO credit_package (credit_package_id, class_id, credit_amount, standard_price, validity_days) VALUES (?,?,?,?,?)`,
 			[]any{"pkg_beg20", "cls_beg101", 20, 12000, 120}},
 		{`INSERT INTO credit_package (credit_package_id, class_id, credit_amount, standard_price, validity_days) VALUES (?,?,?,?,?)`,

@@ -10,13 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
-)
 
-// The academy's contacts, as its website (jcachess.ac.th) gives them.
-const (
-	academyPhone = "02-853-9836 / 099-0156-156"
-	academyEmail = "jcachess@gmail.com"
-	academyLINE  = "https://lin.ee/7fhq3N1"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
 // longDate writes 2026-09-28 as "28 September 2026" — the email and the page
@@ -48,8 +43,9 @@ func unpaidRules(earlyBirdUntil, closes string) (en, th []string) {
 }
 
 func contactLines() (en, th string) {
-	en = "Questions? Contact JCA Chess School — phone " + academyPhone + ", email " + academyEmail + ", LINE " + academyLINE
-	th = "สอบถามเพิ่มเติม ติดต่อ JCA Chess School โทร " + academyPhone + " อีเมล " + academyEmail + " LINE " + academyLINE
+	c := mail.CurrentContact()
+	en = "Questions? Contact JCA Chess School — phone " + c.Phone + ", email " + c.Email + ", LINE " + c.LINE
+	th = "สอบถามเพิ่มเติม ติดต่อ JCA Chess School โทร " + c.Phone + " อีเมล " + c.Email + " LINE " + c.LINE
 	return en, th
 }
 
@@ -93,9 +89,26 @@ func handlePayCancelled(d *sql.DB) http.HandlerFunc {
 
 		b.WriteString(`<div style="margin-top:18px;padding:14px 16px;border-radius:14px;background:#eef4ff;text-align:left;line-height:1.6">`)
 		b.WriteString(`<strong>JCA Chess School</strong><br>`)
-		b.WriteString(`Phone / โทร: <a href="tel:028539836">02-853-9836</a> · <a href="tel:0990156156">099-0156-156</a><br>`)
-		b.WriteString(`Email / อีเมล: <a href="mailto:` + academyEmail + `">` + academyEmail + `</a><br>`)
-		b.WriteString(`LINE: <a href="` + academyLINE + `">` + academyLINE + `</a></div>`)
+		c := mail.CurrentContact()
+		b.WriteString(`Phone / โทร: `)
+		for i, p := range c.Phones() {
+			if i > 0 {
+				b.WriteString(" · ")
+			}
+			tel := strings.Map(func(r rune) rune {
+				if (r >= '0' && r <= '9') || r == '+' {
+					return r
+				}
+				return -1
+			}, p)
+			b.WriteString(`<a href="tel:` + tel + `">` + html.EscapeString(p) + `</a>`)
+		}
+		b.WriteString(`<br>Email / อีเมล: <a href="mailto:` + html.EscapeString(c.Email) + `">` + html.EscapeString(c.Email) + `</a><br>`)
+		b.WriteString(`LINE: <a href="` + html.EscapeString(c.LINE) + `">` + html.EscapeString(c.LINE) + `</a>`)
+		for _, a := range c.Addresses() {
+			b.WriteString(`<br>` + html.EscapeString(a))
+		}
+		b.WriteString(`</div>`)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">` +

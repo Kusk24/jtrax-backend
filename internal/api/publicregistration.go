@@ -46,7 +46,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -60,13 +59,17 @@ const (
 	maxPhoneLen = 32
 )
 
+// The entry form is text only — the ID card is read by the scan, not sent
+// with the entry — so this bounds a few fields.
+const maxEntryFormBytes = 64 << 10
+
 // publicTournamentSelect is the shape of an open event as the public sees it.
 // Deliberately narrow: no organiser contact, no internal ids beyond the one
 // needed to register, nothing about who else has signed up beyond a count.
 const publicTournamentSelect = `
 	SELECT t.tournament_id, t.name, t.tournament_status,
 	       COALESCE(t.start_date,''), COALESCE(t.end_date,''),
-	       COALESCE(t.venue_name,''), COALESCE(t.venue_address,''),
+	       COALESCE(t.venue_name,''), COALESCE(t.venue_address,''), COALESCE(t.venue_map_url,''),
 	       COALESCE(t.registration_deadline,''),
 	       COALESCE(t.regular_fee, t.early_bird_fee, 0),
 	       COALESCE(t.early_bird_fee, 0), COALESCE(t.early_bird_deadline, ''),
@@ -87,6 +90,7 @@ type publicTournament struct {
 	EndDate      string `json:"endDate"`
 	VenueName    string `json:"venueName"`
 	VenueAddress string `json:"venueAddress"`
+	VenueMapURL  string `json:"venueMapUrl,omitempty"`
 	Deadline     string `json:"registrationDeadline"`
 	/* Fee is what an outside participant pays if they register right now —
 	   the early-bird price while its window is open, the regular price after.
@@ -120,7 +124,7 @@ func scanPublicTournament(sc interface{ Scan(...any) error }) (*publicTournament
 	var t publicTournament
 	var capacity sql.NullInt64
 	if err := sc.Scan(&t.ID, &t.Name, &t.Status, &t.StartDate, &t.EndDate,
-		&t.VenueName, &t.VenueAddress, &t.Deadline, &t.RegularFee,
+		&t.VenueName, &t.VenueAddress, &t.VenueMapURL, &t.Deadline, &t.RegularFee,
 		&t.EarlyBirdFee, &t.EarlyBirdUntil, &t.HasRegulation, &t.HasBanner,
 		&t.DiscountPct, &t.price.StudentDiscount, &t.price.StudentEarlyBird,
 		&capacity, &t.Taken); err != nil {
@@ -273,6 +277,9 @@ type registerInput struct {
 	   family did not scan. */
 	ScannedName        string `json:"scannedName"`
 	ScannedDateOfBirth string `json:"scannedDateOfBirth"`
+	/* The ID card check the scan returned (idcheck.go). Required: the date
+	   of birth, and so the age group, comes from it. */
+	IDCheck string `json:"idCheck"`
 }
 
 // validate checks everything at the boundary and returns a message safe to show
@@ -294,6 +301,8 @@ func (in *registerInput) validate() string {
 		return "please give the player's full name"
 	case in.Email == "" || len(in.Email) > maxEmailLen:
 		return "please give an email address"
+	case in.Phone == "":
+		return "please give a contact phone number"
 	case len(in.Phone) > maxPhoneLen:
 		return "that phone number is too long"
 	}
@@ -339,10 +348,11 @@ func (in *registerInput) validate() string {
 	return ""
 }
 
-// categoryAgeLimit reads the age out of a category's name — "U8 Boys" means
-// under 8 — so the age rule lives in the name the organiser already wrote
-// rather than in a column nobody fills. 0 means the name carries no age.
-var categoryAgePattern = regexp.MustCompile(`(?i)\bU\s?(\d{1,2})\b`)
+// categoryAgeLimit reads the age out of a category's name — "U8 Boys",
+// "U08" and "Under 8" all mean under 8 — so the age rule lives in the name the
+// organiser already wrote rather than in a column nobody fills. 0 means the
+// name carries no age.
+var categoryAgePattern = regexp.MustCompile(`(?i)\bU(?:nder)?[\s-]?(\d{1,2})\b`)
 
 func categoryAgeLimit(name string) int {
 	m := categoryAgePattern.FindStringSubmatch(name)
@@ -371,16 +381,37 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 	d := deps.db
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
-		var in registerInput
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxEntryFormBytes)
+		if err := r.ParseMultipartForm(maxEntryFormBytes); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "could not read the form — please try again", nil)
 			return
+		}
+		// age arrives as a form string like every other field here; an empty
+		// or unparsable one is 0, "not given", which is exactly what the old
+		// JSON decode produced for an absent field.
+		age, _ := strconv.Atoi(r.FormValue("age"))
+		in := registerInput{
+			Name:               r.FormValue("name"),
+			Email:              r.FormValue("email"),
+			Phone:              r.FormValue("phone"),
+			DateOfBirth:        r.FormValue("dateOfBirth"),
+			CategoryID:         r.FormValue("categoryId"),
+			IsStudent:          r.FormValue("isStudent") == "true",
+			StudentID:          r.FormValue("studentId"),
+			Nickname:           r.FormValue("nickname"),
+			Age:                age,
+			AcceptTerms:        r.FormValue("acceptTerms") == "true",
+			NameTh:             r.FormValue("nameTh"),
+			DocumentType:       r.FormValue("documentType"),
+			ScannedName:        r.FormValue("scannedName"),
+			ScannedDateOfBirth: r.FormValue("scannedDateOfBirth"),
+			IDCheck:            r.FormValue("idCheck"),
 		}
 		if msg := in.validate(); msg != "" {
 			httpx.Error(w, http.StatusBadRequest, msg, nil)
 			return
 		}
-
 		tx, err := d.Begin()
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
@@ -408,54 +439,40 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			return
 		}
 
+		/* The ID card check. The date of birth is the card's, not what was
+		   typed: it decides the age group, so it is the document's word. */
+		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, "")
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		if msg != "" {
+			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			return
+		}
+		in.DateOfBirth = card.DateOfBirth
+		in.ScannedDateOfBirth = card.DateOfBirth
+		in.ScannedName = card.Name
+		if card.DocumentType != "" {
+			in.DocumentType = card.DocumentType
+		}
+		in.Age = ageAt(card.DateOfBirth, t.StartDate)
+
 		// A category, when given, has to belong to *this* event — otherwise the
 		// form is a way to attach an entry to somebody else's tournament.
 		var categoryID any
 		var catName string
 		if in.CategoryID != "" {
-			err := tx.QueryRow(`SELECT name FROM tournament_category
-			                    WHERE tournament_category_id = ? AND tournament_id = ?`,
-				in.CategoryID, tournamentID).Scan(&catName)
-			if errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(w, http.StatusBadRequest, "that category is not part of this tournament", nil)
-				return
-			}
+			name, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
 			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 				return
 			}
-			// The age rule lives in the category's name, and goes by birth year
-			// as chess events do: "U10" at an event in 2026 is anybody born
-			// in 2016 or later. The page disables ineligible categories, but
-			// the page is a courtesy — this is the rule.
-			if limit := categoryAgeLimit(catName); limit > 0 {
-				/* The academy's year, not the server's: a tournament in
-				   Bangkok is dated by the poster, and a UTC clock turns the
-				   year over seven hours early. */
-				year := academytime.Now().Year()
-				if parsed, err := time.Parse("2006-01-02", t.StartDate); err == nil {
-					year = parsed.Year()
-				}
-				/* The date of birth is the rule, because it is what an ID card
-				   proves and an age is what somebody typed. A claimed age is
-				   accepted only when there is no date of birth at all. */
-				if in.DateOfBirth == "" {
-					if in.Age == 0 {
-						httpx.Error(w, http.StatusBadRequest, "this category has an age limit — please give the player's date of birth", nil)
-						return
-					}
-					if in.Age > limit {
-						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-						return
-					}
-				} else {
-					dob, _ := time.Parse("2006-01-02", in.DateOfBirth)
-					if !bornInTime(dob, year, limit) {
-						httpx.Error(w, http.StatusBadRequest, "the player is too old for this category — please pick another", nil)
-						return
-					}
-				}
+			if msg != "" {
+				httpx.Error(w, http.StatusBadRequest, msg, nil)
+				return
 			}
+			catName = name
 			categoryID = in.CategoryID
 		}
 

@@ -76,8 +76,14 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 			httpx.JSON(w, http.StatusAccepted, map[string]any{"email": email, "delivered": false})
 			return
 		}
-		if err := mail.Deliver(sender, email, "Welcome to JCA Chess School: set your password",
-			inviteEmail(displayName, email, childNamesOf(d, accountID), link, in.StudentLogins)); err != nil {
+		subject, body := "Welcome to JCA Chess School: set your password",
+			inviteEmail(displayName, email, childNamesOf(d, accountID), link, in.StudentLogins)
+		if role == "Student" {
+			// An older student with their own address: the parent's welcome
+			// would tell them about "your child's" classes.
+			subject, body = "JCA Chess School: Set Your JTrax Password", studentPasswordEmail(displayName, email, link)
+		}
+		if err := mail.Deliver(sender, email, subject, body); err != nil {
 			httpx.Error(w, http.StatusBadGateway, "the invite email could not be sent", err)
 			return
 		}
@@ -158,6 +164,29 @@ func inviteEmail(name, email string, children []string, link string, logins []st
 		Button:     &mail.Button{Label: "Set your password", URL: link},
 		Note: "The link works once and expires in 7 days. If it has expired, ask the office to send a new one. " +
 			"If you weren't expecting this email, you can ignore it.",
+	}
+}
+
+// studentPasswordEmail is the link sent to a student who signs in with their
+// own email address, to choose a new password.
+func studentPasswordEmail(name, email, link string) mail.Email {
+	return mail.Email{
+		Heading:  "Set Your JTrax Password",
+		Greeting: "Dear " + name + ",",
+		Paragraphs: []string{
+			"Your JTrax student account has been created by JCA Chess School.",
+			"To access your student account, please use the button below to set your password. " +
+				"Once your password has been set, you can use your JTrax account to sign in to the " +
+				"JTrax Student Portal and access your account information.",
+		},
+		Button: &mail.Button{Label: "Set My Password", URL: link},
+		After: []string{
+			"This password setup link is valid for 7 days and can only be used to set your password once.",
+			"If you did not expect to receive this email or believe this account was created in error, " +
+				"please contact JCA Chess School for assistance.",
+			"อีเมลฉบับนี้ส่งจาก JCA Chess School เพื่อให้คุณตั้งรหัสผ่านสำหรับบัญชี JTrax ของคุณ",
+		},
+		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Student Portal"},
 	}
 }
 

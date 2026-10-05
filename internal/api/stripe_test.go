@@ -43,6 +43,7 @@ func newStripeServer(t *testing.T, d *sql.DB) *httptest.Server {
 	t.Setenv("STRIPE_WEBHOOK_SECRET", webhookSecret)
 	t.Setenv("STRIPE_BASE_URL", stub.URL)
 	srv := httptest.NewServer(api.NewHandler(d))
+	serverDBs.Store(srv.URL, d)
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -283,9 +284,9 @@ func priceWellington(t *testing.T, srv *httptest.Server, fee float64) {
 func registerPenny(t *testing.T, c *client, fee float64) string {
 	t.Helper()
 	priceWellington(t, c.srv, fee)
-	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id": "stu_penny",
-	})
+	}))
 	if status != 201 {
 		t.Fatalf("registering: %d (%v)", status, obj)
 	}
@@ -383,19 +384,19 @@ func TestRegistrationKeepsWhatTheFamilyWrote(t *testing.T) {
 
 	// Refused before the row exists, so an oversized note cannot be a way to
 	// take a place without paying for one either.
-	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id":    "stu_penny",
 		"medical_notes": strings.Repeat("x", 2001),
-	})
+	}))
 	if status != http.StatusBadRequest {
 		t.Fatalf("an oversized note: got %d, want 400", status)
 	}
 
-	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id":    "stu_penny",
 		"medical_notes": "Asthma — inhaler in her bag.",
 		"remarks":       "Please seat her near the door.",
-	})
+	}))
 	if status != 201 {
 		t.Fatalf("registering with notes: %d (%v)", status, obj)
 	}

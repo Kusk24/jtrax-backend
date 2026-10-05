@@ -10,20 +10,22 @@ package api
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
 // academyContactKeys maps each served field to its configuration key.
 var academyContactKeys = map[string]string{
-	"name":     "academy_name",
-	"phone":    "academy_phone",
-	"email":    "academy_email",
-	"lineId":   "academy_line_id",
-	"facebook": "academy_facebook",
-	"website":  "academy_website",
-	"address":  "academy_address",
-	"hours":    "academy_hours",
+	"name":      "academy_name",
+	"phone":     "academy_phone",
+	"email":     "academy_email",
+	"lineId":    "academy_line_id",
+	"facebook":  "academy_facebook",
+	"instagram": "academy_instagram",
+	"website":   "academy_website",
+	"address":   "academy_address",
 }
 
 func handleAcademyContact(d *sql.DB) http.HandlerFunc {
@@ -46,4 +48,35 @@ func handleAcademyContact(d *sql.DB) http.HandlerFunc {
 
 func mountAcademyContact(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/public/academy", httpx.RateLimit(120, handleAcademyContact(d)))
+}
+
+// AcademyContact is what the office saved in Settings → Academy Contact, for
+// the footer of every email and the payment pages (mail.SetContactSource).
+// An empty field falls back to the website's details in mail.CurrentContact.
+func AcademyContact(d *sql.DB) mail.Contact {
+	get := func(key string) string {
+		var v string
+		d.QueryRow(`SELECT config_value FROM system_configuration WHERE config_key = ?`, key).Scan(&v)
+		return strings.TrimSpace(v)
+	}
+	return mail.Contact{
+		Phone:   get("academy_phone"),
+		Email:   get("academy_email"),
+		LINE:    lineLink(get("academy_line_id")),
+		Address: get("academy_address"),
+	}
+}
+
+// lineLink turns what the office typed for LINE into a link: a link as it
+// is, "lin.ee/…" with its scheme, and an "@id" as LINE's add-friend link.
+func lineLink(v string) string {
+	switch {
+	case v == "":
+		return ""
+	case strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://"):
+		return v
+	case strings.Contains(v, "/"):
+		return "https://" + v
+	}
+	return "https://line.me/R/ti/p/@" + strings.TrimPrefix(v, "@")
 }

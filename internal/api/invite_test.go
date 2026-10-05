@@ -57,6 +57,51 @@ func TestAChildCannotBeInvited(t *testing.T) {
 	}
 }
 
+// An older student with their own address gets a link too — worded for a
+// student, not the parent's welcome about "your child's" classes.
+func TestAStudentWithAnEmailGetsAStudentPasswordLink(t *testing.T) {
+	srv, cap := newResetServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	status, acct, _ := admin.do("POST", "/api/v1/user-accounts", map[string]any{
+		"email": "mint.student@example.com", "password": "Temp-Pass-12", "role": "Student", "display_name": "Mint",
+	})
+	if status != 201 {
+		t.Fatalf("creating a student account: %d (%v)", status, acct)
+	}
+	if status, got, _ := admin.do("POST", "/api/v1/user-accounts/"+acct["user_account_id"].(string)+"/invite", nil); status != 202 {
+		t.Fatalf("invite: %d (%v)", status, got)
+	}
+	to, body := cap.last()
+	if to != "mint.student@example.com" {
+		t.Fatalf("sent to %q", to)
+	}
+	if !strings.Contains(body, "Your JTrax student account has been created") || strings.Contains(body, "parent account") {
+		t.Fatalf("the student's email should be worded for a student:\n%s", body)
+	}
+	anon := &client{t: t, srv: srv}
+	if status, _, _ := anon.do("POST", "/api/v1/auth/reset-password", map[string]any{
+		"token": tokenFrom(body), "password": "Chosen-by-Mint-1",
+	}); status != 200 {
+		t.Fatalf("setting the password from the link: %d", status)
+	}
+
+	// And they really can sign in with that address — typed however they
+	// type it — and arrive as a student.
+	for _, typed := range []string{"mint.student@example.com", "  Mint.Student@Example.COM "} {
+		fresh := &client{t: t, srv: srv}
+		status, out, _ := fresh.do("POST", "/api/v1/auth/login", map[string]string{
+			"email": typed, "password": "Chosen-by-Mint-1",
+		})
+		if status != 200 {
+			t.Fatalf("student signing in with %q: %d (%v)", typed, status, out)
+		}
+		if user, _ := out["user"].(map[string]any); user["role"] != "Student" {
+			t.Fatalf("signed in as %v, want Student", out["user"])
+		}
+	}
+}
+
 func TestOnlyTheOfficeSendsInvites(t *testing.T) {
 	srv, _ := newResetServer(t)
 	sandy := &client{t: t, srv: srv}

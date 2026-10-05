@@ -193,6 +193,65 @@ func TestAClassNeedsOnlyAName(t *testing.T) {
 	}
 }
 
+// Since 0035: a package can name no validity window at all — a founding
+// rate, a free trial — rather than the office typing 0 to say the same thing.
+// Both read the same way downstream (COALESCE(validity_days, 0) in
+// grantPurchasedCredits, !validityDays in the console's expiryFrom), so this
+// only has to prove the write is accepted and the column comes back empty.
+func TestAPackageCanHaveNoValidity(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Forever Club"})
+
+	status, pkg, _ := c.do("POST", "/api/v1/credit-packages", map[string]any{
+		"class_id": class["class_id"], "credit_amount": 20, "standard_price": 12000,
+		// validity_days deliberately absent.
+	})
+	if status != 201 {
+		t.Fatalf("create with no validity_days: %d (%v)", status, pkg)
+	}
+	if pkg["validity_days"] != nil {
+		t.Fatalf("validity_days should read back empty, got %v", pkg["validity_days"])
+	}
+
+	// Reading the row back separately, not just the create response — a column
+	// that only looks empty in the create's own echo would still be a bug.
+	status, reread, _ := c.do("GET", "/api/v1/credit-packages/"+pkg["credit_package_id"].(string), nil)
+	if status != 200 || reread["validity_days"] != nil {
+		t.Fatalf("re-fetch: %d, validity_days=%v", status, reread["validity_days"])
+	}
+}
+
+// Blank is the one way to say "never expires". 0 used to be a second one and
+// read as "expires at once", so it is refused, on create and on edit — as is
+// anything short of a whole day.
+func TestAPackageValidityIsBlankOrAtLeastADay(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	_, class, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "Validity Club"})
+	pkg := func(validity any) (int, map[string]any) {
+		status, row, _ := c.do("POST", "/api/v1/credit-packages", map[string]any{
+			"class_id": class["class_id"], "credit_amount": 20, "standard_price": 12000, "validity_days": validity,
+		})
+		return status, row
+	}
+	for _, bad := range []any{0, -5, 1.5} {
+		if status, _ := pkg(bad); status != 400 {
+			t.Fatalf("validity %v: %d, want 400", bad, status)
+		}
+	}
+	for _, good := range []any{nil, "", 1, 90} {
+		if status, row := pkg(good); status != 201 {
+			t.Fatalf("validity %v: %d (%v), want 201", good, status, row)
+		}
+	}
+	_, made := pkg(30)
+	if status, _, _ := c.do("PATCH", "/api/v1/credit-packages/"+made["credit_package_id"].(string),
+		map[string]any{"validity_days": 0}); status != 400 {
+		t.Fatalf("editing validity to 0: %d, want 400", status)
+	}
+}
+
 // A package that has been sold cannot be deleted — a payment points at it, and
 // the console reads it to say what that payment bought. Retiring it takes it
 // off the price list and leaves the receipt adding up.

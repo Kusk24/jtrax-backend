@@ -31,6 +31,10 @@ func Now() time.Time { return clock().In(zone) }
 // Today is the academy's current calendar day, as the schema writes it.
 func Today() string { return Now().Format(DayLayout) }
 
+// Location is the academy's time zone, for reading a time that came from
+// somewhere other than Now.
+func Location() *time.Location { return zone }
+
 // Moment reads a stored timestamp. One carrying a zone — the console's
 // toISOString(), "…Z" — is exact; one without is the academy's wall clock,
 // the way the seed and hand-entered rows write it.

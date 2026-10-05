@@ -2,10 +2,13 @@ package api_test
 
 import (
 	"bytes"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,10 +53,56 @@ func entry(over map[string]any) map[string]any {
 	return body
 }
 
+/* A one-pixel JPEG — real magic bytes, so http.DetectContentType reads it as
+   image/jpeg the same way a phone photo would, without shipping an actual
+   photo into the test suite. */
+var testIDPhoto = []byte{
+	0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+	0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+	0x00, 0xFF, 0xD9,
+}
+
+// register submits a public registration the way the form does:
+// multipart/form-data, after an ID card scan. With `verified`, it writes the
+// ID card check a scan would have — the date of birth is the entry's
+// dateOfBirth, or a child's when it gives none — and names it, as the form
+// does; without, it sends no check.
+func register(t *testing.T, c *client, tournamentID string, fields map[string]any, verified bool) (int, map[string]any) {
+	t.Helper()
+	if verified {
+		dob, _ := fields["dateOfBirth"].(string)
+		if dob == "" {
+			dob = "2015-06-01"
+		}
+		fields = withCheck(t, c, tournamentID, "", dob, "idCheck", fields)
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if b, ok := v.(bool); ok {
+			mw.WriteField(k, strconv.FormatBool(b))
+			continue
+		}
+		mw.WriteField(k, fmt.Sprint(v))
+	}
+	mw.Close()
+	req, _ := http.NewRequest(
+		"POST", c.srv.URL+"/api/v1/public/tournaments/"+tournamentID+"/register", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	out := map[string]any{}
+	json.NewDecoder(res.Body).Decode(&out)
+	return res.StatusCode, out
+}
+
 func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
-	status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, out := register(t, pub, id, entry(nil), true)
 	if status != 201 {
 		t.Fatalf("register: want 201, got %d (%v)", status, out)
 	}
@@ -76,7 +125,7 @@ func TestPublicRegistrationTakesAnEntryWithoutASession(t *testing.T) {
 func TestPublicRegistrationIsClosedUntilOpened(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"public_registration": false})
 
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, _ := register(t, pub, id, entry(nil), true)
 	if status != 404 {
 		t.Fatalf("closed event: want 404, got %d", status)
 	}
@@ -90,19 +139,18 @@ func TestPublicRegistrationAppliesTheStudentDiscount(t *testing.T) {
 
 	// The claim alone is no longer enough — the discount needs an ID the
 	// academy can find.
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true}))
+	status, _ := register(t, pub, id, entry(map[string]any{"isStudent": true}), true)
 	if status != 400 {
 		t.Fatalf("claim without an ID: want 400, got %d", status)
 	}
-	status, _, _ = pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_nobody"}))
+	status, _ = register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_nobody"}), true)
 	if status != 400 {
 		t.Fatalf("claim with a made-up ID: want 400, got %d", status)
 	}
 
-	status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+	status, out := register(t, pub, id,
+		entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 	if status != 201 {
 		t.Fatalf("register: %d (%v)", status, out)
 	}
@@ -122,10 +170,8 @@ func TestPublicRegistrationRevealsNothingAboutWhoIsAStudent(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"student_discount_pct": 20})
 
 	// penny@jca.ac.th is a seeded student account; the other address is not.
-	_, known, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "penny@jca.ac.th"}))
-	_, unknown, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "nobody@example.com"}))
+	_, known := register(t, pub, id, entry(map[string]any{"email": "penny@jca.ac.th"}), true)
+	_, unknown := register(t, pub, id, entry(map[string]any{"email": "nobody@example.com"}), true)
 
 	for _, k := range []string{"status", "feeQuoted", "needsApproval", "registered"} {
 		if known[k] != unknown[k] {
@@ -138,11 +184,10 @@ func TestPublicRegistrationRevealsNothingAboutWhoIsAStudent(t *testing.T) {
 func TestPublicRegistrationRefusesTheSameEmailTwice(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); status != 201 {
+	if status, out := register(t, pub, id, entry(nil), true); status != 201 {
 		t.Fatalf("first: %d (%v)", status, out)
 	}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"name": "Somebody Else"}))
+	status, _ := register(t, pub, id, entry(map[string]any{"name": "Somebody Else"}), true)
 	if status != 409 {
 		t.Fatalf("duplicate email: want 409, got %d", status)
 	}
@@ -151,11 +196,10 @@ func TestPublicRegistrationRefusesTheSameEmailTwice(t *testing.T) {
 func TestPublicRegistrationStopsAtCapacity(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"max_participants": 1})
 
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); status != 201 {
+	if status, out := register(t, pub, id, entry(nil), true); status != 201 {
 		t.Fatalf("first: %d (%v)", status, out)
 	}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"email": "second@example.com"}))
+	status, _ := register(t, pub, id, entry(map[string]any{"email": "second@example.com"}), true)
 	if status != 409 {
 		t.Fatalf("full event: want 409, got %d", status)
 	}
@@ -164,7 +208,7 @@ func TestPublicRegistrationStopsAtCapacity(t *testing.T) {
 func TestPublicRegistrationStopsAfterTheDeadline(t *testing.T) {
 	pub, id := openEvent(t, map[string]any{"registration_deadline": "2020-01-01"})
 
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+	status, _ := register(t, pub, id, entry(nil), true)
 	if status != 409 {
 		t.Fatalf("past deadline: want 409, got %d", status)
 	}
@@ -188,8 +232,8 @@ func TestPublicRegistrationRefusesAForeignCategory(t *testing.T) {
 	})
 
 	pub := &client{t: t, srv: srv}
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+mine+"/register",
-		entry(map[string]any{"categoryId": cat["tournament_category_id"]}))
+	status, _ := register(t, pub, mine,
+		entry(map[string]any{"categoryId": cat["tournament_category_id"]}), true)
 	if status != 400 {
 		t.Fatalf("foreign category: want 400, got %d", status)
 	}
@@ -208,7 +252,7 @@ func TestPublicRegistrationValidatesTheBoundary(t *testing.T) {
 		{"not an email", entry(map[string]any{"email": "not-an-address"})},
 		{"impossible birthday", entry(map[string]any{"dateOfBirth": "31/02/2018"})},
 	} {
-		status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", tc.body)
+		status, _ := register(t, pub, id, tc.body, true)
 		if status != 400 {
 			t.Errorf("%s: want 400, got %d", tc.name, status)
 		}
@@ -259,7 +303,7 @@ func TestEarlyBirdWindow(t *testing.T) {
 		if tour["earlyBirdActive"] != true || tour["fee"] != float64(300) {
 			t.Fatalf("window open: %v / %v", tour["earlyBirdActive"], tour["fee"])
 		}
-		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil))
+		status, out := register(t, pub, id, entry(nil), true)
 		if status != 201 || out["feeQuoted"] != float64(300) {
 			t.Fatalf("outsider in the window: %d, fee %v", status, out["feeQuoted"])
 		}
@@ -271,8 +315,8 @@ func TestEarlyBirdWindow(t *testing.T) {
 		pub, id := openEvent(t, map[string]any{
 			"early_bird_fee": 300, "early_bird_deadline": future, "student_discount_pct": 20,
 		})
-		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-			entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}))
+		status, out := register(t, pub, id,
+			entry(map[string]any{"isStudent": true, "studentId": "stu_penny"}), true)
 		if status != 201 || out["feeQuoted"] != float64(400) {
 			t.Fatalf("student in the window: %d, fee %v", status, out["feeQuoted"])
 		}
@@ -302,27 +346,29 @@ func TestCategoryAgeRule(t *testing.T) {
 		t.Fatalf("create category: %d (%v)", status, cat)
 	}
 	catID := cat["tournament_category_id"].(string)
-	register := func(dob string) int {
+	// Named apart from the package-level register() it calls, or this
+	// shadows it for the rest of the test.
+	registerAt := func(dob string) int {
 		body := entry(map[string]any{"categoryId": catID})
 		if dob != "" {
 			body["dateOfBirth"] = dob
 		}
 		// A fresh email per attempt so the duplicate guard stays out of the way.
 		body["email"] = dob + "x@example.com"
-		s, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body)
+		s, _ := register(t, pub, id, body, true)
 		return s
 	}
 
 	// No date of birth: the category needs one.
-	if got := register(""); got != 400 {
+	if got := registerAt(""); got != 400 {
 		t.Fatalf("age category without DOB: want 400, got %d", got)
 	}
 	// Nine on the start day — too old for under-8.
-	if got := register("2017-06-15"); got != 400 {
+	if got := registerAt("2017-06-15"); got != 400 {
 		t.Fatalf("nine-year-old in U8: want 400, got %d", got)
 	}
 	// Seven on the start day — allowed.
-	if got := register("2019-06-15"); got != 201 {
+	if got := registerAt("2019-06-15"); got != 201 {
 		t.Fatalf("seven-year-old in U8: want 201, got %d", got)
 	}
 }
@@ -396,10 +442,92 @@ func TestRegulationLifecycle(t *testing.T) {
 	if status, _, _ := staff.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
 		t.Fatalf("private regulation, staff: want 200, got %d", status)
 	}
+	// …and so do the academy's own families, whose portal links it, and
+	// whose tournament row says there is one to open.
+	parent := &client{t: t, srv: pub.srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 200 {
+		t.Fatalf("private regulation, signed-in parent: want 200, got %d", status)
+	}
+	// 1, as SQLite answers EXISTS — read as true, the same as has_banner.
+	if _, row, _ := parent.do("GET", "/api/v1/tournaments/"+id, nil); row["has_regulation"] != float64(1) && row["has_regulation"] != true {
+		t.Fatalf("has_regulation on the parent's tournament row: %v", row["has_regulation"])
+	}
+	// A draft stays the organiser's, signed in or not.
+	staff.do("PATCH", "/api/v1/tournaments/"+id, map[string]any{"draft": true})
+	if status, _, _ := parent.do("GET", "/api/v1/tournaments/"+id+"/regulation", nil); status != 404 {
+		t.Fatalf("draft regulation, parent: want 404, got %d", status)
+	}
+}
+
+// A venue's map link is stored once, at tournament creation (see 0037), and
+// read back exactly as given rather than recomputed — so a stranger reading
+// the public listing sees the same link the desk set.
+func TestPublicTournamentCarriesTheVenueMapLink(t *testing.T) {
+	mapURL := "https://www.google.com/maps/search/?api=1&query=Wellington+College+Bangkok"
+	pub, id := openEvent(t, map[string]any{"venue_map_url": mapURL})
+
+	status, out, _ := pub.do("GET", "/api/v1/public/tournaments/"+id, nil)
+	if status != 200 {
+		t.Fatalf("get: %d (%v)", status, out)
+	}
+	tour, _ := out["tournament"].(map[string]any)
+	if tour["venueMapUrl"] != mapURL {
+		t.Fatalf("want venueMapUrl %q, got %v", mapURL, tour["venueMapUrl"])
+	}
+}
+
+// The ID card step is required: an entry without an ID card check is
+// refused, whatever date of birth it typed.
+func TestPublicRegistrationRequiresTheIDCardCheck(t *testing.T) {
+	pub, id := openEvent(t, nil)
+
+	status, out := register(t, pub, id, entry(map[string]any{"dateOfBirth": "2015-01-01"}), false)
+	if status != 400 {
+		t.Fatalf("no ID card check: want 400, got %d (%v)", status, out)
+	}
+}
+
+// A check is spent by the entry that uses it: it cannot be kept and named
+// again for somebody else.
+func TestAnIDCardCheckIsUsedOnce(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	body := withCheck(t, pub, id, "", "2015-01-01", "idCheck", entry(nil))
+	if status, out := register(t, pub, id, body, false); status != 201 {
+		t.Fatalf("first entry: %d (%v)", status, out)
+	}
+	body["email"] = "someone.else@example.com"
+	if status, _ := register(t, pub, id, body, false); status != 400 {
+		t.Fatalf("reused check: want 400, got %d", status)
+	}
+}
+
+// The photo itself is not kept anywhere: there is no table for it and no
+// endpoint that serves one.
+func TestAnIDCardPhotoIsNotKept(t *testing.T) {
+	pub, id := openEvent(t, nil)
+	status, reg := register(t, pub, id, entry(nil), true)
+	if status != 201 {
+		t.Fatalf("register: want 201, got %d (%v)", status, reg)
+	}
+	v, _ := serverDBs.Load(pub.srv.URL)
+	var n int
+	v.(*sql.DB).QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'tournament_registration_document'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("the ID photo table still exists")
+	}
+	staff := &client{t: t, srv: pub.srv}
+	staff.login("admin@jca.ac.th")
+	regID := firstRegistrationID(t, staff, id)
+	if status, _, _ := staff.do("GET", "/api/v1/tournaments/registrations/"+regID+"/document", nil); status == 200 {
+		t.Fatal("an ID photo is still served")
+	}
 }
 
 /* The terms, the nickname and the age — what the academy's entry form asks
- * that the schema had nowhere to put. */
+ * that the schema had nowhere to put. Registered through `register`, not a
+ * raw JSON post: every entry needs the ID photo since 0036, and a bare
+ * `pub.do` would now fail multipart parsing before any of these rules ran. */
 
 // The five numbered conditions on the form are the point of recording this:
 // "did this person agree not to be refunded" is asked three weeks later, and a
@@ -413,7 +541,7 @@ func TestAnEntryIsRefusedWithoutAcceptingTheTerms(t *testing.T) {
 		} else {
 			body["acceptTerms"] = v
 		}
-		status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body)
+		status, out := register(t, pub, id, body, true)
 		if status != 400 {
 			t.Errorf("acceptTerms %v: want 400, got %d (%v)", v, status, out)
 		}
@@ -424,8 +552,7 @@ func TestAnEntryIsRefusedWithoutAcceptingTheTerms(t *testing.T) {
 // worth nothing, so reaching the insert is what "accepted" means.
 func TestAcceptingTheTermsIsRecordedWithATime(t *testing.T) {
 	pub, id := openEvent(t, nil)
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"nickname": "Chai", "age": 11})); status != 201 {
+	if status, out := register(t, pub, id, entry(map[string]any{"nickname": "Chai", "age": 11}), true); status != 201 {
 		t.Fatalf("register: %d (%v)", status, out)
 	}
 
@@ -447,26 +574,26 @@ func TestAcceptingTheTermsIsRecordedWithATime(t *testing.T) {
 	}
 }
 
-// The form asks for an age and not a date of birth, so an age-limited group
-// has to be enforceable on the age alone — otherwise everyone who skips the
-// card scan is refused. By birth year, somebody who says they are 12 may be
-// born in the event's year minus 12, so U12 takes them; 13 is too old.
-func TestAClaimedAgeIsCheckedAgainstTheGroupWhenThereIsNoDateOfBirth(t *testing.T) {
-	pub, id := openEvent(t, nil)
+// The age group is decided by the ID card's date of birth, not by what the
+// form typed: by birth year, somebody born in the event's year minus 12 may
+// play U12; a year earlier is too old.
+func TestTheIDCardDecidesTheAgeGroup(t *testing.T) {
+	pub, id := openEvent(t, map[string]any{"start_date": "2026-11-01"})
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
-	u12 := categoryOf(t, staff, id, "U12 Junior")
+	u12 := categoryOf(t, staff, id, "Under 12")
 
 	for _, tc := range []struct {
-		age  int
+		card string
 		want int
-	}{{11, 201}, {12, 201}, {13, 400}, {15, 400}} {
-		body := entry(map[string]any{
-			"categoryId": u12, "age": tc.age,
-			"email": fmt.Sprintf("age%d@example.com", tc.age),
-		})
-		if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", body); status != tc.want {
-			t.Errorf("age %d: want %d, got %d (%v)", tc.age, tc.want, status, out)
+	}{{"2015-12-31", 201}, {"2014-01-01", 201}, {"2013-12-31", 400}} {
+		body := withCheck(t, pub, id, "", tc.card, "idCheck", entry(map[string]any{
+			"categoryId": u12, "dateOfBirth": "2020-01-01", // typed: ignored
+			"email":      "born" + tc.card + "@example.com",
+		}))
+		status, out := register(t, pub, id, body, false)
+		if status != tc.want {
+			t.Errorf("card %s: want %d, got %d (%v)", tc.card, tc.want, status, out)
 		}
 	}
 }
@@ -481,8 +608,7 @@ func TestADateOfBirthOutranksAClaimedAge(t *testing.T) {
 
 	// Claims 10, but the card says they were born twenty years ago.
 	born := time.Now().AddDate(-20, 0, 0).Format("2006-01-02")
-	status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"categoryId": u12, "age": 10, "dateOfBirth": born}))
+	status, _ := register(t, pub, id, entry(map[string]any{"categoryId": u12, "age": 10, "dateOfBirth": born}), true)
 	if status != 400 {
 		t.Fatalf("want 400 on the date of birth, got %d", status)
 	}
@@ -495,8 +621,8 @@ func TestAnOpenGroupHasNoAgeRule(t *testing.T) {
 	staff.login("admin@jca.ac.th")
 	open := categoryOf(t, staff, id, "OPEN (FIDE Rated Event)")
 
-	if status, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-		entry(map[string]any{"categoryId": open, "age": 47})); status != 201 {
+	status, out := register(t, pub, id, entry(map[string]any{"categoryId": open, "age": 47}), true)
+	if status != 201 {
 		t.Fatalf("OPEN should take a 47-year-old: %d (%v)", status, out)
 	}
 }
@@ -504,9 +630,40 @@ func TestAnOpenGroupHasNoAgeRule(t *testing.T) {
 func TestAnImplausibleAgeIsRefused(t *testing.T) {
 	pub, id := openEvent(t, nil)
 	for _, age := range []int{-1, 121} {
-		if status, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register",
-			entry(map[string]any{"age": age})); status != 400 {
+		status, _ := register(t, pub, id, entry(map[string]any{"age": age}), true)
+		if status != 400 {
 			t.Errorf("age %d: want 400, got %d", age, status)
 		}
 	}
+}
+
+// withCheck writes an ID card check for the tournament (and child, when one
+// is named) and returns fields with its id added under key — "idCheck" on
+// the public form, "id_check" from the parent portal.
+func withCheck(t *testing.T, c *client, tournamentID, studentID, dob, key string, fields map[string]any) map[string]any {
+	t.Helper()
+	v, ok := serverDBs.Load(c.srv.URL)
+	if !ok {
+		t.Fatal("register: server has no database on record (use newServerOn)")
+	}
+	d := v.(*sql.DB)
+	id := fmt.Sprintf("idc_test_%d", time.Now().UnixNano())
+	// A child who does not exist cannot be named (the foreign key); the
+	// entry is refused for that before the check is looked at.
+	var student any
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`, studentID).Scan(&n)
+	if n > 0 {
+		student = studentID
+	}
+	if _, err := d.Exec(`INSERT INTO id_card_check (id_card_check_id, tournament_id, student_id, date_of_birth, name)
+	                     VALUES (?,?,?,?, 'Read Off Card')`, id, tournamentID, student, dob); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]any{}
+	for k, v := range fields {
+		out[k] = v
+	}
+	out[key] = id
+	return out
 }

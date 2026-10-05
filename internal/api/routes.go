@@ -54,6 +54,8 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mux.HandleFunc("POST /api/v1/auth/forgot-password", httpx.RateLimit(60, handleForgotPassword(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/reset-password", httpx.RateLimit(10, handleResetPassword(d)))
 	mux.HandleFunc("POST /api/v1/auth/change-password", httpx.RateLimit(30, handleChangePassword(d)))
+	mux.HandleFunc("POST /api/v1/students/{id}/password", httpx.RateLimit(20, handleChildPassword(d, sender)))
+	mux.HandleFunc("GET /api/v1/students/{id}/login", handleChildLogin(d))
 	// Staff only: a new parent chooses their own password from this link.
 	mux.HandleFunc("POST /api/v1/user-accounts/{id}/invite", httpx.RateLimit(60, handleInvite(d, mailCfg, sender)))
 	mux.HandleFunc("POST /api/v1/auth/logout", handleLogout(d))

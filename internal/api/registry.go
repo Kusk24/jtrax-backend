@@ -61,10 +61,15 @@ var (
 	everyone      = []string{"Teacher", "Parent", "Student"}
 	sessionStatus = []string{"Scheduled", "Ongoing", "Completed"}
 	enrollStatus  = []string{"Active", "Completed", "Withdrawn"}
-	classTypes    = []string{"Private", "Group", "Master"}
-	payMethods    = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
-	// Pending and Refunded are not revenue; the console totals only Paid.
-	payStatus      = []string{"Paid", "Pending", "Refunded"}
+	// How a course is taught: one-to-one or a group. "Master" was a level
+	// and is now one (0066).
+	classTypes = []string{"Private", "Group"}
+	// A course's level, apart from its type (0066).
+	classLevels = []string{"Beginner", "Intermediate", "Advanced"}
+	payMethods  = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
+	// Pending is not revenue; the console totals only Paid. There are no
+	// refunds — fees are non-refundable — so there is no Refunded.
+	payStatus      = []string{"Paid", "Pending"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
 	// Public sign-ups arrive Pending; staff entry has always meant Approved.
@@ -198,7 +203,10 @@ func Registry() []*Resource {
 				// the icon: the names belong to the console's icon set, which
 				// moves with the design. See 0022.
 				{Name: "icon", Kind: "text"},
-				{Name: "badge", Kind: "text"},
+				{Name: "level", Kind: "text", Enum: classLevels},
+				// The usual price of one credit — what a new package or a custom
+				// credit sale starts from; never binding (0067).
+				{Name: "price_per_credit", Kind: "real"},
 				// Set when the academy stops running this class. The row stays
 				// so last term's attendance and receipts still name it; every
 				// picker leaves it out. See 0020.
@@ -235,6 +243,8 @@ func Registry() []*Resource {
 			// difference, so every session staff created carried a NULL
 			// length — and a length is what an hour of class costs.
 			AfterWrite: storeSessionHours,
+			// Bookings go with the class; attendance has its own refunds.
+			BeforeDelete: dropSessionBookings,
 		},
 		{
 			Name: "enrollments", Table: "student_enrollment", IDCol: "enrollment_id", IDPrefix: "enr",
@@ -281,9 +291,25 @@ func Registry() []*Resource {
 			// session lasts. Here rather than in the console because the front
 			// desk, the teacher's roster and Class History all write these
 			// rows, and three clients would keep three versions of the rule.
-			AfterInsert:  refuseClashingAttendance,
+			AfterInsert:  attendanceAfterInsert,
 			AfterWrite:   chargeAttendance,
 			BeforeDelete: refundAttendance,
+		},
+		{
+			// Who will be in a class that has not started (migration 0060).
+			// Free until the start, when classstart.go checks each one in.
+			Name: "session-bookings", Table: "session_booking", IDCol: "booking_id", IDPrefix: "bkg",
+			Cols: []Col{
+				{Name: "session_id", Kind: "text", Required: true},
+				{Name: "student_id", Kind: "text", Required: true},
+			},
+			Derived:   []Derived{{Name: "booked_at", Expr: "booked_at"}, {Name: "failed_reason", Expr: "failed_reason"}},
+			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
+			Scope: map[string]ScopeFn{
+				"Parent":  byParentStudents("student_id"),
+				"Student": byOwnStudent("student_id"),
+			},
+			AfterInsert: refuseBooking,
 		},
 		{
 			Name: "credit-packages", Table: "credit_package", IDCol: "credit_package_id", IDPrefix: "pkg",
@@ -291,13 +317,20 @@ func Registry() []*Resource {
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "credit_amount", Kind: "real", Required: true},
 				{Name: "standard_price", Kind: "real", Required: true},
-				{Name: "validity_days", Kind: "int", Required: true},
+				// Optional since 0035: a package the office never wants to
+				// expire — a founding rate, a free trial — has nothing
+				// truthful to put here. Absent reads as "never", the same as
+				// 0 always has downstream (grantPurchasedCredits, expiryFrom).
+				{Name: "validity_days", Kind: "int"},
 				// Set when the academy stops selling this package. Payments
 				// point at it and a receipt has to keep saying what it bought,
 				// so the row stays and only the till forgets. See 0021.
 				{Name: "archived_at", Kind: "text"},
 			},
 			ReadRoles: everyone,
+			// Blank is "never expires"; 0 is refused rather than read as the
+			// same, because "0 days" says the opposite to whoever reads it.
+			Check: checkPackageValidity,
 		},
 		{
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",
@@ -418,6 +451,11 @@ func Registry() []*Resource {
 				{Name: "end_date", Kind: "text"},
 				{Name: "venue_name", Kind: "text"},
 				{Name: "venue_address", Kind: "text"},
+				// A Google Maps search link built from venue_name at creation
+				// time — see 0037. Not derived on read, so it survives the
+				// venue name later being edited to something the link no
+				// longer matches without silently drifting.
+				{Name: "venue_map_url", Kind: "text"},
 				{Name: "organizer_name", Kind: "text"},
 				{Name: "registration_deadline", Kind: "text"},
 				{Name: "early_bird_fee", Kind: "real"},
@@ -456,6 +494,10 @@ func Registry() []*Resource {
 				// pages draw their own (see banner.go).
 				{Name: "has_banner", Roles: everyone,
 					Expr: "EXISTS(SELECT 1 FROM tournament_banner b WHERE b.tournament_id = tournament.tournament_id)"},
+				// Whether a regulation file was uploaded, so the parent portal
+				// links it only when there is one to open (regulation.go).
+				{Name: "has_regulation", Roles: everyone,
+					Expr: "EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = tournament.tournament_id)"},
 			},
 			AfterWrite: tournamentStatusAfterWrite,
 			ReadRoles:  everyone,
@@ -607,7 +649,7 @@ func Registry() []*Resource {
 				{Name: "config_value", Kind: "text", Required: true},
 			},
 			// Readable by every signed-in role: the parent portal shows the
-			// certificate milestone (certificate_sessions), and the rest is
+			// certificate milestone (certificate_hours), and the rest is
 			// display configuration of the same kind. That is a rule about
 			// this table — secrets live in the environment, never here, or
 			// this line has to change. Writes stay staff-only.

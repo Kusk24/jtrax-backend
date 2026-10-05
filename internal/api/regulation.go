@@ -114,11 +114,12 @@ func handleDeleteRegulation(d *sql.DB) http.HandlerFunc {
 func handleGetRegulation(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tournamentID := r.PathValue("id")
-		var isPublic int
+		var isPublic, isDraft int
 		err := d.QueryRow(
 			`SELECT CASE WHEN draft = 1 THEN 0
-			             ELSE COALESCE(public_registration,0) + COALESCE(results_public,0) END
-			   FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&isPublic)
+			             ELSE COALESCE(public_registration,0) + COALESCE(results_public,0) END,
+			        COALESCE(draft, 0)
+			   FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&isPublic, &isDraft)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)
 			return
@@ -131,7 +132,11 @@ func handleGetRegulation(d *sql.DB) http.HandlerFunc {
 		// is checking the page exactly as parents will get it.
 		if isPublic == 0 && !previewAllowed(d, r, tournamentID) {
 			id, idErr := auth.Lookup(d, bearerToken(r))
-			if idErr != nil || !isStaff(id.Role) {
+			/* A published event that is not open to the public is still the
+			   academy's own families' to read: the parent portal links its
+			   regulation. A draft stays the organiser's. */
+			signedIn := idErr == nil && (isStaff(id.Role) || isDraft == 0)
+			if !signedIn {
 				// Same answer as a missing tournament, so this cannot probe
 				// which private events exist.
 				httpx.Error(w, http.StatusNotFound, "not found", nil)

@@ -54,10 +54,16 @@ func TestPaymentRecordsStatusAndReference(t *testing.T) {
 		t.Fatalf("status and reference were discarded: %v", pending)
 	}
 
-	status, refunded, _ := c.do("PATCH", "/api/v1/payments/"+pending["payment_id"].(string),
-		map[string]any{"status": "Refunded"})
-	if status != 200 || refunded["status"] != "Refunded" {
-		t.Fatalf("refund: %d (%v)", status, refunded)
+	status, paid, _ := c.do("PATCH", "/api/v1/payments/"+pending["payment_id"].(string),
+		map[string]any{"status": "Paid"})
+	if status != 200 || paid["status"] != "Paid" {
+		t.Fatalf("marking it paid: %d (%v)", status, paid)
+	}
+
+	// Fees are non-refundable: there is no Refunded status.
+	if status, out, _ := c.do("PATCH", "/api/v1/payments/"+pending["payment_id"].(string),
+		map[string]any{"status": "Refunded"}); status != 400 {
+		t.Fatalf("Refunded: want 400, got %d (%v)", status, out)
 	}
 
 	status, bad, _ := c.do("PATCH", "/api/v1/payments/"+pending["payment_id"].(string),

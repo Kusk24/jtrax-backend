@@ -52,6 +52,16 @@ func TestDashboardActivity(t *testing.T) {
 		t.Errorf("consistentPlayers: want Uri and Penny, got %v", a["consistentPlayers"])
 	}
 
+	// A date three weeks back reads that week: nobody played, and the
+	// office's game today is not in it.
+	status, past, _ := admin.do("GET", "/api/v1/dashboard/activity?date="+academyDay(-21), nil)
+	if status != 200 || past["gamesOpened"] != float64(0) || past["consistentPlayers"] != float64(0) {
+		t.Errorf("three weeks back: %d %v, want 0 and 0", status, past)
+	}
+	if status, _, _ := admin.do("GET", "/api/v1/dashboard/activity?date=soon", nil); status != 400 {
+		t.Errorf("bad date: want 400, got %d", status)
+	}
+
 	parent := &client{t: t, srv: srv}
 	parent.login("sandy01234@gmail.com")
 	if status, _, _ := parent.do("GET", "/api/v1/dashboard/activity", nil); status != 403 {

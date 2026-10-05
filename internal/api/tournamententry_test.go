@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"database/sql"
 	"net/http"
 	"testing"
 	"time"
@@ -25,16 +26,16 @@ func TestAParentCannotChooseTheirOwnFee(t *testing.T) {
 	}
 
 	// Nor does the parent's own door accept a price.
-	status, _, _ = parent.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, _, _ = parent.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, parent, map[string]any{
 		"student_id": "stu_penny", "fee_charged": 1,
-	})
+	}))
 	if status != http.StatusBadRequest {
 		t.Fatalf("entry carrying a fee: got %d, want 400", status)
 	}
 
-	status, obj, _ := parent.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, obj, _ := parent.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, parent, map[string]any{
 		"student_id": "stu_penny",
-	})
+	}))
 	if status != 201 {
 		t.Fatalf("entering: %d (%v)", status, obj)
 	}
@@ -60,9 +61,9 @@ func TestAParentCannotChooseTheirOwnFee(t *testing.T) {
 func TestAParentCanOnlyEnterTheirOwnChild(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("sandy01234@gmail.com")
-	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id": "stu_nobody",
-	})
+	}))
 	if status != http.StatusNotFound {
 		t.Fatalf("entering a stranger's child: got %d, want 404", status)
 	}
@@ -107,7 +108,7 @@ func TestStudentPricingFollowsTheTournament(t *testing.T) {
 				t.Fatalf("portal is shown %v, want %v", shown["student_fee"], tc.want)
 			}
 			status, entry, _ := parent.do("POST", "/api/v1/tournaments/trn_wellington/entries",
-				map[string]any{"student_id": "stu_penny"})
+				verifiedEntry(t, parent, map[string]any{"student_id": "stu_penny"}))
 			if status != 201 || entry["fee_charged"] != tc.want {
 				t.Fatalf("entry charged %v (%d), want %v", entry["fee_charged"], status, tc.want)
 			}
@@ -202,5 +203,83 @@ func TestRepricingAnEntryRepricesItsOpenCardPayment(t *testing.T) {
 		regID).Scan(&amount, &link)
 	if amount != 200 || link != nil {
 		t.Fatalf("open payment after repricing: amount %v, link %v", amount, link)
+	}
+}
+
+// verifiedEntry is a parent's entry body as the portal sends it after the ID
+// card step: an ID card check for the child, read as born in 2017, and the
+// Under 10 group, which that fits.
+func verifiedEntry(t *testing.T, c *client, body map[string]any) map[string]any {
+	t.Helper()
+	// The seeded tournament closed on its deadline; these tests are about
+	// entering one that is open.
+	if v, ok := serverDBs.Load(c.srv.URL); ok {
+		v.(*sql.DB).Exec(`UPDATE tournament SET public_registration = 1, registration_deadline = NULL
+		                   WHERE tournament_id = 'trn_wellington'`)
+	}
+	student, _ := body["student_id"].(string)
+	if _, ok := body["tournament_category_id"]; !ok {
+		body["tournament_category_id"] = "tcat_u10"
+	}
+	if _, ok := body["nickname"]; !ok {
+		body["nickname"] = "Pen"
+	}
+	if _, ok := body["accept_terms"]; !ok {
+		body["accept_terms"] = true
+	}
+	return withCheck(t, c, "trn_wellington", student, "2017-05-01", "id_check", body)
+}
+
+// The parent form asks what the public one does — a nickname and the
+// conditions of entry — and takes the family's contact details from file.
+func TestAParentEntryRecordsTermsNicknameAndTheFamilysContact(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("sandy01234@gmail.com")
+	path := "/api/v1/tournaments/trn_wellington/entries"
+
+	if s, _, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "accept_terms": false,
+	})); s != 400 {
+		t.Fatalf("terms not accepted: want 400, got %d", s)
+	}
+	if s, _, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "nickname": " ",
+	})); s != 400 {
+		t.Fatalf("no nickname: want 400, got %d", s)
+	}
+	s, out, _ := c.do("POST", path, verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "participant_name_th": "เพนนี",
+	}))
+	if s != 201 {
+		t.Fatalf("enter: %d (%v)", s, out)
+	}
+	c.login("admin@jca.ac.th")
+	_, row, _ := c.do("GET", "/api/v1/tournament-registrations/"+out["tournament_registration_id"].(string), nil)
+	if row["nickname"] != "Pen" || row["participant_name_th"] != "เพนนี" || row["terms_accepted_at"] == nil {
+		t.Fatalf("not recorded: %v", row)
+	}
+	if row["contact_phone"] != "+66 12 345 6789" || row["contact_email"] != "sandy01234@gmail.com" {
+		t.Fatalf("family contact not on the entry: phone %v email %v", row["contact_phone"], row["contact_email"])
+	}
+}
+
+// A parent cannot enter a tournament whose registration the academy closed
+// on its card, or whose closing date has passed — the same doors the public
+// form answers to.
+func TestAParentCannotEnterAClosedTournament(t *testing.T) {
+	d := newDB(t)
+	c := &client{t: t, srv: newServerOn(t, d)}
+	c.login("sandy01234@gmail.com")
+	path := "/api/v1/tournaments/trn_wellington/entries"
+
+	body := verifiedEntry(t, c, map[string]any{"student_id": "stu_penny"}) // opens it
+	d.Exec(`UPDATE tournament SET public_registration = 0 WHERE tournament_id = 'trn_wellington'`)
+	if s, out, _ := c.do("POST", path, body); s != 409 {
+		t.Fatalf("closed by the academy: want 409, got %d (%v)", s, out)
+	}
+
+	d.Exec(`UPDATE tournament SET public_registration = 1, registration_deadline = '2020-01-01' WHERE tournament_id = 'trn_wellington'`)
+	if s, out, _ := c.do("POST", path, body); s != 409 {
+		t.Fatalf("past its closing date: want 409, got %d (%v)", s, out)
 	}
 }

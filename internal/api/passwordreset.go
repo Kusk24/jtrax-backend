@@ -85,13 +85,17 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 			return
 		}
 		reset := mail.Email{
-			Heading:    "Reset your password",
-			Greeting:   "Hello " + displayName + ",",
-			Paragraphs: []string{"Someone asked to reset your JTrax password. Use the button below to choose a new one."},
-			Button:     &mail.Button{Label: "Choose a new password", URL: link},
-			Note:       "The link works once and expires in an hour. If this wasn't you, ignore this email: your password stays as it is.",
+			Heading:  "Reset Your Password",
+			Greeting: "Dear " + displayName + ",",
+			Paragraphs: []string{
+				"We received a request to reset the password for your JTrax account.",
+				"If you made this request, please use the button below to choose a new password and regain access to your account.",
+			},
+			Button:  &mail.Button{Label: "Choose a New Password", URL: link},
+			After:   resetSecurity("your account", "Your current password will remain unchanged unless you complete the password reset process."),
+			Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Account Support"},
 		}
-		if err := mail.Deliver(sender, email, "Reset your JTrax password", reset); err != nil {
+		if err := mail.Deliver(sender, email, "Reset Your JTrax Password", reset); err != nil {
 			// Logged, not returned: the caller already has the neutral reply,
 			// and the error would tell them the address exists.
 			log.Printf("password reset: send to a registered address failed: %v", err)
@@ -177,17 +181,18 @@ func sendChildReset(d *sql.DB, cfg mail.Config, sender mail.Sender, loginID stri
 	}
 	for _, g := range to {
 		e := mail.Email{
-			Heading:  "Reset " + childName + "'s password",
-			Greeting: "Hello " + g.name + ",",
+			Heading:  "Reset " + childName + "'s Password",
+			Greeting: "Dear " + g.name + ",",
 			Paragraphs: []string{
-				childName + " asked to reset their JTrax student password. Use the button below to choose a new one together.",
+				"We received a request to reset the password for " + childName + "'s JTrax student account.",
+				"If " + childName + " made this request, please use the button below to choose a new password together.",
 			},
-			Details: []mail.Detail{{Label: childName + "'s login ID", Value: loginID}},
-			Button:  &mail.Button{Label: "Choose a new password for " + childName, URL: link},
-			Note: "The link works once and expires in an hour. If " + childName +
-				" didn't ask for this, ignore this email: the password stays as it is.",
+			Details: []mail.Detail{{Label: childName + "'s login username", Value: loginID}},
+			Button:  &mail.Button{Label: "Choose a New Password", URL: link},
+			After:   resetSecurity(childName+"'s account", childName+"'s current password will remain unchanged unless the password reset process is completed."),
+			Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Account Support"},
 		}
-		if err := mail.Deliver(sender, g.email, "Reset "+childName+"'s JTrax password", e); err != nil {
+		if err := mail.Deliver(sender, g.email, "Reset "+childName+"'s JTrax Password", e); err != nil {
 			log.Printf("password reset: send to a guardian failed: %v", err)
 		}
 	}
@@ -227,5 +232,18 @@ func handleChangePassword(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "password changed"})
+	}
+}
+
+// resetSecurity is the part of every password-reset email under the button:
+// how the link behaves, and what to do if the request was not yours.
+func resetSecurity(whose, unchanged string) []string {
+	return []string{
+		"For your security:",
+		"- This link can be used only once.",
+		"- The link will expire after 1 hour.",
+		"- " + unchanged,
+		"If you did not request a password reset, you can safely ignore this email. No changes will be made to " + whose + ".",
+		"If you believe someone may be attempting to access " + whose + ", please contact JCA Chess School for assistance.",
 	}
 }

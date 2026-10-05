@@ -44,6 +44,7 @@ func publicPayServer(t *testing.T, withStripe bool) *payFixture {
 	}
 	cfg := mail.Config{AppURL: "https://portal.example"}
 	f.srv = httptest.NewServer(api.NewHandlerWith(f.d, cfg, f.mail, nil))
+	serverDBs.Store(f.srv.URL, f.d)
 	t.Cleanup(f.srv.Close)
 
 	staff := &client{t: t, srv: f.srv}
@@ -63,8 +64,7 @@ func publicPayServer(t *testing.T, withStripe bool) *payFixture {
 // register makes one public entry and returns its id and pay code.
 func (f *payFixture) register(t *testing.T, email string) (string, string, map[string]any) {
 	t.Helper()
-	status, out, _ := f.pub.do("POST", "/api/v1/public/tournaments/"+f.tourID+"/register",
-		entry(map[string]any{"email": email}))
+	status, out := register(t, f.pub, f.tourID, entry(map[string]any{"email": email}), true)
 	if status != 201 {
 		t.Fatalf("register: %d (%v)", status, out)
 	}

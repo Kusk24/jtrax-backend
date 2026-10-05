@@ -45,6 +45,7 @@ func cardServer(t *testing.T, p ocr.Provider) (*httptest.Server, string) {
 	d := newDB(t)
 	cfg := mail.Config{}
 	srv := httptest.NewServer(api.NewHandlerWith(d, cfg, mail.New(cfg), p))
+	serverDBs.Store(srv.URL, d)
 	t.Cleanup(srv.Close)
 
 	staff := &client{t: t, srv: srv}

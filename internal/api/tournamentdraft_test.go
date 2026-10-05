@@ -49,7 +49,7 @@ func TestADraftIsNotPublic(t *testing.T) {
 	if s, _, _ := pub.do("GET", "/api/v1/public/tournaments/"+id, nil); s != 404 {
 		t.Fatalf("public page of a draft: want 404, got %d", s)
 	}
-	if s, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); s != 404 {
+	if s, _ := register(t, pub, id, entry(nil), true); s != 404 {
 		t.Fatalf("registering on a draft: want 404, got %d", s)
 	}
 	// …and not in a parent's list.
@@ -104,7 +104,7 @@ func TestPublishTakesADraftLive(t *testing.T) {
 	if s, _, _ := pub.do("GET", "/api/v1/public/tournaments/"+id, nil); s != 200 {
 		t.Fatalf("public page after publishing: want 200, got %d", s)
 	}
-	if s, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+id+"/register", entry(nil)); s != 201 {
+	if s, out := register(t, pub, id, entry(nil), true); s != 201 {
 		t.Fatalf("register after publishing: %d (%v)", s, out)
 	}
 	// …and the preview link is dead.

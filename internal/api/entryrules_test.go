@@ -24,7 +24,7 @@ func earlyBirdEntry(t *testing.T) (staff, pub *client, tid, reg, code string) {
 	})
 	staff = &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
-	s, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+tid+"/register", entry(nil))
+	s, out := register(t, pub, tid, entry(nil), true)
 	if s != 201 || out["feeQuoted"] != float64(400) {
 		t.Fatalf("register at the early-bird price: %d (%v)", s, out)
 	}
@@ -105,21 +105,23 @@ func TestTheScanAndTheThaiNameAreKeptWithTheEntry(t *testing.T) {
 	pub, tid := openEvent(t, nil)
 	staff := &client{t: t, srv: pub.srv}
 	staff.login("admin@jca.ac.th")
-	s, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+tid+"/register", entry(map[string]any{
+	// What the card said wins over what the form claims it said.
+	s, out := register(t, pub, tid, entry(map[string]any{
 		"dateOfBirth": "2015-04-02", "nameTh": "สมชาย นิรันดร์", "documentType": "thai-id",
-		"scannedName": "Somchai Niran", "scannedDateOfBirth": "2015-04-20",
-	}))
+		"scannedName": "Typed Name", "scannedDateOfBirth": "2015-04-20",
+	}), true)
 	if s != 201 {
 		t.Fatalf("register: %d (%v)", s, out)
 	}
 	_, row, _ := staff.do("GET", "/api/v1/tournament-registrations/"+out["registrationId"].(string), nil)
 	if row["participant_name_th"] != "สมชาย นิรันดร์" || row["id_document_type"] != "thai-id" ||
-		row["ocr_name"] != "Somchai Niran" || row["ocr_date_of_birth"] != "2015-04-20" {
+		row["ocr_name"] != "Read Off Card" || row["ocr_date_of_birth"] != "2015-04-02" ||
+		row["participant_date_of_birth"] != "2015-04-02" {
 		t.Fatalf("scan not kept: %v", row)
 	}
-	if s, _, _ := pub.do("POST", "/api/v1/public/tournaments/"+tid+"/register", entry(map[string]any{
+	if s, _ := register(t, pub, tid, entry(map[string]any{
 		"email": "x@example.com", "documentType": "driving-licence",
-	})); s != 400 {
+	}), true); s != 400 {
 		t.Fatalf("unknown document type: want 400, got %d", s)
 	}
 }
@@ -143,7 +145,7 @@ func TestAnAgeGroupGoesByBirthYear(t *testing.T) {
 	} {
 		body := entry(map[string]any{"categoryId": u10, "dateOfBirth": tc.dob,
 			"email": "dob" + string(rune('a'+i)) + "@example.com"})
-		if s, out, _ := pub.do("POST", "/api/v1/public/tournaments/"+tid+"/register", body); s != tc.want {
+		if s, out := register(t, pub, tid, body, true); s != tc.want {
 			t.Errorf("born %s: want %d, got %d (%v)", tc.dob, tc.want, s, out)
 		}
 	}

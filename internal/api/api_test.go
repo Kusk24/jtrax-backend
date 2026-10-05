@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
@@ -86,8 +87,13 @@ func newServerOn(t *testing.T, d *sql.DB) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(api.NewHandler(d))
 	t.Cleanup(srv.Close)
+	serverDBs.Store(srv.URL, d)
 	return srv
 }
+
+// serverDBs maps a test server to its database, for helpers that only hold a
+// client — register, which writes the ID card check a scan would have.
+var serverDBs sync.Map
 
 func TestLoginRejectsWrongPassword(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
@@ -112,7 +118,7 @@ func TestAdminCRUDLifecycle(t *testing.T) {
 	c.login("admin@jca.ac.th")
 
 	status, created, _ := c.do("POST", "/api/v1/classes", map[string]any{
-		"name": "Master Class", "class_type": "Master",
+		"name": "Master Class", "class_type": "Private", "level": "Advanced",
 	})
 	if status != 201 {
 		t.Fatalf("create: want 201, got %d (%v)", status, created)
@@ -177,15 +183,15 @@ func TestParentSeesOnlyOwnChildren(t *testing.T) {
 func TestParentRegistersOwnChildOnly(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("sandy01234@gmail.com")
-	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, _, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id": "stu_penny",
-	})
+	}))
 	if status != 201 {
 		t.Fatalf("register own child: want 201, got %d", status)
 	}
-	status, _, _ = c.do("POST", "/api/v1/tournaments/trn_wellington/entries", map[string]any{
+	status, _, _ = c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id": "stu_missing",
-	})
+	}))
 	if status != 404 {
 		t.Fatalf("register foreign child: want 404, got %d", status)
 	}

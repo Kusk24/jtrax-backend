@@ -72,3 +72,26 @@ func TestSMTPBodyIsMultipart(t *testing.T) {
 		t.Fatalf("a Thai subject was not encoded: %q", got)
 	}
 }
+
+// Every email ends the same way: the school, the system, how to reach the
+// office, and that it is automated; a letter can sign off and list points.
+func TestEveryEmailCarriesTheSchoolFooter(t *testing.T) {
+	e := Email{
+		Heading: "Reset Your Password", Greeting: "Dear Sandy,",
+		Button:  &Button{Label: "Choose a New Password", URL: "https://x/reset"},
+		After:   []string{"For your security:", "- This link can be used only once.", "- The link will expire after 1 hour.", "Thanks."},
+		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Account Support"},
+	}
+	text, page := e.Text(), e.HTML()
+	for _, want := range []string{"• This link can be used only once.", "Best regards,\nJCA Chess School\nJTrax Account Support",
+		"JTrax — Chess School Management System", "02-853-9836", "Please do not reply directly to this message."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text missing %q:\n%s", want, text)
+		}
+	}
+	for _, want := range []string{"<li style", "</ul>", "JTrax — Chess School Management System", "jcachess@gmail.com"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("html missing %q", want)
+		}
+	}
+}

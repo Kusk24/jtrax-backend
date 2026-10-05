@@ -65,6 +65,9 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 		return err
 	}
 
+	if _, err := tx.Exec(`DELETE FROM session_booking WHERE student_id = ?`, studentID); err != nil {
+		return err
+	}
 	att, err := tx.Exec(`DELETE FROM attendance WHERE student_id = ?`, studentID)
 	if err != nil {
 		return err
