@@ -77,8 +77,8 @@ func TestAnUnpaidPlaceIsReleasedWhenRegistrationCloses(t *testing.T) {
 	staff.do("PATCH", "/api/v1/tournament-registrations/"+reg, map[string]any{"registered_at": day(-3) + " 10:00:00"})
 	staff.do("PATCH", "/api/v1/tournaments/"+tid, map[string]any{"registration_deadline": day(-2)})
 
-	if out := sweep(t, pub, reg, code); out["state"] != "expired" || out["paymentStatus"] != "Expired" {
-		t.Fatalf("want the place released and its fee expired, got %v", out)
+	if out := sweep(t, pub, reg, code); out["state"] != "cancelled" || out["paymentStatus"] != "Cancelled" {
+		t.Fatalf("want the place released and its fee cancelled, got %v", out)
 	}
 	_, row, _ := staff.do("GET", "/api/v1/tournament-registrations/"+reg, nil)
 	if row["status"] != "Withdrawn" || row["released_at"] == nil {

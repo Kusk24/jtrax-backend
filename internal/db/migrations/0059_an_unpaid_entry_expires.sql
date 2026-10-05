@@ -1,7 +1,7 @@
 -- 0059_an_unpaid_entry_expires.sql — a tournament fee nobody paid by the
 -- deadline says so, and each email about an unpaid entry goes once.
 --
--- 1. A payment's status gains Expired: the entry's place was released at the
+-- 1. A payment's status gains Cancelled: the entry's place was released at the
 --    registration deadline with the fee still owed. Pending said "still
 --    coming" about money that no longer can, and the desk could not tell the
 --    two apart.
@@ -51,9 +51,9 @@ CREATE TABLE payment_new (
     discount_amount            REAL NOT NULL DEFAULT 0,
     final_amount               REAL NOT NULL,
     payment_method             TEXT NOT NULL CHECK (payment_method IN ('CreditCard','BankTransfer','Cash','PromptPay')),
-    -- Expired: a tournament fee still owed when its place was released.
+    -- Cancelled: a tournament fee still owed when its place was released.
     -- Like Pending and Refunded, it is not revenue.
-    status                     TEXT NOT NULL DEFAULT 'Paid' CHECK (status IN ('Paid','Pending','Refunded','Expired')),
+    status                     TEXT NOT NULL DEFAULT 'Paid' CHECK (status IN ('Paid','Pending','Refunded','Cancelled')),
     payment_date               TEXT NOT NULL,
     reference_number           TEXT,
     stripe_session_id          TEXT,
@@ -95,8 +95,8 @@ WHERE credit_transaction_id IN (SELECT credit_transaction_id FROM payment_link_b
 DROP TABLE payment_link_backup;
 
 -- Places already released before this migration owed a fee that can no
--- longer be paid; their open payments are Expired now, as new ones will be.
-UPDATE payment SET status = 'Expired', stripe_session_id = NULL, stripe_checkout_url = NULL
+-- longer be paid; their open payments are Cancelled now, as new ones will be.
+UPDATE payment SET status = 'Cancelled', stripe_session_id = NULL, stripe_checkout_url = NULL
  WHERE status = 'Pending'
    AND tournament_registration_id IN (
        SELECT tournament_registration_id FROM tournament_registration

@@ -2,7 +2,7 @@ package api_test
 
 /* The emails a public entrant gets about their entry and its fee: which one,
    when, and only once. Registration and payment are two states — a place is
-   reserved at once, and its fee is Pending, then Paid or Expired. */
+   reserved at once, and its fee is Pending, then Paid or Cancelled. */
 
 import (
 	"context"
@@ -216,7 +216,7 @@ func TestTheDayBeforeClosingAnUnpaidEntryIsReminded(t *testing.T) {
 	}
 }
 
-func TestAPlaceUnpaidAtClosingIsCancelledItsFeeExpiredAndTheFamilyTold(t *testing.T) {
+func TestAPlaceUnpaidAtClosingIsCancelledItsFeeCancelledAndTheFamilyTold(t *testing.T) {
 	f := publicPayServer(t, true)
 	id, code := f.registerChoosing(t, "somchai@example.com", "later")
 	f.pub.do("POST", "/api/v1/public/tournament-registrations/"+id+"/pay", map[string]string{"code": code})
@@ -226,14 +226,14 @@ func TestAPlaceUnpaidAtClosingIsCancelledItsFeeExpiredAndTheFamilyTold(t *testin
 	f.notices(t, time.Now())
 	f.notices(t, time.Now().Add(10*time.Minute))
 	_, body := f.waitForSubject(t, "Registration Cancelled — JCA Open")
-	if !strings.Contains(body, "Payment status: Expired") || !strings.Contains(body, "has been released") {
-		t.Fatalf("cancellation should say the fee expired and the place went:\n%s", body)
+	if !strings.Contains(body, "Payment status: Cancelled") || !strings.Contains(body, "has been released") {
+		t.Fatalf("cancellation should say the fee was cancelled and the place went:\n%s", body)
 	}
 	if n := f.count("Registration Cancelled"); n != 1 {
 		t.Fatalf("cancellation sent %d times", n)
 	}
-	if got := f.paymentStatus(t, id); got != "Expired" {
-		t.Fatalf("payment after closing: %q, want Expired", got)
+	if got := f.paymentStatus(t, id); got != "Cancelled" {
+		t.Fatalf("payment after closing: %q, want Cancelled", got)
 	}
 	var session string
 	f.d.QueryRow(`SELECT COALESCE(stripe_session_id,'') FROM payment WHERE tournament_registration_id = ?`, id).Scan(&session)
@@ -241,11 +241,11 @@ func TestAPlaceUnpaidAtClosingIsCancelledItsFeeExpiredAndTheFamilyTold(t *testin
 		t.Fatal("the released place's Stripe page was not closed")
 	}
 	// The pay page says so, and will not open a payment.
-	if s, e, _ := f.pub.do("POST", "/api/v1/public/tournament-registrations/"+id, map[string]string{"code": code}); s != 200 || e["state"] != "expired" {
+	if s, e, _ := f.pub.do("POST", "/api/v1/public/tournament-registrations/"+id, map[string]string{"code": code}); s != 200 || e["state"] != "cancelled" {
 		t.Fatalf("pay page after closing: %d %v", s, e)
 	}
 	if s, _, _ := f.pub.do("POST", "/api/v1/public/tournament-registrations/"+id+"/pay", map[string]string{"code": code}); s != 409 {
-		t.Fatalf("paying an expired entry: %d, want 409", s)
+		t.Fatalf("paying a cancelled entry: %d, want 409", s)
 	}
 }
 

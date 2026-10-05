@@ -1,7 +1,7 @@
 // The emails a public tournament entrant gets about their entry and its fee.
 //
 // Registration and payment are two separate states. A place is reserved the
-// moment the form is sent; the fee is Pending until it is paid, and Expired if
+// moment the form is sent; the fee is Pending until it is paid, and Cancelled if
 // registration closes first. Each email says which state the entry is in and
 // why the family is hearing about it:
 //
@@ -54,7 +54,7 @@ type entryFacts struct {
 	PricedAsStudent  bool
 	StudentID        sql.NullString
 	PaymentID        sql.NullString
-	// PaymentStatus is "Pending", "Paid", "Refunded", "Expired", or "" when
+	// PaymentStatus is "Pending", "Paid", "Cancelled", or "" when
 	// the entry has no payment (nothing to pay, or an entry from before 0059).
 	PaymentStatus string
 	PaidAmount    float64
@@ -237,7 +237,7 @@ func entryEmail(d *sql.DB, f *entryFacts, kind entryNotice, link string, online 
 
 	default: // noticeCancelled
 		closes := longDate(f.Deadline)
-		details = append(details, mail.Detail{Label: "Payment status", Value: "Expired"})
+		details = append(details, mail.Detail{Label: "Payment status", Value: "Cancelled"})
 		return "Registration Cancelled — " + t, mail.Email{
 			Heading: "Registration cancelled", Greeting: "Hello,",
 			Paragraphs: []string{
@@ -407,7 +407,7 @@ func noticeCancellations(ctx context.Context, d *sql.DB, client *stripepay.Clien
 	for _, regID := range list {
 		var session string
 		d.QueryRow(`SELECT COALESCE(stripe_session_id,'') FROM payment
-		             WHERE tournament_registration_id = ? AND status = 'Expired'`, regID).Scan(&session)
+		             WHERE tournament_registration_id = ? AND status = 'Cancelled'`, regID).Scan(&session)
 		if session != "" {
 			if client != nil {
 				if err := client.ExpireCheckoutSession(ctx, session); err != nil {
@@ -415,7 +415,7 @@ func noticeCancellations(ctx context.Context, d *sql.DB, client *stripepay.Clien
 				}
 			}
 			d.Exec(`UPDATE payment SET stripe_session_id = NULL, stripe_checkout_url = NULL
-			         WHERE tournament_registration_id = ? AND status = 'Expired'`, regID)
+			         WHERE tournament_registration_id = ? AND status = 'Cancelled'`, regID)
 		}
 		if claim(d, "cancelled_emailed_at", regID) {
 			sendEntryNotice(d, svc, regID, noticeCancelled, client != nil)

@@ -132,7 +132,7 @@ type publicEntry struct {
 	Category        string  `json:"category,omitempty"`
 	Fee             float64 `json:"fee"`
 	// State is what the pay page shows: "unpaid", "paid", "free" (nothing to
-	// pay), "expired" (registration closed unpaid, so the place was released)
+	// pay), "cancelled" (registration closed unpaid, so the place was released)
 	// or "closed" (withdrawn, or the money was refunded).
 	State        string `json:"state"`
 	CardPayments bool   `json:"cardPayments"`
@@ -142,7 +142,7 @@ type publicEntry struct {
 	Venue     string `json:"venue,omitempty"`
 	// Deadline is when registration closes: the last day to pay.
 	Deadline string `json:"registrationDeadline,omitempty"`
-	// PaymentStatus is the payment's own word: Pending, Paid or Expired.
+	// PaymentStatus is the payment's own word: Pending, Paid or Cancelled.
 	PaymentStatus string  `json:"paymentStatus"`
 	AmountPaid    float64 `json:"amountPaid,omitempty"`
 	// While the entry still has its early-bird price: until when, and what
@@ -196,8 +196,8 @@ func findPublicEntry(d *sql.DB, regID, code string) (*publicEntry, error) {
 	switch {
 	case e.paymentStatus.String == "Paid":
 		e.State = "paid"
-	case e.paymentStatus.String == "Expired":
-		e.State = "expired"
+	case e.paymentStatus.String == "Cancelled":
+		e.State = "cancelled"
 	case e.status == "Rejected" || e.status == "Withdrawn":
 		e.State = "closed"
 	case e.paymentStatus.Valid && e.paymentStatus.String != "Pending":
@@ -301,7 +301,7 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 		case "closed":
 			httpx.Error(w, http.StatusConflict, "this entry is no longer open for payment", nil)
 			return
-		case "expired":
+		case "cancelled":
 			httpx.Error(w, http.StatusConflict, "registration has closed and this place was released", nil)
 			return
 		}

@@ -50,10 +50,10 @@ func StartEntrySweeper(ctx context.Context, d *sql.DB) {
 }
 
 // unpaid is the SQL for "no payment against this entry has been made":
-// nothing recorded, a Pending one, or one that Expired when its place went.
+// nothing recorded, a Pending one, or one Cancelled when its place went.
 const unpaid = `NOT EXISTS (SELECT 1 FROM payment p
 	                  WHERE p.tournament_registration_id = r.tournament_registration_id
-	                    AND p.status NOT IN ('Pending','Expired'))`
+	                    AND p.status NOT IN ('Pending','Cancelled'))`
 
 // sweepUnpaidEntries applies the two rules as they stand on `day`.
 func sweepUnpaidEntries(d *sql.DB, day string) error {
@@ -162,11 +162,11 @@ func releaseUnpaid(d *sql.DB, day string) error {
 	if err != nil {
 		return err
 	}
-	/* The fee a released place owed can no longer be paid: Expired, not
+	/* The fee a released place owed can no longer be paid: Cancelled, not
 	   Pending. Its Stripe page is closed, and the family told, by the notice
 	   timer (entryemails.go), which still needs the session id to do it. */
 	_, err = d.Exec(`
-		UPDATE payment SET status = 'Expired'
+		UPDATE payment SET status = 'Cancelled'
 		 WHERE status = 'Pending'
 		   AND tournament_registration_id IN (
 		       SELECT tournament_registration_id FROM tournament_registration

@@ -306,17 +306,17 @@ func settleCheckout(d *sql.DB, svc *notify.Service, paymentID, sessionID string,
 
 	var was string
 	tx.QueryRow(`SELECT status FROM payment WHERE payment_id = ?`, paymentID).Scan(&was)
-	// Expired too: the money is real even when it arrived after the place was
+	// Cancelled too: the money is real even when it arrived after the place was
 	// released, and the books must show it. Staff restore the place or refund.
 	res, err := tx.Exec(
 		`UPDATE payment SET status = 'Paid', payment_method = 'CreditCard',
 		        stripe_session_id = ?
-		  WHERE payment_id = ? AND status IN ('Pending','Expired')`,
+		  WHERE payment_id = ? AND status IN ('Pending','Cancelled')`,
 		sessionID, paymentID)
 	if err != nil {
 		return "", err
 	}
-	if was == "Expired" {
+	if was == "Cancelled" {
 		log.Printf("stripe: %s was paid after its place was released — restore the entry or refund it", paymentID)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {

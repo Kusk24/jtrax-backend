@@ -327,10 +327,10 @@ var errFeeAlreadyPaid = errors.New("the fee is already paid; refund it on the pa
 // taken is changed by a refund, not by editing a number.
 func syncRegistrationPayment(tx *sql.Tx, regID string) error {
 	/* A released place that staff set back to Approved owes its fee again:
-	   the payment that Expired with it is Pending once more. */
+	   the payment Cancelled with it is Pending once more. */
 	if _, err := tx.Exec(`
 		UPDATE payment SET status = 'Pending'
-		 WHERE tournament_registration_id = ? AND status = 'Expired'
+		 WHERE tournament_registration_id = ? AND status = 'Cancelled'
 		   AND EXISTS (SELECT 1 FROM tournament_registration
 		                WHERE tournament_registration_id = ? AND status = 'Approved')`,
 		regID, regID); err != nil {
