@@ -115,6 +115,19 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		}
 
 		tournamentID := r.PathValue("id")
+		/* The same doors the public form has: registration closed on the
+		   tournament's card, the closing date passed, or every place taken. */
+		if msg, err := entryClosed(tx, tournamentID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
+				return
+			}
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		} else if msg != "" {
+			httpx.Error(w, http.StatusConflict, msg, nil)
+			return
+		}
 		price, err := loadPrice(tx, tournamentID)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
@@ -228,3 +241,43 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 func mountTournamentEntry(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/entries", handleEnterTournament(d))
 }
+
+// entryClosed says why a tournament is not taking entries, or "" when it is:
+// a draft, registration closed by the organiser (the public registration
+// switch on the tournament's card, which closes the parent portal too), the
+// closing date passed, or every place taken. The public form answers to the
+// same three (registrationOpen).
+func entryClosed(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, tournamentID string) (string, error) {
+	var draft, open, taken int
+	var deadline string
+	var capacity sql.NullInt64
+	err := q.QueryRow(`
+		SELECT draft, COALESCE(public_registration, 0), COALESCE(registration_deadline, ''), max_participants,
+		       (SELECT COUNT(*) FROM tournament_registration r
+		         WHERE r.tournament_id = t.tournament_id AND r.status IN ('Pending','Approved'))
+		  FROM tournament t WHERE tournament_id = ?`, tournamentID).Scan(&draft, &open, &deadline, &capacity, &taken)
+	if err != nil {
+		return "", err
+	}
+	if draft == 1 {
+		return "", sql.ErrNoRows
+	}
+	if open == 0 {
+		return "registration for this tournament is closed", nil
+	}
+	var limit *int
+	if capacity.Valid {
+		n := int(capacity.Int64)
+		limit = &n
+	}
+	if ok, why := registrationOpen(deadline, limit, taken); !ok {
+		if why == "full" {
+			return "this tournament is full", nil
+		}
+		return "registration for this tournament has closed", nil
+	}
+	return "", nil
+}
+

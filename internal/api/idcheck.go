@@ -216,12 +216,15 @@ func handleParentScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 		tournamentID := r.PathValue("id")
-		var n int
-		if err := d.QueryRow(`SELECT COUNT(*) FROM tournament WHERE tournament_id = ? AND draft = 0`,
-			tournamentID).Scan(&n); err != nil || n == 0 {
+		/* No card is read for a tournament that is not taking entries. */
+		if msg, err := entryClosed(d, tournamentID); err != nil {
 			httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
 			return
+		} else if msg != "" {
+			httpx.Error(w, http.StatusConflict, msg, nil)
+			return
 		}
+		var n int
 		// Read before the image so the form field is there to check; the
 		// multipart parse happens inside readIDCard, so peek at the query
 		// string instead.

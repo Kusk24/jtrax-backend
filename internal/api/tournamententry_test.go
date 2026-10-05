@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"database/sql"
 	"net/http"
 	"testing"
 	"time"
@@ -210,6 +211,12 @@ func TestRepricingAnEntryRepricesItsOpenCardPayment(t *testing.T) {
 // Under 10 group, which that fits.
 func verifiedEntry(t *testing.T, c *client, body map[string]any) map[string]any {
 	t.Helper()
+	// The seeded tournament closed on its deadline; these tests are about
+	// entering one that is open.
+	if v, ok := serverDBs.Load(c.srv.URL); ok {
+		v.(*sql.DB).Exec(`UPDATE tournament SET public_registration = 1, registration_deadline = NULL
+		                   WHERE tournament_id = 'trn_wellington'`)
+	}
 	student, _ := body["student_id"].(string)
 	if _, ok := body["tournament_category_id"]; !ok {
 		body["tournament_category_id"] = "tcat_u10"
@@ -256,3 +263,23 @@ func TestAParentEntryRecordsTermsNicknameAndTheFamilysContact(t *testing.T) {
 	}
 }
 
+// A parent cannot enter a tournament whose registration the academy closed
+// on its card, or whose closing date has passed — the same doors the public
+// form answers to.
+func TestAParentCannotEnterAClosedTournament(t *testing.T) {
+	d := newDB(t)
+	c := &client{t: t, srv: newServerOn(t, d)}
+	c.login("sandy01234@gmail.com")
+	path := "/api/v1/tournaments/trn_wellington/entries"
+
+	body := verifiedEntry(t, c, map[string]any{"student_id": "stu_penny"}) // opens it
+	d.Exec(`UPDATE tournament SET public_registration = 0 WHERE tournament_id = 'trn_wellington'`)
+	if s, out, _ := c.do("POST", path, body); s != 409 {
+		t.Fatalf("closed by the academy: want 409, got %d (%v)", s, out)
+	}
+
+	d.Exec(`UPDATE tournament SET public_registration = 1, registration_deadline = '2020-01-01' WHERE tournament_id = 'trn_wellington'`)
+	if s, out, _ := c.do("POST", path, body); s != 409 {
+		t.Fatalf("past its closing date: want 409, got %d (%v)", s, out)
+	}
+}
