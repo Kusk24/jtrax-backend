@@ -13,6 +13,7 @@
 package api
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -38,10 +40,14 @@ type publicEntryDeps struct {
 	mail      mail.Config
 	stripe    *stripepay.Client
 	stripeCfg stripepay.Config
+	// notifier sends the entry's emails (entryemails.go).
+	notifier *notify.Service
 }
 
-// newPayCode returns a fresh code and the hash to store for it. 32 random
-// bytes: nobody guesses that, through a rate limit or otherwise.
+// newPayCode returns a fresh random code and the hash to store for it. 32
+// random bytes: nobody guesses that, through a rate limit or otherwise. The
+// arrival reminder's codes are still made this way; pay codes are derived
+// (entryPayCode).
 func newPayCode() (code, hash string, err error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -49,6 +55,60 @@ func newPayCode() (code, hash string, err error) {
 	}
 	code = hex.EncodeToString(raw)
 	return code, hashPayCode(code), nil
+}
+
+// entryPayCode is the pay code for one entry, and the hash to store for it.
+//
+// It is an HMAC of the entry id under a key kept in server_secret, a table no
+// endpoint reads, rather than random bytes: every email about an unpaid entry
+// — the confirmation, the reminder, "your payment was not completed" — has to
+// carry the same working link, and only the hash is stored. Without the key
+// the code is as unguessable as 32 random bytes; the stored hash still opens
+// nothing on its own.
+func entryPayCode(d *sql.DB, regID string) (code, hash string, err error) {
+	key, err := serverSecret(d, "pay_code_key")
+	if err != nil {
+		return "", "", err
+	}
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("pay:" + regID))
+	code = hex.EncodeToString(m.Sum(nil))
+	return code, hashPayCode(code), nil
+}
+
+// serverSecret reads a named 32-byte key, making it on first use. Two servers
+// racing to make it both read back the one that won.
+func serverSecret(d *sql.DB, name string) ([]byte, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, err
+	}
+	if _, err := d.Exec(`INSERT OR IGNORE INTO server_secret (name, value) VALUES (?, ?)`,
+		name, hex.EncodeToString(raw)); err != nil {
+		return nil, err
+	}
+	var v string
+	if err := d.QueryRow(`SELECT value FROM server_secret WHERE name = ?`, name).Scan(&v); err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(v)
+}
+
+// currentPayCode is the code an email about an existing entry should carry.
+// An entry made before codes were derived holds the hash of a random one;
+// it is moved to the derived code here, which retires the link in its first
+// email — the one cost of the change, paid once per old entry.
+func currentPayCode(d *sql.DB, regID string) (string, error) {
+	code, hash, err := entryPayCode(d, regID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := d.Exec(`UPDATE tournament_registration SET pay_code_hash = ?
+	                      WHERE tournament_registration_id = ? AND COALESCE(pay_code_hash,'') <> ?`,
+		hash, regID, hash); err != nil {
+		return "", err
+	}
+	return code, nil
 }
 
 func hashPayCode(code string) string {
@@ -72,9 +132,23 @@ type publicEntry struct {
 	Category        string  `json:"category,omitempty"`
 	Fee             float64 `json:"fee"`
 	// State is what the pay page shows: "unpaid", "paid", "free" (nothing to
-	// pay) or "closed" (withdrawn, or the money was refunded).
+	// pay), "cancelled" (registration closed unpaid, so the place was released)
+	// or "closed" (withdrawn, or the money was refunded).
 	State        string `json:"state"`
 	CardPayments bool   `json:"cardPayments"`
+
+	StartDate string `json:"startDate,omitempty"`
+	EndDate   string `json:"endDate,omitempty"`
+	Venue     string `json:"venue,omitempty"`
+	// Deadline is when registration closes: the last day to pay.
+	Deadline string `json:"registrationDeadline,omitempty"`
+	// PaymentStatus is the payment's own word: Pending, Paid or Cancelled.
+	PaymentStatus string  `json:"paymentStatus"`
+	AmountPaid    float64 `json:"amountPaid,omitempty"`
+	// While the entry still has its early-bird price: until when, and what
+	// it costs after.
+	EarlyBirdUntil string  `json:"earlyBirdUntil,omitempty"`
+	RegularFee     float64 `json:"regularFee,omitempty"`
 
 	regID         string
 	status        string
@@ -115,11 +189,17 @@ func findPublicEntry(d *sql.DB, regID, code string) (*publicEntry, error) {
 	if stored == "" || subtle.ConstantTimeCompare([]byte(stored), []byte(hashPayCode(code))) != 1 {
 		return nil, errNoEntry
 	}
+	f, err := loadEntryFacts(d, regID)
+	if err != nil {
+		return nil, err
+	}
 	switch {
-	case e.status == "Rejected" || e.status == "Withdrawn":
-		e.State = "closed"
 	case e.paymentStatus.String == "Paid":
 		e.State = "paid"
+	case e.paymentStatus.String == "Cancelled":
+		e.State = "cancelled"
+	case e.status == "Rejected" || e.status == "Withdrawn":
+		e.State = "closed"
 	case e.paymentStatus.Valid && e.paymentStatus.String != "Pending":
 		// Refunded: a decision the payments screen made, not a debt to reopen.
 		e.State = "closed"
@@ -127,6 +207,18 @@ func findPublicEntry(d *sql.DB, regID, code string) (*publicEntry, error) {
 		e.State = "free"
 	default:
 		e.State = "unpaid"
+	}
+	e.StartDate, e.EndDate, e.Venue, e.Deadline = f.StartDate, f.EndDate, f.venue(), f.Deadline
+	e.PaymentStatus = f.PaymentStatus
+	if e.PaymentStatus == "" && e.Fee > 0 {
+		e.PaymentStatus = "Pending" // an entry from before its payment was made at once
+	}
+	if e.State == "paid" {
+		e.AmountPaid = f.PaidAmount
+	}
+	if e.State == "unpaid" && f.earlyBirdHolds(today()) {
+		e.EarlyBirdUntil = f.EarlyBirdUntil
+		e.RegularFee = f.regularFee(d)
 	}
 	return &e, nil
 }
@@ -209,6 +301,9 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 		case "closed":
 			httpx.Error(w, http.StatusConflict, "this entry is no longer open for payment", nil)
 			return
+		case "cancelled":
+			httpx.Error(w, http.StatusConflict, "registration has closed and this place was released", nil)
+			return
 		}
 		paymentID := e.paymentID.String
 		if !e.paymentID.Valid {
@@ -221,80 +316,4 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 		}
 		checkoutLink(w, r, deps.db, deps.stripe, deps.stripeCfg, paymentID)
 	}
-}
-
-// sendEntryConfirmation emails the entrant that they are in, with the fee and,
-// when card payments are on, the link to pay it. It runs after the entry is
-// committed and never fails the registration: an email that did not send is
-// no reason to tell somebody their place was not taken.
-func sendEntryConfirmation(deps *publicEntryDeps, to, tournamentID, tournamentName, regID, participant, category string, fee float64, code, earlyBirdUntil, closes string) {
-	var link string
-	if deps.stripe != nil && fee > 0 && deps.mail.AppURL != "" {
-		link = payLink(deps.mail.AppURL, tournamentID, regID, code)
-	}
-	if deps.sender == nil {
-		// No SMTP configured, which only happens in development. The link is a
-		// credential for this entry's payment, so the log line says so.
-		if link != "" {
-			log.Printf("public entry: SMTP not configured — pay link for %s (SENSITIVE): %s", regID, link)
-		}
-		return
-	}
-	subject := "You're registered: " + tournamentName
-	if err := deps.sender.Send(to, subject, entryConfirmationBody(tournamentName, participant, category, fee, link, earlyBirdUntil, closes)); err != nil {
-		// The address is the entrant's, which is personal data; the entry id
-		// is enough for somebody to find it.
-		log.Printf("public entry: confirmation for %s did not send: %v", regID, err)
-	}
-}
-
-// entryConfirmationBody is the email, English then Thai, plain text like every
-// other message the academy sends. An unpaid fee comes with its two dates
-// (entryrules.go) — earlyBirdUntil only when the entry got that price.
-func entryConfirmationBody(tournament, participant, category string, fee float64, link, earlyBirdUntil, closes string) string {
-	var b strings.Builder
-	rulesEN, rulesTH := unpaidRules(earlyBirdUntil, closes)
-	contactEN, contactTH := contactLines()
-	b.WriteString("Hello,\n\n")
-	b.WriteString(participant + " is registered for " + tournament + ".\n")
-	if category != "" {
-		b.WriteString("Category: " + category + "\n")
-	}
-	if fee > 0 {
-		b.WriteString("Entry fee: " + fmtBaht(fee) + "\n\n")
-		if link != "" {
-			b.WriteString("Pay by card or PromptPay here:\n" + link + "\n\n")
-			b.WriteString("Or pay by bank transfer or at the JCA front desk.\n")
-			b.WriteString("Keep this email: the link is how you pay for this entry, and it works only for this entry.\n")
-		} else {
-			b.WriteString("Please pay by bank transfer or at the JCA front desk.\n")
-		}
-		for _, line := range rulesEN[1:] {
-			b.WriteString("- " + line + "\n")
-		}
-	}
-	b.WriteString("\n" + contactEN + "\n")
-	b.WriteString("\nJCA Chess Academy\n\n----------\n\n")
-
-	b.WriteString("สวัสดีค่ะ\n\n")
-	b.WriteString(participant + " ลงทะเบียนเข้าร่วม " + tournament + " เรียบร้อยแล้ว\n")
-	if category != "" {
-		b.WriteString("รุ่น: " + category + "\n")
-	}
-	if fee > 0 {
-		b.WriteString("ค่าสมัคร: " + fmtBaht(fee) + "\n\n")
-		if link != "" {
-			b.WriteString("ชำระด้วยบัตรหรือพร้อมเพย์ได้ที่:\n" + link + "\n\n")
-			b.WriteString("หรือโอนเงินผ่านธนาคาร หรือชำระที่เคาน์เตอร์ของ JCA\n")
-			b.WriteString("กรุณาเก็บอีเมลนี้ไว้ ลิงก์นี้ใช้ชำระเงินสำหรับการสมัครนี้เท่านั้น\n")
-		} else {
-			b.WriteString("กรุณาโอนเงินผ่านธนาคาร หรือชำระที่เคาน์เตอร์ของ JCA\n")
-		}
-		for _, line := range rulesTH[1:] {
-			b.WriteString("- " + line + "\n")
-		}
-	}
-	b.WriteString("\n" + contactTH + "\n")
-	b.WriteString("\nJCA Chess Academy\n")
-	return b.String()
 }

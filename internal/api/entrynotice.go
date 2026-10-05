@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 )
 
 // longDate writes 2026-09-28 as "28 September 2026" — the email and the page
@@ -52,7 +53,10 @@ func contactLines() (en, th string) {
 // handlePayCancelled is where Stripe sends a family who left without paying.
 // For a tournament entry it says what happens next; for anything else, that
 // nothing was charged. It shows no personal data — only the event's dates.
-func handlePayCancelled(d *sql.DB) http.HandlerFunc {
+//
+// A "pay now" family who leaves is also emailed that the place is held and
+// the fee still owed (entryemails.go), rather than half an hour later.
+func handlePayCancelled(d *sql.DB, svc *notify.Service, online bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		b.WriteString(`<h1 style="font-size:21px;margin:0 0 6px">Payment cancelled — nothing was charged.</h1>`)
@@ -69,6 +73,7 @@ func handlePayCancelled(d *sql.DB) http.HandlerFunc {
 				 WHERE r.tournament_registration_id = ?`, entry).
 				Scan(&earlyBird, &ebUntil, &closes, &status)
 			if err == nil && status == "Approved" {
+				noticeAfterCancelPage(d, svc, entry, online)
 				if earlyBird.Int64 != 1 {
 					ebUntil = ""
 				}

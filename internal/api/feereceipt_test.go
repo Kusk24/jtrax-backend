@@ -36,14 +36,15 @@ func TestAFeePaidAtTheDeskIsConfirmedToTheParent(t *testing.T) {
 	}
 }
 
-// waitForReceipt waits for a mail whose body says the payment arrived. The
-// confirmation of the entry itself is also mail, so "any mail" is not enough.
+// waitForReceipt waits for the "Registration Confirmed" mail that says the
+// payment arrived. The "reserved, payment required" mail sent at registration
+// is also mail, so "any mail" is not enough.
 func waitForReceipt(t *testing.T, f *payFixture) (string, string) {
 	t.Helper()
 	for i := 0; i < 100; i++ {
 		f.mail.mu.Lock()
 		for _, m := range f.mail.sent {
-			if strings.Contains(m.Body, "We have received your payment") {
+			if strings.Contains(m.Body, "Your registration and payment have been completed") {
 				f.mail.mu.Unlock()
 				return m.To, m.Body
 			}

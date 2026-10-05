@@ -68,8 +68,9 @@ var (
 	classLevels = []string{"Beginner", "Intermediate", "Advanced"}
 	payMethods  = []string{"CreditCard", "BankTransfer", "Cash", "PromptPay"}
 	// Pending is not revenue; the console totals only Paid. There are no
-	// refunds — fees are non-refundable — so there is no Refunded.
-	payStatus      = []string{"Paid", "Pending"}
+	// refunds — fees are non-refundable. Cancelled: a tournament fee still
+	// owed when its place was released at closing (0059).
+	payStatus      = []string{"Paid", "Pending", "Cancelled"}
 	creditTxTypes  = []string{"purchase", "consumption", "manual_adjustment"}
 	tournamentStat = []string{"Upcoming", "Ongoing", "Completed"}
 	// Public sign-ups arrive Pending; staff entry has always meant Approved.
