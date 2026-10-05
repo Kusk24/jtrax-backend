@@ -171,4 +171,3 @@ func SetPassword(d *sql.DB, userAccountID, next string) error {
 	}
 	return tx.Commit()
 }
-

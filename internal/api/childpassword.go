@@ -134,4 +134,3 @@ func handleChildLogin(d *sql.DB) http.HandlerFunc {
 		httpx.JSON(w, http.StatusOK, map[string]any{"login": login, "ownEmail": auth.LooksLikeEmail(login)})
 	}
 }
-
