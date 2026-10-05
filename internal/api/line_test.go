@@ -611,6 +611,41 @@ func TestLineNonTextMessagesAreVisibleInTheThread(t *testing.T) {
 	}
 }
 
+/* A sticker keeps which sticker it was, so the console can draw it. */
+func TestLineStickerKeepsItsIDs(t *testing.T) {
+	c, _ := newLineServer(t)
+	c.webhook(testChannelSecret, map[string]any{
+		"type":       "message",
+		"replyToken": "rt1",
+		"timestamp":  1755300000000,
+		"source":     map[string]any{"type": "user", "userId": testUserID},
+		"message": map[string]any{
+			"id": "s2", "type": "sticker",
+			"packageId": "446", "stickerId": "1988", "stickerResourceType": "ANIMATION",
+		},
+	})
+	c.webhook(testChannelSecret, map[string]any{
+		"type":       "message",
+		"replyToken": "rt2",
+		"timestamp":  1755300001000,
+		"source":     map[string]any{"type": "user", "userId": testUserID},
+		"message":    map[string]any{"id": "t2", "type": "text", "text": "hello"},
+	})
+
+	_, obj, _ := c.do("GET", "/api/v1/line/conversations/"+testUserID, nil)
+	messages, _ := obj["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(messages))
+	}
+	st, _ := messages[0].(map[string]any)["sticker"].(map[string]any)
+	if st["packageId"] != "446" || st["stickerId"] != "1988" || st["resourceType"] != "ANIMATION" {
+		t.Errorf("sticker = %v, want package 446, sticker 1988, ANIMATION", st)
+	}
+	if _, has := messages[1].(map[string]any)["sticker"]; has {
+		t.Error("a text message came back with a sticker")
+	}
+}
+
 func TestLineGroupEventsAreIgnored(t *testing.T) {
 	c, _ := newLineServer(t)
 	c.webhook(testChannelSecret, map[string]any{

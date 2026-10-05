@@ -113,16 +113,25 @@ type lineConversation struct {
 	PreviewFrom string `json:"previewFrom,omitempty"` // In | Out
 }
 
+// lineSticker is how LINE names a sticker: which package, which sticker in it,
+// and how it is drawn.
+type lineSticker struct {
+	PackageID    string `json:"packageId"`
+	StickerID    string `json:"stickerId"`
+	ResourceType string `json:"resourceType,omitempty"`
+}
+
 type lineMessageView struct {
-	ID        string `json:"id"`
-	Direction string `json:"direction"` // In | Out
-	Kind      string `json:"kind"`
-	Body      string `json:"body"`
-	SentAt    string `json:"sentAt"`
-	SentBy    string `json:"sentBy,omitempty"`  // staff display name
-	Channel   string `json:"channel,omitempty"` // reply | push
-	Delivery  string `json:"delivery"`          // Sent | Failed
-	Reason    string `json:"failureReason,omitempty"`
+	ID        string       `json:"id"`
+	Direction string       `json:"direction"` // In | Out
+	Kind      string       `json:"kind"`
+	Body      string       `json:"body"`
+	SentAt    string       `json:"sentAt"`
+	SentBy    string       `json:"sentBy,omitempty"`  // staff display name
+	Channel   string       `json:"channel,omitempty"` // reply | push
+	Delivery  string       `json:"delivery"`          // Sent | Failed
+	Reason    string       `json:"failureReason,omitempty"`
+	Sticker   *lineSticker `json:"sticker,omitempty"`
 }
 
 func listConversations(d *sql.DB) ([]lineConversation, error) {
@@ -162,7 +171,9 @@ func threadOf(d *sql.DB, userID string) ([]lineMessageView, error) {
 		SELECT m.line_message_id, m.direction, m.kind, m.body, m.sent_at,
 		       COALESCE((SELECT ua.display_name FROM user_account ua
 		                 WHERE ua.user_account_id = m.sent_by), ''),
-		       m.channel_used, m.delivery, m.failure_reason
+		       m.channel_used, m.delivery, m.failure_reason,
+		       COALESCE(m.sticker_package_id, ''), COALESCE(m.sticker_id, ''),
+		       COALESCE(m.sticker_resource_type, '')
 		FROM line_message m
 		WHERE m.line_user_id = ?
 		ORDER BY m.sent_at DESC, m.rowid DESC
@@ -174,9 +185,14 @@ func threadOf(d *sql.DB, userID string) ([]lineMessageView, error) {
 	out := []lineMessageView{}
 	for rows.Next() {
 		var m lineMessageView
+		var st lineSticker
 		if err := rows.Scan(&m.ID, &m.Direction, &m.Kind, &m.Body, &m.SentAt,
-			&m.SentBy, &m.Channel, &m.Delivery, &m.Reason); err != nil {
+			&m.SentBy, &m.Channel, &m.Delivery, &m.Reason,
+			&st.PackageID, &st.StickerID, &st.ResourceType); err != nil {
 			return nil, err
+		}
+		if st.StickerID != "" {
+			m.Sticker = &st
 		}
 		m.SentAt = sqliteISO(m.SentAt)
 		out = append(out, m)
@@ -302,9 +318,12 @@ func (l *lineDeps) applyEvent(ev line.Event, c lineSender) bool {
 		// not post it again or bump the unread count again.
 		res, err := l.db.Exec(`
 			INSERT OR IGNORE INTO line_message
-			  (line_message_id, line_user_id, direction, kind, body, provider_id, sent_at)
-			VALUES (?, ?, 'In', ?, ?, ?, ?)`,
-			newID("lmsg"), uid, lineKindOf(ev.Message.Type), ev.Message.Text, ev.Message.ID, at)
+			  (line_message_id, line_user_id, direction, kind, body, provider_id, sent_at,
+			   sticker_package_id, sticker_id, sticker_resource_type)
+			VALUES (?, ?, 'In', ?, ?, ?, ?, ?, ?, ?)`,
+			newID("lmsg"), uid, lineKindOf(ev.Message.Type), ev.Message.Text, ev.Message.ID, at,
+			nullIfEmpty(ev.Message.PackageID), nullIfEmpty(ev.Message.StickerID),
+			nullIfEmpty(ev.Message.StickerResourceType))
 		if err != nil {
 			log.Printf("line: record inbound from %s: %v", uid, err)
 			return false

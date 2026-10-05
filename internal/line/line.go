@@ -80,6 +80,11 @@ type Event struct {
 		ID   string `json:"id"`
 		Type string `json:"type"` // text | sticker | image | …
 		Text string `json:"text"`
+		// A sticker's identity. LINE has no API that returns the image a
+		// user sent, so these ids are all there is to draw it from.
+		PackageID           string `json:"packageId"`
+		StickerID           string `json:"stickerId"`
+		StickerResourceType string `json:"stickerResourceType"` // STATIC | ANIMATION | SOUND | MESSAGE | …
 	} `json:"message"`
 }
 
