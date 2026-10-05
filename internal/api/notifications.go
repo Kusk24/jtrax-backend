@@ -14,7 +14,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -336,35 +335,13 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			chosen[sid] = true
 		}
 
-		// Enrollments with credit expiring in the window, and the student behind
-		// them. Grouped so a student with several expiring lots is notified once,
-		// about the soonest of them.
-		rows, err := d.Query(
-			`SELECT e.student_id, COALESCE(s.name,''), MIN(date(ct.expiry_date))
-			   FROM credit_transaction ct
-			   JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
-			   JOIN student s ON s.student_id = e.student_id
-			  WHERE ct.expiry_date IS NOT NULL
-			    AND date(ct.expiry_date) >= ?
-			    AND date(ct.expiry_date) <= date(?, '+' || ? || ' days')
-			  GROUP BY e.student_id, s.name`, today(), today(), days)
+		// Grouped so a student with several expiring lots is notified once,
+		// about the soonest of them (creditreminders.go).
+		targets, err := expiringTargets(d, days)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not find expiring credits", err)
 			return
 		}
-		defer rows.Close()
-
-		type target struct{ studentID, studentName, expires string }
-		var targets []target
-		for rows.Next() {
-			var t target
-			if err := rows.Scan(&t.studentID, &t.studentName, &t.expires); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not read expiring credits", err)
-				return
-			}
-			targets = append(targets, t)
-		}
-		rows.Close()
 
 		if req.DryRun {
 			list := []map[string]any{}
@@ -403,20 +380,7 @@ func handleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			if len(recipients) == 0 {
 				continue
 			}
-			name := t.studentName
-			if name == "" {
-				name = "your child"
-			}
-			err := svc.Send(recipients, notify.Message{
-				Type:  notify.TypeCreditExpiry,
-				Title: notify.Text{EN: "Class credits expiring soon", TH: "เครดิตเรียนใกล้หมดอายุ"},
-				Body: notify.Text{
-					EN: name + "'s class credits expire within " + strconv.Itoa(days) + " days. Please top up to avoid a gap.",
-					TH: "เครดิตเรียนของ" + name + " จะหมดอายุภายใน " + strconv.Itoa(days) + " วัน กรุณาเติมเครดิตเพื่อไม่ให้ขาดช่วง",
-				},
-				Data:      map[string]any{"studentId": t.studentID, "days": days},
-				DedupeKey: "credit_expiry:" + t.studentID + ":" + today(),
-			})
+			err := svc.Send(recipients, expiryMessage(t, days, "credit_expiry:"+t.studentID+":"+today()))
 			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
 				return
@@ -458,58 +422,15 @@ func handleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			return
 		}
 
-		line := lowCreditLine(d)
-		rows, err := d.Query(`
-			SELECT e.student_id, COALESCE(s.name, ''),
-			       COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
-			                  WHERE ct.enrollment_id = e.enrollment_id), 0)
-			     + COALESCE((SELECT SUM(ct.amount) FROM credit_transaction ct
-			                  WHERE ct.enrollment_id IS NULL AND ct.student_id = e.student_id), 0)
-			  FROM student_enrollment e
-			  JOIN student s ON s.student_id = e.student_id
-			 WHERE e.status = 'Active'`)
+		targets, line, err := lowCreditTargets(d, "")
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
 			return
 		}
-		defer rows.Close()
-
-		type target struct {
-			studentID, studentName string
-			balance                float64
+		lowest := map[string]bool{}
+		for _, t := range targets {
+			lowest[t.studentID] = true
 		}
-		lowest := map[string]*target{}
-		var order []string
-		for rows.Next() {
-			var t target
-			if err := rows.Scan(&t.studentID, &t.studentName, &t.balance); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
-				return
-			}
-			if t.balance > line {
-				continue
-			}
-			if prev, seen := lowest[t.studentID]; seen {
-				if t.balance < prev.balance {
-					prev.balance = t.balance
-				}
-				continue
-			}
-			lowest[t.studentID] = &t
-			order = append(order, t.studentID)
-		}
-		rows.Close()
-		targets := make([]target, 0, len(order))
-		for _, sid := range order {
-			targets = append(targets, *lowest[sid])
-		}
-		// Lowest balance first: those are the families to call before a class.
-		sort.SliceStable(targets, func(i, j int) bool {
-			if targets[i].balance != targets[j].balance {
-				return targets[i].balance < targets[j].balance
-			}
-			return targets[i].studentName < targets[j].studentName
-		})
 
 		if req.DryRun {
 			list := []map[string]any{}
@@ -531,7 +452,7 @@ func handleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 		}
 		skipped := []string{}
 		for _, sid := range req.StudentIDs {
-			if lowest[sid] == nil {
+			if !lowest[sid] {
 				skipped = append(skipped, sid)
 			}
 		}
@@ -545,23 +466,8 @@ func handleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			if len(recipients) == 0 {
 				continue
 			}
-			name := t.studentName
-			if name == "" {
-				name = "your child"
-			}
-			err := svc.Send(recipients, notify.Message{
-				Type:  notify.TypeLowCredit,
-				Title: notify.Text{EN: "Low credit balance", TH: "เครดิตเหลือน้อย"},
-				Body: notify.Text{
-					EN: name + " has " + fmtCreditsShort(t.balance) + " credits remaining. " +
-						"Please top up to continue their classes without interruption.",
-					TH: name + " เหลือเครดิต " + fmtCreditsShort(t.balance) + " เครดิต " +
-						"กรุณาเติมเครดิตเพื่อให้เรียนต่อได้ไม่ขาดช่วง",
-				},
-				Data: map[string]any{"studentId": t.studentID},
-				// Pressing Send twice in a day reaches a family once.
-				DedupeKey: "low_credit:" + t.studentID + ":" + today(),
-			})
+			// Pressing Send twice in a day reaches a family once.
+			err := svc.Send(recipients, lowCreditMessage(t, "low_credit:"+t.studentID+":"+today()))
 			if err != nil {
 				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
 				return
@@ -609,6 +515,8 @@ func attendanceHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[strin
 
 		if rowStr(row, "check_out_time") != "" {
 			sendCheckoutNotifications(d, svc, recipients, attID, studentID, name)
+			// The class is paid for now; if it left them low, say so (once).
+			remindIfLowCredit(d, svc, studentID)
 			return
 		}
 		if rowStr(row, "check_in_time") != "" {

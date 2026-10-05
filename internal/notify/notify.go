@@ -89,6 +89,10 @@ type Message struct {
 	// EmailIntro replaces Body in the email when Details already say the
 	// rest — so a receipt's figures are not written out twice.
 	EmailIntro Text
+	// InAppOnly keeps the message to the bell in the portal: no email, no
+	// push, whatever the person's channel settings — the academy's rule for
+	// credit reminders.
+	InAppOnly bool
 }
 
 // Detail is one row of an email's details table, in both languages.
@@ -187,6 +191,9 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		}
 
 		for _, ch := range Channels {
+			if msg.InAppOnly && ch != ChannelInApp {
+				continue
+			}
 			deliveryID := newID("ndl")
 			status := "pending"
 			switch {
