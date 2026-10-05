@@ -144,3 +144,31 @@ func ChangePassword(d *sql.DB, userAccountID, current, next, keepToken string) e
 	}
 	return tx.Commit()
 }
+
+// SetPassword gives an account a new password without its current one — a
+// parent resetting their own child's (see the API's child password). Any
+// open reset link is spent and every session is ended, so the child signs in
+// again with the new password everywhere.
+func SetPassword(d *sql.DB, userAccountID, next string) error {
+	newHash, err := HashPassword(next)
+	if err != nil {
+		return err
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`UPDATE user_account SET password_hash = ? WHERE user_account_id = ?`, newHash, userAccountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE password_reset SET used_at = ? WHERE user_account_id = ? AND used_at IS NULL`, now, userAccountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ?`, userAccountID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
