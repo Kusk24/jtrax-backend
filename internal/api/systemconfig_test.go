@@ -39,3 +39,20 @@ func TestAParentCannotChangeTheConfiguration(t *testing.T) {
 		t.Fatalf("a parent rewrote the academy's rules: want 403, got %d", status)
 	}
 }
+
+// The milestone counts hours (0064), carried over from the old classes key.
+func TestTheCertificateMilestoneIsInHours(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("sandy01234@gmail.com")
+	_, _, list := c.do("GET", "/api/v1/system-configuration", nil)
+	for _, row := range list {
+		if row["config_key"] == "certificate_hours" {
+			if row["config_value"] != "50" {
+				t.Fatalf("certificate_hours: want \"50\", got %v", row["config_value"])
+			}
+			return
+		}
+	}
+	t.Fatalf("certificate_hours is not set: %v", list)
+}
+
