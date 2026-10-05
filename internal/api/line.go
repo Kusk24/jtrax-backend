@@ -578,6 +578,17 @@ func handleLineEvents(l *lineDeps) http.HandlerFunc {
 		ch := l.hub.subscribe(lineInboxKey)
 		defer l.hub.unsubscribe(lineInboxKey, ch)
 
+		// Send the current list at once. Until something is written the
+		// headers are not sent either, so the console saw no stream for a whole
+		// heartbeat on every open and called it disconnected. It also puts right
+		// anything that arrived while a client was reconnecting.
+		if list, err := listConversations(l.db); err == nil {
+			if payload, err := json.Marshal(map[string]any{"conversations": list, "changed": ""}); err == nil {
+				fmt.Fprintf(w, "event: inbox\ndata: %s\n\n", payload)
+			}
+		}
+		flusher.Flush()
+
 		ticker := time.NewTicker(heartbeat)
 		defer ticker.Stop()
 		for {
