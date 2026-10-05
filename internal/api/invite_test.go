@@ -76,7 +76,7 @@ func TestAStudentWithAnEmailGetsAStudentPasswordLink(t *testing.T) {
 	if to != "mint.student@example.com" {
 		t.Fatalf("sent to %q", to)
 	}
-	if !strings.Contains(body, "your JTrax student account") || strings.Contains(body, "parent account") {
+	if !strings.Contains(body, "Your JTrax student account has been created") || strings.Contains(body, "parent account") {
 		t.Fatalf("the student's email should be worded for a student:\n%s", body)
 	}
 	anon := &client{t: t, srv: srv}

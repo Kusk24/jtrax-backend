@@ -44,7 +44,7 @@ func TestAChildsResetLinkGoesToTheirParent(t *testing.T) {
 	if to != "sandy01234@gmail.com" {
 		t.Fatalf("the child's link went to %q, want their mother", to)
 	}
-	for _, want := range []string{"Hello Sandy Jones", "Mini asked to reset", "Mini's login ID: stu_mini_kid", "/reset-password?token="} {
+	for _, want := range []string{"Dear Sandy Jones", "reset the password for Mini's JTrax student account", "Mini's login username: stu_mini_kid", "/reset-password?token="} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the email does not say %q:\n%s", want, body)
 		}

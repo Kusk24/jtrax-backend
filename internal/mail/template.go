@@ -34,18 +34,30 @@ type Email struct {
 	Paragraphs []string
 	Details    []Detail
 	Button     *Button
+	// After is text under the button. A line starting "- " is a bullet;
+	// consecutive bullets make one list.
+	After []string
 	// Note is small print under the button: expiry, "if this wasn't you".
 	Note string
+	// Signoff closes the letter, one line each: "Best regards,", the school,
+	// the portal it is from.
+	Signoff []string
 }
 
 const (
 	school = "JCA Chess School"
-	blue   = "#2E5CB8"
-	navy   = "#1E3A70"
-	ink    = "#1B2433"
-	muted  = "#64708C"
-	line   = "#E3E8F2"
-	page   = "#F3F6FB"
+	system = "JTrax — Chess School Management System"
+	// The school's contact details, in every email's footer.
+	contactPhone = "02-853-9836 / 099-0156-156"
+	contactEmail = "jcachess@gmail.com"
+	contactLINE  = "lin.ee/7fhq3N1"
+	automated    = "This is an automated email from JCA Chess School. Please do not reply directly to this message."
+	blue         = "#2E5CB8"
+	navy         = "#1E3A70"
+	ink          = "#1B2433"
+	muted        = "#64708C"
+	line         = "#E3E8F2"
+	page         = "#F3F6FB"
 )
 
 // Text is the plain-text copy.
@@ -66,10 +78,28 @@ func (e Email) Text() string {
 	if e.Button != nil {
 		b.WriteString(e.Button.Label + ":\n" + e.Button.URL + "\n\n")
 	}
+	for i, p := range e.After {
+		item, bullet := strings.CutPrefix(p, "- ")
+		nextBullet := i+1 < len(e.After) && strings.HasPrefix(e.After[i+1], "- ")
+		switch {
+		case bullet && nextBullet:
+			b.WriteString("• " + item + "\n")
+		case bullet:
+			b.WriteString("• " + item + "\n\n")
+		case nextBullet:
+			b.WriteString(p + "\n")
+		default:
+			b.WriteString(p + "\n\n")
+		}
+	}
 	if e.Note != "" {
 		b.WriteString(e.Note + "\n\n")
 	}
-	b.WriteString(school + "\n")
+	if len(e.Signoff) > 0 {
+		b.WriteString("\n" + strings.Join(e.Signoff, "\n") + "\n\n")
+	}
+	b.WriteString("—\n" + school + "\n" + system + "\n" +
+		contactPhone + " · " + contactEmail + " · LINE " + contactLINE + "\n\n" + automated + "\n")
 	return b.String()
 }
 
@@ -107,8 +137,41 @@ func (e Email) HTML() string {
 				`<p style="margin:0 0 14px;font-size:12.5px;color:%s">If the button doesn't work, copy this link into your browser:<br><a href="%s" style="color:%s;word-break:break-all">%s</a></p>`,
 			blue, esc(e.Button.URL), esc(e.Button.Label), muted, esc(e.Button.URL), blue, esc(e.Button.URL))
 	}
+	inList := false
+	for _, p := range e.After {
+		if item, ok := strings.CutPrefix(p, "- "); ok {
+			if !inList {
+				fmt.Fprintf(&body, `<ul style="margin:0 0 14px;padding-left:20px;font-size:14.5px;line-height:1.55;color:%s">`, ink)
+				inList = true
+			}
+			fmt.Fprintf(&body, `<li style="margin:0 0 4px">%s</li>`, esc(item))
+			continue
+		}
+		if inList {
+			body.WriteString(`</ul>`)
+			inList = false
+		}
+		fmt.Fprintf(&body, `<p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:%s">%s</p>`, ink, esc(p))
+	}
+	if inList {
+		body.WriteString(`</ul>`)
+	}
 	if e.Note != "" {
-		fmt.Fprintf(&body, `<p style="margin:0;font-size:13px;line-height:1.5;color:%s">%s</p>`, muted, esc(e.Note))
+		fmt.Fprintf(&body, `<p style="margin:0 0 14px;font-size:13px;line-height:1.5;color:%s">%s</p>`, muted, esc(e.Note))
+	}
+	if len(e.Signoff) > 0 {
+		fmt.Fprintf(&body, `<p style="margin:18px 0 0;font-size:15px;line-height:1.55;color:%s">`, ink)
+		for i, l := range e.Signoff {
+			if i > 0 {
+				body.WriteString("<br>")
+			}
+			if i == 1 {
+				fmt.Fprintf(&body, `<strong>%s</strong>`, esc(l))
+			} else {
+				body.WriteString(esc(l))
+			}
+		}
+		body.WriteString(`</p>`)
 	}
 
 	return fmt.Sprintf(`<!doctype html>
@@ -122,11 +185,12 @@ func (e Email) HTML() string {
 <h1 style="margin:0 0 18px;font-size:21px;line-height:1.3;color:%[3]s">%[1]s</h1>
 %[6]s
 </td></tr>
-<tr><td style="padding:16px 4px 0;font-size:12px;line-height:1.5;color:%[7]s">This is an automatic email from %[4]s. Please don't reply to it — contact the office instead.</td></tr>
+<tr><td style="padding:16px 4px 0;font-size:12px;line-height:1.6;color:%[7]s"><strong style="color:%[3]s">%[4]s</strong><br>%[8]s<br>%[9]s<br><br>%[10]s</td></tr>
 </table>
 </td></tr>
 </table>
-</body></html>`, esc(e.Heading), page, navy, school, line, body.String(), muted)
+</body></html>`, esc(e.Heading), page, navy, school, line, body.String(), muted,
+		esc(system), esc(contactPhone+" · "+contactEmail+" · LINE "+contactLINE), esc(automated))
 }
 
 // RichSender sends an email in both forms. The SMTP sender is one; a test's
