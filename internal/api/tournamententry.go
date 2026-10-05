@@ -282,8 +282,9 @@ func entryClosed(q interface {
 }
 
 // duplicateEntryMessage names the two ways a tournament entry can repeat one
-// already there (migration 0014's partial unique indexes): the same child, or
-// the same contact email. Anything else is not a duplicate it knows.
+// already there: the same JCA student (0014), or the same player by email,
+// name and date of birth (0070) — one email may enter several players.
+// Anything else is not a duplicate it knows.
 func duplicateEntryMessage(err error) string {
 	text := err.Error()
 	if !strings.Contains(text, "UNIQUE") {
@@ -292,8 +293,8 @@ func duplicateEntryMessage(err error) string {
 	switch {
 	case strings.Contains(text, "student_id"):
 		return "this child already has an entry in this tournament"
-	case strings.Contains(text, "contact_email"):
-		return "that email address is already used by another entry in this tournament"
+	case strings.Contains(text, "one_per_player"):
+		return "this player is already entered in this tournament"
 	}
 	return ""
 }

@@ -25,8 +25,12 @@ func TestADuplicateEntryIsNamed(t *testing.T) {
 	if status, obj := entry(map[string]any{"participant_name": "Ann", "contact_email": "ann@x.th"}); status != 201 {
 		t.Fatalf("walk-in entry: %d %v", status, obj)
 	}
-	status, obj = entry(map[string]any{"participant_name": "Bea", "contact_email": "ann@x.th"})
-	if status != 409 || obj["error"] != "that email address is already used by another entry in this tournament" {
-		t.Errorf("same email again: %d %v", status, obj)
+	/* Another child on the same email is a second entry; the same player is not. */
+	if status, obj := entry(map[string]any{"participant_name": "Bea", "contact_email": "ann@x.th"}); status != 201 {
+		t.Errorf("a second player on the same email: %d %v", status, obj)
+	}
+	status, obj = entry(map[string]any{"participant_name": "ANN ", "contact_email": "Ann@x.th"})
+	if status != 409 || obj["error"] != "this player is already entered in this tournament" {
+		t.Errorf("same player again: %d %v", status, obj)
 	}
 }

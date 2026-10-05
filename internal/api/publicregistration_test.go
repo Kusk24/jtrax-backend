@@ -181,15 +181,20 @@ func TestPublicRegistrationRevealsNothingAboutWhoIsAStudent(t *testing.T) {
 	}
 }
 
-func TestPublicRegistrationRefusesTheSameEmailTwice(t *testing.T) {
+// One email may enter several players — a parent with two children — but the
+// same player twice (same email, name and date of birth) is refused.
+func TestPublicRegistrationTakesTwoChildrenOnOneEmailButNotTheSameOneTwice(t *testing.T) {
 	pub, id := openEvent(t, nil)
 
 	if status, out := register(t, pub, id, entry(nil), true); status != 201 {
 		t.Fatalf("first: %d (%v)", status, out)
 	}
-	status, _ := register(t, pub, id, entry(map[string]any{"name": "Somebody Else"}), true)
-	if status != 409 {
-		t.Fatalf("duplicate email: want 409, got %d", status)
+	if status, out := register(t, pub, id, entry(map[string]any{"name": "Somebody Else"}), true); status != 201 {
+		t.Fatalf("a second child on the same email: %d (%v)", status, out)
+	}
+	status, out := register(t, pub, id, entry(map[string]any{"name": "  somchai NIRAN "}), true)
+	if status != 409 || out["error"] != "this player is already registered for this tournament" {
+		t.Fatalf("the same player again: %d (%v), want 409", status, out)
 	}
 }
 

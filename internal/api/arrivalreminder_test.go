@@ -161,3 +161,55 @@ func TestResendingTheArrivalReminder(t *testing.T) {
 		t.Fatalf("resend after an answer: want 409, got %d", status)
 	}
 }
+
+// A parent with two children in one tournament gets one email naming both,
+// whose one link answers for each child separately.
+func TestArrivalReminderAsksAFamilyOnce(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	_, trn, _ := admin.do("POST", "/api/v1/tournaments", map[string]any{
+		"name": "Wellington Rapid", "start_date": academyDay(10), "arrival_reminder_days": 5,
+	})
+	ids := map[string]string{}
+	for _, kid := range []struct{ id, name string }{{"stu_penny", "Penny"}, {"stu_uri", "Uri"}} {
+		status, reg, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+			"tournament_id": trn["tournament_id"], "student_id": kid.id, "participant_name": kid.name, "status": "Approved",
+		})
+		if status != 201 {
+			t.Fatalf("register %s: %d %v", kid.name, status, reg)
+		}
+		ids[kid.name] = reg["tournament_registration_id"].(string)
+	}
+
+	cap := &captureSender{}
+	if n, err := api.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 2 {
+		t.Fatalf("asked %d entries, %v; want 2", n, err)
+	}
+	if len(cap.sent) != 1 || cap.sent[0].To != "sandy01234@gmail.com" {
+		t.Fatalf("want one email to Sandy, got %d: %+v", len(cap.sent), cap.sent)
+	}
+	body := cap.sent[0].Body
+	if !strings.Contains(body, "Penny and Uri") {
+		t.Errorf("the email should name both children: %q", body)
+	}
+
+	/* The link: the first child's code, then each other child's after &also=. */
+	m := regexp.MustCompile(`/arrival/([^#\s]+)#code=([0-9a-f]{64})&also=([^.\s]+)\.([0-9a-f]{64})`).FindStringSubmatch(body)
+	if m == nil || m[1] != ids["Penny"] || m[3] != ids["Uri"] {
+		t.Fatalf("no family link in %q", body)
+	}
+	public := &client{t: t, srv: srv}
+	for _, a := range []struct{ id, code, answer string }{{m[1], m[2], "Confirmed"}, {m[3], m[4], "NotAttending"}} {
+		if status, out, _ := public.do("POST", "/api/v1/public/arrival/"+a.id+"/answer",
+			map[string]any{"code": a.code, "answer": a.answer}); status != 200 || out["status"] != a.answer {
+			t.Fatalf("answer for %s: %d %v", a.id, status, out)
+		}
+	}
+	_, penny, _ := admin.do("GET", "/api/v1/tournament-registrations/"+ids["Penny"], nil)
+	_, uri, _ := admin.do("GET", "/api/v1/tournament-registrations/"+ids["Uri"], nil)
+	if penny["arrival_status"] != "Confirmed" || uri["arrival_status"] != "NotAttending" {
+		t.Errorf("each child keeps their own answer: Penny %v, Uri %v", penny["arrival_status"], uri["arrival_status"])
+	}
+}
