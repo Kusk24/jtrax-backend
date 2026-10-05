@@ -527,6 +527,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",
+			Duplicate: duplicateEntryMessage,
 			Cols: []Col{
 				{Name: "tournament_id", Kind: "text", Required: true},
 				// No longer required: a member of the public registering for an
