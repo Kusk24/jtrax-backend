@@ -111,26 +111,48 @@ type lineConversation struct {
 	Preview     string `json:"preview"`
 	PreviewKind string `json:"previewKind,omitempty"`
 	PreviewFrom string `json:"previewFrom,omitempty"` // In | Out
+	// The JTrax record the office linked this chat to (0069): a parent or a
+	// student, never both, and its name to show.
+	ParentID   string `json:"parentId,omitempty"`
+	StudentID  string `json:"studentId,omitempty"`
+	LinkedName string `json:"linkedName,omitempty"`
+}
+
+// lineLinkCols reads a contact's link, from line_contact c joined as below.
+const lineLinkCols = `COALESCE(c.parent_id, ''), COALESCE(c.student_id, ''), COALESCE(lp.name, ls.name, '')`
+
+const lineLinkJoins = `
+		LEFT JOIN parent lp ON lp.parent_id = c.parent_id
+		LEFT JOIN student ls ON ls.student_id = c.student_id`
+
+// lineSticker is how LINE names a sticker: which package, which sticker in it,
+// and how it is drawn.
+type lineSticker struct {
+	PackageID    string `json:"packageId"`
+	StickerID    string `json:"stickerId"`
+	ResourceType string `json:"resourceType,omitempty"`
 }
 
 type lineMessageView struct {
-	ID        string `json:"id"`
-	Direction string `json:"direction"` // In | Out
-	Kind      string `json:"kind"`
-	Body      string `json:"body"`
-	SentAt    string `json:"sentAt"`
-	SentBy    string `json:"sentBy,omitempty"`  // staff display name
-	Channel   string `json:"channel,omitempty"` // reply | push
-	Delivery  string `json:"delivery"`          // Sent | Failed
-	Reason    string `json:"failureReason,omitempty"`
+	ID        string       `json:"id"`
+	Direction string       `json:"direction"` // In | Out
+	Kind      string       `json:"kind"`
+	Body      string       `json:"body"`
+	SentAt    string       `json:"sentAt"`
+	SentBy    string       `json:"sentBy,omitempty"`  // staff display name
+	Channel   string       `json:"channel,omitempty"` // reply | push
+	Delivery  string       `json:"delivery"`          // Sent | Failed
+	Reason    string       `json:"failureReason,omitempty"`
+	Sticker   *lineSticker `json:"sticker,omitempty"`
 }
 
 func listConversations(d *sql.DB) ([]lineConversation, error) {
 	rows, err := d.Query(`
 		SELECT c.line_user_id, c.display_name, c.picture_url, c.followed,
 		       c.last_message_at, c.unread_count,
-		       COALESCE(m.body, ''), COALESCE(m.kind, ''), COALESCE(m.direction, '')
-		FROM line_contact c
+		       COALESCE(m.body, ''), COALESCE(m.kind, ''), COALESCE(m.direction, ''),
+		       ` + lineLinkCols + `
+		FROM line_contact c` + lineLinkJoins + `
 		LEFT JOIN line_message m ON m.line_message_id = (
 		    SELECT m2.line_message_id FROM line_message m2
 		    WHERE m2.line_user_id = c.line_user_id
@@ -145,7 +167,8 @@ func listConversations(d *sql.DB) ([]lineConversation, error) {
 		var c lineConversation
 		var followed int
 		if err := rows.Scan(&c.UserID, &c.DisplayName, &c.PictureURL, &followed,
-			&c.LastAt, &c.Unread, &c.Preview, &c.PreviewKind, &c.PreviewFrom); err != nil {
+			&c.LastAt, &c.Unread, &c.Preview, &c.PreviewKind, &c.PreviewFrom,
+			&c.ParentID, &c.StudentID, &c.LinkedName); err != nil {
 			return nil, err
 		}
 		c.Followed = followed == 1
@@ -162,7 +185,9 @@ func threadOf(d *sql.DB, userID string) ([]lineMessageView, error) {
 		SELECT m.line_message_id, m.direction, m.kind, m.body, m.sent_at,
 		       COALESCE((SELECT ua.display_name FROM user_account ua
 		                 WHERE ua.user_account_id = m.sent_by), ''),
-		       m.channel_used, m.delivery, m.failure_reason
+		       m.channel_used, m.delivery, m.failure_reason,
+		       COALESCE(m.sticker_package_id, ''), COALESCE(m.sticker_id, ''),
+		       COALESCE(m.sticker_resource_type, '')
 		FROM line_message m
 		WHERE m.line_user_id = ?
 		ORDER BY m.sent_at DESC, m.rowid DESC
@@ -174,9 +199,14 @@ func threadOf(d *sql.DB, userID string) ([]lineMessageView, error) {
 	out := []lineMessageView{}
 	for rows.Next() {
 		var m lineMessageView
+		var st lineSticker
 		if err := rows.Scan(&m.ID, &m.Direction, &m.Kind, &m.Body, &m.SentAt,
-			&m.SentBy, &m.Channel, &m.Delivery, &m.Reason); err != nil {
+			&m.SentBy, &m.Channel, &m.Delivery, &m.Reason,
+			&st.PackageID, &st.StickerID, &st.ResourceType); err != nil {
 			return nil, err
+		}
+		if st.StickerID != "" {
+			m.Sticker = &st
 		}
 		m.SentAt = sqliteISO(m.SentAt)
 		out = append(out, m)
@@ -302,9 +332,12 @@ func (l *lineDeps) applyEvent(ev line.Event, c lineSender) bool {
 		// not post it again or bump the unread count again.
 		res, err := l.db.Exec(`
 			INSERT OR IGNORE INTO line_message
-			  (line_message_id, line_user_id, direction, kind, body, provider_id, sent_at)
-			VALUES (?, ?, 'In', ?, ?, ?, ?)`,
-			newID("lmsg"), uid, lineKindOf(ev.Message.Type), ev.Message.Text, ev.Message.ID, at)
+			  (line_message_id, line_user_id, direction, kind, body, provider_id, sent_at,
+			   sticker_package_id, sticker_id, sticker_resource_type)
+			VALUES (?, ?, 'In', ?, ?, ?, ?, ?, ?, ?)`,
+			newID("lmsg"), uid, lineKindOf(ev.Message.Type), ev.Message.Text, ev.Message.ID, at,
+			nullIfEmpty(ev.Message.PackageID), nullIfEmpty(ev.Message.StickerID),
+			nullIfEmpty(ev.Message.StickerResourceType))
 		if err != nil {
 			log.Printf("line: record inbound from %s: %v", uid, err)
 			return false
@@ -380,12 +413,7 @@ func handleLineThread(l *lineDeps) http.HandlerFunc {
 			return
 		}
 		uid := r.PathValue("id")
-		var c lineConversation
-		var followed int
-		err := l.db.QueryRow(`SELECT line_user_id, display_name, picture_url, followed,
-		                             last_message_at, unread_count
-		                      FROM line_contact WHERE line_user_id = ?`, uid).
-			Scan(&c.UserID, &c.DisplayName, &c.PictureURL, &followed, &c.LastAt, &c.Unread)
+		c, err := conversationOf(l.db, uid)
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.Error(w, http.StatusNotFound, "not found", nil)
 			return
@@ -394,14 +422,93 @@ func handleLineThread(l *lineDeps) http.HandlerFunc {
 			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
 			return
 		}
-		c.Followed = followed == 1
-		c.LastAt = sqliteISO(c.LastAt)
 		messages, err := threadOf(l.db, uid)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not load messages", err)
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{"conversation": c, "messages": messages})
+	}
+}
+
+// conversationOf is one contact's header: who, whether they follow, and the
+// record they are linked to. Its preview fields are left empty.
+func conversationOf(d *sql.DB, uid string) (lineConversation, error) {
+	var c lineConversation
+	var followed int
+	err := d.QueryRow(`SELECT c.line_user_id, c.display_name, c.picture_url, c.followed,
+	                          c.last_message_at, c.unread_count, `+lineLinkCols+`
+	                   FROM line_contact c`+lineLinkJoins+`
+	                   WHERE c.line_user_id = ?`, uid).
+		Scan(&c.UserID, &c.DisplayName, &c.PictureURL, &followed, &c.LastAt, &c.Unread,
+			&c.ParentID, &c.StudentID, &c.LinkedName)
+	c.Followed = followed == 1
+	c.LastAt = sqliteISO(c.LastAt)
+	return c, err
+}
+
+// handleLineLink links a chat to a parent or a student, or — with neither —
+// unlinks it. A record already linked to another chat is refused rather than
+// moved, so one click cannot quietly take a family's chat from them.
+func handleLineLink(l *lineDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(l.db, w, r) == nil {
+			return
+		}
+		uid := r.PathValue("id")
+		var in struct {
+			ParentID  string `json:"parentId"`
+			StudentID string `json:"studentId"`
+		}
+		if err := httpx.Decode(r, &in); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "malformed request", err)
+			return
+		}
+		in.ParentID, in.StudentID = strings.TrimSpace(in.ParentID), strings.TrimSpace(in.StudentID)
+		if in.ParentID != "" && in.StudentID != "" {
+			httpx.Error(w, http.StatusBadRequest, "link a parent or a student, not both", nil)
+			return
+		}
+		if _, err := conversationOf(l.db, uid); errors.Is(err, sql.ErrNoRows) {
+			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			return
+		} else if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			return
+		}
+		for _, target := range []struct{ id, table, col, missing string }{
+			{in.ParentID, "parent", "parent_id", "no such parent"},
+			{in.StudentID, "student", "student_id", "no such student"},
+		} {
+			if target.id == "" {
+				continue
+			}
+			var n int
+			l.db.QueryRow(`SELECT COUNT(*) FROM `+target.table+` WHERE `+target.col+` = ?`, target.id).Scan(&n)
+			if n == 0 {
+				httpx.Error(w, http.StatusNotFound, target.missing, nil)
+				return
+			}
+			var other string
+			err := l.db.QueryRow(`SELECT display_name FROM line_contact WHERE `+target.col+` = ? AND line_user_id <> ?`,
+				target.id, uid).Scan(&other)
+			if err == nil {
+				httpx.Error(w, http.StatusConflict, "already linked to another LINE chat ("+other+") — unlink that one first", nil)
+				return
+			}
+		}
+		if _, err := l.db.Exec(`UPDATE line_contact SET parent_id = ?, student_id = ? WHERE line_user_id = ?`,
+			nullIfEmpty(in.ParentID), nullIfEmpty(in.StudentID), uid); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not link the chat", err)
+			return
+		}
+		c, err := conversationOf(l.db, uid)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			return
+		}
+		l.publishInbox(uid)
+		httpx.JSON(w, http.StatusOK, c)
 	}
 }
 
@@ -810,6 +917,7 @@ func mountLine(mux *http.ServeMux, d *sql.DB) {
 	mux.HandleFunc("GET "+p+"/conversations/{id}", handleLineThread(deps))
 	mux.HandleFunc("POST "+p+"/conversations/{id}/messages", handleLineSend(deps))
 	mux.HandleFunc("POST "+p+"/conversations/{id}/read", handleLineMarkRead(deps))
+	mux.HandleFunc("PUT "+p+"/conversations/{id}/link", handleLineLink(deps))
 	mux.HandleFunc("GET "+p+"/events", handleLineEvents(deps))
 
 	mux.HandleFunc("GET "+p+"/channel", handleLineChannelGet(deps))
