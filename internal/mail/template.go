@@ -45,19 +45,15 @@ type Email struct {
 }
 
 const (
-	school = "JCA Chess School"
-	system = "JTrax — Chess School Management System"
-	// The school's contact details, in every email's footer.
-	contactPhone = "02-853-9836 / 099-0156-156"
-	contactEmail = "jcachess@gmail.com"
-	contactLINE  = "lin.ee/7fhq3N1"
-	automated    = "This is an automated email from JCA Chess School. Please do not reply directly to this message."
-	blue         = "#2E5CB8"
-	navy         = "#1E3A70"
-	ink          = "#1B2433"
-	muted        = "#64708C"
-	line         = "#E3E8F2"
-	page         = "#F3F6FB"
+	school    = "JCA Chess School"
+	system    = "JTrax — Chess School Management System"
+	automated = "This is an automated email from JCA Chess School. Please do not reply directly to this message."
+	blue      = "#2E5CB8"
+	navy      = "#1E3A70"
+	ink       = "#1B2433"
+	muted     = "#64708C"
+	line      = "#E3E8F2"
+	page      = "#F3F6FB"
 )
 
 // Text is the plain-text copy.
@@ -98,8 +94,12 @@ func (e Email) Text() string {
 	if len(e.Signoff) > 0 {
 		b.WriteString("\n" + strings.Join(e.Signoff, "\n") + "\n\n")
 	}
-	b.WriteString("—\n" + school + "\n" + system + "\n" +
-		contactPhone + " · " + contactEmail + " · LINE " + contactLINE + "\n\n" + automated + "\n")
+	c := CurrentContact()
+	b.WriteString("—\n" + school + "\n" + system + "\n" + footerContact(c) + "\n")
+	for _, a := range c.Addresses() {
+		b.WriteString(a + "\n")
+	}
+	b.WriteString("\n" + automated + "\n")
 	return b.String()
 }
 
@@ -174,6 +174,7 @@ func (e Email) HTML() string {
 		body.WriteString(`</p>`)
 	}
 
+	c := CurrentContact()
 	return fmt.Sprintf(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%[1]s</title></head>
 <body style="margin:0;padding:0;background:%[2]s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
@@ -185,12 +186,12 @@ func (e Email) HTML() string {
 <h1 style="margin:0 0 18px;font-size:21px;line-height:1.3;color:%[3]s">%[1]s</h1>
 %[6]s
 </td></tr>
-<tr><td style="padding:16px 4px 0;font-size:12px;line-height:1.6;color:%[7]s"><strong style="color:%[3]s">%[4]s</strong><br>%[8]s<br>%[9]s<br><br>%[10]s</td></tr>
+<tr><td style="padding:16px 4px 0;font-size:12px;line-height:1.6;color:%[7]s"><strong style="color:%[3]s">%[4]s</strong><br>%[8]s<br>%[9]s%[11]s<br><br>%[10]s</td></tr>
 </table>
 </td></tr>
 </table>
 </body></html>`, esc(e.Heading), page, navy, school, line, body.String(), muted,
-		esc(system), esc(contactPhone+" · "+contactEmail+" · LINE "+contactLINE), esc(automated))
+		esc(system), esc(footerContact(c)), esc(automated), addressLines(c))
 }
 
 // RichSender sends an email in both forms. The SMTP sender is one; a test's
@@ -205,4 +206,19 @@ func Deliver(s Sender, to, subject string, e Email) error {
 		return r.SendRich(to, subject, e.Text(), e.HTML())
 	}
 	return s.Send(to, subject, e.Text())
+}
+
+// footerContact is the footer's one line: phone · email · LINE.
+func footerContact(c Contact) string {
+	line := strings.TrimPrefix(strings.TrimPrefix(c.LINE, "https://"), "http://")
+	return c.Phone + " · " + c.Email + " · LINE " + line
+}
+
+// addressLines are the footer's address lines, each on its own line.
+func addressLines(c Contact) string {
+	var b strings.Builder
+	for _, a := range c.Addresses() {
+		b.WriteString("<br>" + html.EscapeString(a))
+	}
+	return b.String()
 }

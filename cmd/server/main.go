@@ -57,6 +57,9 @@ func main() {
 	// (internal/api/entryrules.go); this applies them through the day.
 	api.StartEntrySweeper(context.Background(), d)
 	mailCfg := mail.FromEnv()
+	// Every email's footer gives the contact details the office saved in
+	// Settings → Academy Contact.
+	mail.SetContactSource(func() mail.Contact { return api.AcademyContact(d) })
 	api.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
 	// A class made for later checks its booked students in when it starts,
 	// and only then are their credits spent (internal/api/classstart.go).
