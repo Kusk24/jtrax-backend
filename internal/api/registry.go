@@ -203,6 +203,9 @@ func Registry() []*Resource {
 				// moves with the design. See 0022.
 				{Name: "icon", Kind: "text"},
 				{Name: "level", Kind: "text", Enum: classLevels},
+				// The usual price of one credit — what a new package or a custom
+				// credit sale starts from; never binding (0067).
+				{Name: "price_per_credit", Kind: "real"},
 				// Set when the academy stops running this class. The row stays
 				// so last term's attendance and receipts still name it; every
 				// picker leaves it out. See 0020.

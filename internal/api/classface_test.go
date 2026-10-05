@@ -104,8 +104,8 @@ func TestACourseHasALevelAndAPrivateOrGroupType(t *testing.T) {
 	if s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "class_type": "Master"}); s != 400 {
 		t.Fatalf("the Master type: want 400, got %d (%v)", s, out)
 	}
-	s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "level": "Advanced", "class_type": "Private"})
-	if s != 201 || out["level"] != "Advanced" || out["class_type"] != "Private" {
+	s, out, _ := c.do("POST", "/api/v1/classes", map[string]any{"name": "JCA NXT", "level": "Advanced", "class_type": "Private", "price_per_credit": 600})
+	if s != 201 || out["level"] != "Advanced" || out["class_type"] != "Private" || out["price_per_credit"] != float64(600) {
 		t.Fatalf("create: %d (%v)", s, out)
 	}
 	if _, has := out["badge"]; has {
