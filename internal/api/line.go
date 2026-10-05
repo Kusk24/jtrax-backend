@@ -643,10 +643,17 @@ func handleLineChannelGet(l *lineDeps) http.HandlerFunc {
 	}
 }
 
-// lineWebhookURL is the address an operator pastes into the LINE console. It is
-// derived from the request rather than configured, because it is by definition
-// the address this API was just reached on.
+// lineWebhookURL is the address an operator pastes into the LINE console.
+//
+// PUBLIC_API_URL first: the console does not call this API from the browser
+// but through its own server, on the internal address, so the request's host
+// is 127.0.0.1:8790 — an address LINE can never reach, shown to an operator
+// as the one to paste. Without it (development), the address this API was
+// just reached on.
 func lineWebhookURL(r *http.Request) string {
+	if base := strings.TrimSuffix(strings.TrimSpace(os.Getenv("PUBLIC_API_URL")), "/"); base != "" {
+		return base + "/api/v1/line/webhook"
+	}
 	scheme := "http"
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		scheme = proto

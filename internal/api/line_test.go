@@ -379,6 +379,22 @@ func TestLineChannelNeverReturnsTheAccessToken(t *testing.T) {
 	}
 }
 
+// The webhook address the console shows is the public one. The console reaches
+// this API through its own server, on the internal address, so an address
+// built from the request named 127.0.0.1 — one LINE can never call.
+func TestLineChannelShowsThePublicWebhookAddress(t *testing.T) {
+	t.Setenv("PUBLIC_API_URL", "https://api.example.test/")
+	c, _ := newLineServer(t)
+
+	status, obj, _ := c.do("GET", "/api/v1/line/channel", nil)
+	if status != 200 {
+		t.Fatalf("channel settings: status %d", status)
+	}
+	if got, want := obj["webhookUrl"], "https://api.example.test/api/v1/line/webhook"; got != want {
+		t.Errorf("webhookUrl = %v, want %v", got, want)
+	}
+}
+
 func TestLineStoredCredentialsAreEncryptedAtRest(t *testing.T) {
 	c, _ := newLineServer(t)
 	// Reach past the API to the row itself: the point of sealing is that a copy
