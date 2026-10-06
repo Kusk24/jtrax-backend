@@ -147,10 +147,9 @@ func sendArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, day st
 			continue
 		}
 		first := f.entries[0]
-		body := arrivalReminderBody(first.tournament, joinNames(names), fmtDay(first.start), first.venue,
-			arrivalFamilyLink(cfg.AppURL, codes))
+		email := arrivalEmail(cfg.AppURL, first.tournament, fmtDay(first.start), first.venue, codes)
 		for _, addr := range f.to {
-			if err := sender.Send(addr, "Are you coming? "+first.tournament+" / ยืนยันการเข้าร่วม", body); err != nil {
+			if err := mail.Deliver(sender, addr, "Are you coming? "+first.tournament+" / ยืนยันการเข้าร่วม", email); err != nil {
 				log.Printf("arrival reminders: %s to %s did not send: %v", codes[0].regID, addr, err)
 			}
 		}
@@ -181,10 +180,9 @@ func arrivalFamilyLink(appURL string, codes []arrivalCode) string {
 // many addresses it went to.
 func mailArrival(d *sql.DB, cfg mail.Config, sender mail.Sender, r dueReminder, code string) int {
 	to := arrivalRecipients(d, r)
-	link := arrivalLink(cfg.AppURL, r.regID, code)
-	body := arrivalReminderBody(r.tournament, r.participant, fmtDay(r.start), r.venue, link)
+	email := arrivalEmail(cfg.AppURL, r.tournament, fmtDay(r.start), r.venue, []arrivalCode{{r.regID, r.participant, code}})
 	for _, addr := range to {
-		if err := sender.Send(addr, "Are you coming? "+r.tournament+" / ยืนยันการเข้าร่วม", body); err != nil {
+		if err := mail.Deliver(sender, addr, "Are you coming? "+r.tournament+" / ยืนยันการเข้าร่วม", email); err != nil {
 			log.Printf("arrival reminders: %s to %s did not send: %v", r.regID, addr, err)
 		}
 	}
@@ -283,26 +281,47 @@ func arrivalLink(appURL, regID, code string) string {
 	return strings.TrimSuffix(appURL, "/") + "/arrival/" + url.PathEscape(regID) + "#code=" + code
 }
 
-func arrivalReminderBody(tournament, participant, start, venue, link string) string {
-	var b strings.Builder
-	contactEN, contactTH := contactLines()
-	where := ""
-	if venue != "" {
-		where = " at " + venue
+// arrivalEmail asks a family whether each of their children is coming: one
+// row per child with Attending and Not attending buttons. A button opens the
+// confirm page with that answer chosen; the page records it only when the
+// parent taps Confirm, so a mail scanner that opens every link cannot answer
+// for them — and, as Not attending can cost a child their place, must not.
+func arrivalEmail(appURL, tournament, start, venue string, codes []arrivalCode) mail.Email {
+	family := arrivalFamilyLink(appURL, codes)
+	names := make([]string, len(codes))
+	choices := make([]mail.Choice, len(codes))
+	for i, c := range codes {
+		names[i] = c.participant
+		pick := func(answer string) string {
+			return family + "&pick=" + url.QueryEscape(c.regID) + "." + answer
+		}
+		choices[i] = mail.Choice{
+			Label: c.participant,
+			Buttons: []mail.Button{
+				{Label: "✓ Attending", URL: pick("Confirmed")},
+				{Label: "✗ Not attending", URL: pick("NotAttending")},
+			},
+		}
 	}
-	b.WriteString("Hello,\n\n")
-	b.WriteString(tournament + " starts on " + start + where + ".\n")
-	b.WriteString("Please tell us whether " + participant + " will attend:\n" + link + "\n\n")
-	b.WriteString(contactEN + "\n\nJCA Chess Academy\n\n----------\n\n")
-	b.WriteString("สวัสดีค่ะ\n\n")
+	who := joinNames(names)
+	where, whereTH := "", ""
 	if venue != "" {
-		b.WriteString(tournament + " จะเริ่มวันที่ " + start + " ที่ " + venue + "\n")
-	} else {
-		b.WriteString(tournament + " จะเริ่มวันที่ " + start + "\n")
+		where, whereTH = " at "+venue, " ที่ "+venue
 	}
-	b.WriteString("กรุณายืนยันว่า " + participant + " จะเข้าร่วมหรือไม่:\n" + link + "\n\n")
-	b.WriteString(contactTH + "\n\nJCA Chess Academy\n")
-	return b.String()
+	return mail.Email{
+		Heading:  "Are you coming?",
+		Greeting: "Hello,",
+		Paragraphs: []string{
+			tournament + " starts on " + start + where + ".",
+			"Please tell us whether " + who + " will attend.",
+		},
+		Choices: choices,
+		After: []string{
+			"Tap an answer, then Confirm on the page that opens. You can change it until the tournament starts.",
+			tournament + " จะเริ่มวันที่ " + start + whereTH + " กรุณายืนยันว่า " + who + " จะเข้าร่วมหรือไม่ โดยกดปุ่มด้านบน แล้วกดยืนยันในหน้าที่เปิดขึ้น",
+		},
+		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Parent Portal"},
+	}
 }
 
 // arrivalEntry is what the confirm page shows.

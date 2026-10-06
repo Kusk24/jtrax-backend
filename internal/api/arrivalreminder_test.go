@@ -194,6 +194,16 @@ func TestArrivalReminderAsksAFamilyOnce(t *testing.T) {
 	if !strings.Contains(body, "Penny and Uri") {
 		t.Errorf("the email should name both children: %q", body)
 	}
+	/* Buttons per child, each opening the page with that answer chosen. */
+	for _, want := range []string{
+		"✓ Attending: ", "✗ Not attending: ",
+		"&pick=" + ids["Penny"] + ".Confirmed", "&pick=" + ids["Penny"] + ".NotAttending",
+		"&pick=" + ids["Uri"] + ".Confirmed", "&pick=" + ids["Uri"] + ".NotAttending",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the email has no %q:\n%s", want, body)
+		}
+	}
 
 	/* The link: the first child's code, then each other child's after &also=. */
 	m := regexp.MustCompile(`/arrival/([^#\s]+)#code=([0-9a-f]{64})&also=([^.\s]+)\.([0-9a-f]{64})`).FindStringSubmatch(body)

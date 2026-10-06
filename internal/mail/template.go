@@ -21,6 +21,12 @@ type Detail struct {
 	Value string
 }
 
+// Choice is one row of answer buttons under a label.
+type Choice struct {
+	Label   string
+	Buttons []Button
+}
+
 // Button is the one thing the email asks the reader to do.
 type Button struct {
 	Label string
@@ -37,6 +43,11 @@ type Email struct {
 	Button     *Button
 	// Second is a quieter, outlined button beside the first: "Open JTrax".
 	Second *Button
+	// Choices are a question per row — a child's name and the answers to
+	// pick from, each a button: "Penny · Attending · Not attending". Drawn
+	// after the details, before Button. The first answer is filled, the
+	// rest outlined.
+	Choices []Choice
 	// After is text under the button. A line starting "- " is a bullet;
 	// consecutive bullets make one list.
 	After []string
@@ -78,6 +89,13 @@ func (e Email) Text() string {
 				continue
 			}
 			b.WriteString(d.Label + ": " + d.Value + "\n")
+		}
+		b.WriteString("\n")
+	}
+	for _, c := range e.Choices {
+		b.WriteString(c.Label + "\n")
+		for _, btn := range c.Buttons {
+			b.WriteString("  " + btn.Label + ": " + btn.URL + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -147,6 +165,28 @@ func (e Email) HTML() string {
 				border, muted, esc(d.Label), border, ink, esc(d.Value))
 		}
 		body.WriteString(`</table>`)
+	}
+	for _, c := range e.Choices {
+		fmt.Fprintf(&body,
+			`<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="margin:0 0 12px;border:1px solid %s;border-radius:10px;border-collapse:separate"><tr><td style="padding:12px 16px">`+
+				`<p style="margin:0 0 10px;font-size:15px;font-weight:700;color:%s">%s</p>`+
+				`<table role="presentation" cellpadding="0" cellspacing="0"><tr>`,
+			line, ink, esc(c.Label))
+		for i, btn := range c.Buttons {
+			if i > 0 {
+				body.WriteString(`<td style="width:8px"></td>`)
+			}
+			if i == 0 {
+				fmt.Fprintf(&body,
+					`<td style="border-radius:9px;background:%s"><a href="%s" style="display:inline-block;padding:10px 18px;font-size:14.5px;font-weight:600;color:#ffffff;text-decoration:none">%s</a></td>`,
+					blue, esc(btn.URL), esc(btn.Label))
+			} else {
+				fmt.Fprintf(&body,
+					`<td style="border-radius:9px;border:1.5px solid %s"><a href="%s" style="display:inline-block;padding:8.5px 16px;font-size:14.5px;font-weight:600;color:%s;text-decoration:none">%s</a></td>`,
+					muted, esc(btn.URL), ink, esc(btn.Label))
+			}
+		}
+		body.WriteString(`</tr></table></td></tr></table>`)
 	}
 	if e.Button != nil {
 		fmt.Fprintf(&body,
