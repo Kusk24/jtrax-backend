@@ -71,3 +71,29 @@ func TestACancelledFeeReleasesThePlace(t *testing.T) {
 		t.Errorf("a parent releasing a place: %d, want 403", status)
 	}
 }
+
+/* Not coming takes the place too — paid or not; a paid fee stays paid. */
+func TestNotAttendingReleasesThePlace(t *testing.T) {
+	admin := &client{t: t, srv: newServer(t)}
+	admin.login("admin@jca.ac.th")
+	_, trn, _ := admin.do("POST", "/api/v1/tournaments", map[string]any{"name": "Rapid"})
+	_, reg, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": trn["tournament_id"], "participant_name": "Dan", "status": "Approved", "fee_charged": 300,
+	})
+	id := reg["tournament_registration_id"].(string)
+	admin.do("POST", "/api/v1/tournament-registrations/"+id+"/desk-payment", map[string]any{"payment_method": "Cash"})
+
+	if status, obj, _ := admin.do("POST", "/api/v1/tournament-registrations/"+id+"/release", map[string]any{"reason": "notAttending"}); status != 200 {
+		t.Fatalf("release not attending: %d %v", status, obj)
+	}
+	_, row, _ := admin.do("GET", "/api/v1/tournament-registrations/"+id, nil)
+	if row["status"] != "Withdrawn" || row["released_at"] == nil || row["arrival_status"] != "NotAttending" {
+		t.Errorf("after not attending: %v", row)
+	}
+	_, _, pays := admin.do("GET", "/api/v1/payments", nil)
+	for _, p := range pays {
+		if p["tournament_registration_id"] == id && p["status"] != "Paid" {
+			t.Errorf("a paid fee changed: %v", p["status"])
+		}
+	}
+}
