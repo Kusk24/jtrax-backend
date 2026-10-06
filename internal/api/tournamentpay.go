@@ -166,10 +166,12 @@ func checkRegistrationNotes(row map[string]any) error {
 	return nil
 }
 
-// deskMethods are the ways the counter takes money. Card is not one of them:
-// a card payment is Stripe's to confirm, through the webhook, never a member
-// of staff's to assert.
-var deskMethods = []string{"Cash", "PromptPay", "BankTransfer"}
+// deskMethods are the ways the counter takes money. A card here is the
+// academy's own card machine: the machine has approved it before staff record
+// it, so it is theirs to mark Paid. A card paid online is still Stripe's to
+// confirm, through the webhook — that payment carries a Stripe session and is
+// settled there, never by this endpoint's say-so.
+var deskMethods = []string{"CreditCard", "Cash", "PromptPay", "BankTransfer"}
 
 // maxReferenceLen bounds a transfer's reference number; real ones are ~20.
 const maxReferenceLen = 100

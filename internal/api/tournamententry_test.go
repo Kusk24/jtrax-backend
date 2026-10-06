@@ -126,14 +126,14 @@ func TestTheDeskRecordsAFeePaid(t *testing.T) {
 	regID := registerPenny(t, parent, 300)
 	path := "/api/v1/tournament-registrations/" + regID + "/desk-payment"
 
-	// Money is staff's to assert, and card is Stripe's.
+	// Money is staff's to assert, by a way the counter takes it.
 	if status, _, _ := parent.do("POST", path, map[string]any{"payment_method": "Cash"}); status != http.StatusForbidden {
 		t.Fatalf("parent at the desk door: got %d, want 403", status)
 	}
 	desk := &client{t: t, srv: srv}
 	desk.login("admin@jca.ac.th")
-	if status, _, _ := desk.do("POST", path, map[string]any{"payment_method": "CreditCard"}); status != http.StatusBadRequest {
-		t.Fatalf("card at the desk: got %d, want 400", status)
+	if status, _, _ := desk.do("POST", path, map[string]any{"payment_method": "Cheque"}); status != http.StatusBadRequest {
+		t.Fatalf("an unknown method at the desk: got %d, want 400", status)
 	}
 
 	status, obj, _ := desk.do("POST", path, map[string]any{"payment_method": "Cash"})
@@ -153,6 +153,30 @@ func TestTheDeskRecordsAFeePaid(t *testing.T) {
 	// Twice is not two payments.
 	if status, _, _ := desk.do("POST", path, map[string]any{"payment_method": "Cash"}); status != http.StatusConflict {
 		t.Fatalf("paying twice: got %d, want 409", status)
+	}
+}
+
+// The academy's own card machine: approved at the counter, so the desk marks
+// it Paid as card, with the slip's number as the reference.
+func TestTheDeskRecordsACardMachinePayment(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	regID := registerPenny(t, parent, 300)
+
+	desk := &client{t: t, srv: srv}
+	desk.login("admin@jca.ac.th")
+	status, obj, _ := desk.do("POST", "/api/v1/tournament-registrations/"+regID+"/desk-payment",
+		map[string]any{"payment_method": "CreditCard", "reference_number": "APPR-123456"})
+	if status != 200 {
+		t.Fatalf("card machine: %d (%v)", status, obj)
+	}
+	var method, payStatus, ref string
+	d.QueryRow(`SELECT payment_method, status, COALESCE(reference_number, '')
+	              FROM payment WHERE tournament_registration_id = ?`, regID).Scan(&method, &payStatus, &ref)
+	if method != "CreditCard" || payStatus != "Paid" || ref != "APPR-123456" {
+		t.Fatalf("payment behind the entry: %s %s %q", method, payStatus, ref)
 	}
 }
 
