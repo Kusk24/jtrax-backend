@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,31 +86,95 @@ func sendArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, day st
 	}
 	rows.Close()
 
-	asked := 0
+	/* One email per family: entries in the same tournament that would go to
+	   the same addresses — a parent with two children entered — are asked
+	   together, one link answering for each child. In order of first due. */
+	type family struct {
+		to      []string
+		entries []dueReminder
+	}
+	var families []*family
+	byKey := map[string]*family{}
 	for _, r := range due {
-		code, hash, err := newPayCode()
-		if err != nil {
-			return asked, err
+		to := arrivalRecipients(d, r)
+		sorted := make([]string, len(to))
+		for i, a := range to {
+			sorted[i] = strings.ToLower(strings.TrimSpace(a))
 		}
-		// Claimed before sending, and only if still unclaimed, so two runs
-		// that overlap cannot email the same family twice.
-		res, err := d.Exec(`UPDATE tournament_registration
-		                       SET arrival_reminded_at = ?, arrival_code_hash = ?
-		                     WHERE tournament_registration_id = ? AND arrival_reminded_at IS NULL`,
-			time.Now().UTC().Format(time.RFC3339), hash, r.regID)
-		if err != nil {
-			return asked, err
+		sort.Strings(sorted)
+		key := r.tournamentID + "|" + strings.Join(sorted, ",")
+		if len(to) == 0 {
+			key += "|" + r.regID // nobody to write to: not grouped
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		f := byKey[key]
+		if f == nil {
+			f = &family{to: to}
+			byKey[key] = f
+			families = append(families, f)
+		}
+		f.entries = append(f.entries, r)
+	}
+
+	asked := 0
+	for _, f := range families {
+		var codes []arrivalCode
+		var names []string
+		for _, r := range f.entries {
+			code, hash, err := newPayCode()
+			if err != nil {
+				return asked, err
+			}
+			// Claimed before sending, and only if still unclaimed, so two runs
+			// that overlap cannot email the same family twice.
+			res, err := d.Exec(`UPDATE tournament_registration
+			                       SET arrival_reminded_at = ?, arrival_code_hash = ?
+			                     WHERE tournament_registration_id = ? AND arrival_reminded_at IS NULL`,
+				time.Now().UTC().Format(time.RFC3339), hash, r.regID)
+			if err != nil {
+				return asked, err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
+			}
+			codes = append(codes, arrivalCode{r.regID, r.participant, code})
+			names = append(names, r.participant)
+		}
+		if len(codes) == 0 {
 			continue
 		}
-		if mailArrival(d, cfg, sender, r, code) == 0 {
-			log.Printf("arrival reminders: %s has no email to ask", r.regID)
+		if len(f.to) == 0 {
+			log.Printf("arrival reminders: %s has no email to ask", codes[0].regID)
 			continue
 		}
-		asked++
+		first := f.entries[0]
+		body := arrivalReminderBody(first.tournament, joinNames(names), fmtDay(first.start), first.venue,
+			arrivalFamilyLink(cfg.AppURL, codes))
+		for _, addr := range f.to {
+			if err := sender.Send(addr, "Are you coming? "+first.tournament+" / ยืนยันการเข้าร่วม", body); err != nil {
+				log.Printf("arrival reminders: %s to %s did not send: %v", codes[0].regID, addr, err)
+			}
+		}
+		asked += len(codes)
 	}
 	return asked, nil
+}
+
+// arrivalCode is one entry's private answer code.
+type arrivalCode struct{ regID, participant, code string }
+
+// arrivalFamilyLink is one link answering for every entry given: the first
+// entry's page, with each further entry and its code after the #, where the
+// page reads them (and the server's logs never see them).
+func arrivalFamilyLink(appURL string, codes []arrivalCode) string {
+	link := arrivalLink(appURL, codes[0].regID, codes[0].code)
+	if len(codes) > 1 {
+		also := make([]string, 0, len(codes)-1)
+		for _, c := range codes[1:] {
+			also = append(also, url.QueryEscape(c.regID)+"."+c.code)
+		}
+		link += "&also=" + strings.Join(also, ",")
+	}
+	return link
 }
 
 // mailArrival emails one reminder with `code` in its link, and returns how

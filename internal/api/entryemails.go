@@ -195,7 +195,7 @@ func entryEmail(d *sql.DB, f *entryFacts, kind entryNotice, link string, online 
 		} else {
 			button = nil
 		}
-		return "Registration Confirmed — " + t, mail.Email{
+		return "Registration Confirmed — " + p + " — " + t, mail.Email{
 			Heading: "Registration confirmed", Greeting: "Hello,",
 			Paragraphs: append(paras, thai), Details: details, Button: button, Note: note,
 		}
@@ -209,7 +209,7 @@ func entryEmail(d *sql.DB, f *entryFacts, kind entryNotice, link string, online 
 		}
 		details = append(details, mail.Detail{Label: "Payment status", Value: "Pending"})
 		owed()
-		return "Registration Reserved — Payment Required for " + t, mail.Email{
+		return "Registration Reserved — Payment Required for " + p + " — " + t, mail.Email{
 			Heading: "Your place is reserved", Greeting: "Hello,",
 			Paragraphs: []string{
 				p + " has been successfully registered for " + t + ".",
@@ -223,7 +223,7 @@ func entryEmail(d *sql.DB, f *entryFacts, kind entryNotice, link string, online 
 		closes := longDate(f.Deadline)
 		details = append(details, mail.Detail{Label: "Payment status", Value: "Pending"})
 		owed()
-		return "Payment Reminder — " + t + " registration closes " + closes, mail.Email{
+		return "Payment Reminder — " + p + " — " + t + " registration closes " + closes, mail.Email{
 			Heading: "Payment due tomorrow", Greeting: "Hello,",
 			Paragraphs: []string{
 				p + "'s place in " + t + " is reserved, but the entry fee has not been paid yet.",
@@ -238,7 +238,7 @@ func entryEmail(d *sql.DB, f *entryFacts, kind entryNotice, link string, online 
 	default: // noticeCancelled
 		closes := longDate(f.Deadline)
 		details = append(details, mail.Detail{Label: "Payment status", Value: "Cancelled"})
-		return "Registration Cancelled — " + t, mail.Email{
+		return "Registration Cancelled — " + p + " — " + t, mail.Email{
 			Heading: "Registration cancelled", Greeting: "Hello,",
 			Paragraphs: []string{
 				"The registration for " + p + " in " + t + " has been cancelled because the entry fee was not paid by " + closes + ", when registration closed.",

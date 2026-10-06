@@ -90,6 +90,10 @@ type Resource struct {
 	AfterInsert func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
+	// Duplicate, when set, names a uniqueness refusal in words: given the
+	// database's error, it returns what to tell the person, or "" when the
+	// error is not one it knows. Answered with 409 instead of a generic 400.
+	Duplicate func(err error) string
 	// NoDelete, when set, refuses every delete with this message: a record
 	// kept for good, which is corrected by editing it instead.
 	NoDelete string
@@ -403,6 +407,12 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 				httpx.Error(w, ce.Status, ce.Message, err)
 				return
 			}
+			if rs.Duplicate != nil {
+				if msg := rs.Duplicate(err); msg != "" {
+					httpx.Error(w, http.StatusConflict, msg, err)
+					return
+				}
+			}
 			httpx.Error(w, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
 			return
 		}
@@ -490,6 +500,12 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			if errors.As(err, &ce) {
 				httpx.Error(w, ce.Status, ce.Message, err)
 				return
+			}
+			if rs.Duplicate != nil {
+				if msg := rs.Duplicate(err); msg != "" {
+					httpx.Error(w, http.StatusConflict, msg, err)
+					return
+				}
 			}
 			httpx.Error(w, http.StatusBadRequest, "could not update record", err)
 			return

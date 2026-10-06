@@ -297,6 +297,79 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 
 func mountDeskPayment(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/desk-payment", handleDeskPayment(d, svc))
+	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/release", handleReleasePlace(d))
+}
+
+// releasePlace takes an entry out of the tournament the way the closing rule
+// does for an unpaid one (entryrules.go): Withdrawn and stamped released, so
+// it leaves the participant list for Released places, where staff can restore
+// it; and its unpaid fee Cancelled. A paid fee is left as it is. Reports
+// whether the entry was in the tournament to release.
+func releasePlace(tx *sql.Tx, regID string) (bool, error) {
+	res, err := tx.Exec(`
+		UPDATE tournament_registration
+		   SET status = 'Withdrawn', released_at = ?
+		 WHERE tournament_registration_id = ? AND status = 'Approved'`, sqliteNow(), regID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	_, err = tx.Exec(`UPDATE payment SET status = 'Cancelled'
+	                   WHERE tournament_registration_id = ? AND status = 'Pending'`, regID)
+	return true, err
+}
+
+// handleReleasePlace is the desk marking an entry's fee Cancelled: the place
+// goes, as it would at closing. Staff only.
+func handleReleasePlace(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(d, w, r) == nil {
+			return
+		}
+		regID := r.PathValue("id")
+		tx, err := d.Begin()
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			return
+		}
+		defer tx.Rollback()
+		var paid int
+		tx.QueryRow(`SELECT COUNT(*) FROM payment WHERE tournament_registration_id = ? AND status = 'Paid'`, regID).Scan(&paid)
+		if paid > 0 {
+			httpx.Error(w, http.StatusConflict, "this entry is paid; refund it on the payments screen before cancelling", nil)
+			return
+		}
+		ok, err := releasePlace(tx, regID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			return
+		}
+		if !ok {
+			httpx.Error(w, http.StatusConflict, "this entry is not in the tournament", nil)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "released"})
+	}
+}
+
+// releaseCancelledEntry is the payments' own rule: a tournament fee set to
+// Cancelled — from the Payment page, say — releases its place too, so a
+// cancelled entry is never left in the participant list.
+func releaseCancelledEntry(tx *sql.Tx, paymentID string) error {
+	var regID, status string
+	err := tx.QueryRow(`SELECT COALESCE(tournament_registration_id, ''), status FROM payment WHERE payment_id = ?`,
+		paymentID).Scan(&regID, &status)
+	if err != nil || regID == "" || status != "Cancelled" {
+		return nil
+	}
+	_, err = releasePlace(tx, regID)
+	return err
 }
 
 // parentNameOf is the snapshot a payment keeps of who paid, so it still says

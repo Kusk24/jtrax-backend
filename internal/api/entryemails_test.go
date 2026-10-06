@@ -96,7 +96,7 @@ func TestPayLaterIsEmailedThatThePlaceIsReservedAndTheFeePending(t *testing.T) {
 	                 venue_address = 'Samut Prakan', registration_deadline = ? WHERE tournament_id = ?`, day(20), f.tourID)
 	id, code := f.registerChoosing(t, "somchai@example.com", "later")
 
-	subject, body := f.waitForSubject(t, "Registration Reserved — Payment Required for JCA Open")
+	subject, body := f.waitForSubject(t, "Registration Reserved — Payment Required for Somchai Niran — JCA Open")
 	for _, want := range []string{
 		"You chose to pay later", "Payment status: Pending", "Entry fee: 500 THB",
 		"12 December 2026", "Assumption University, Samut Prakan",
@@ -128,7 +128,7 @@ func TestPayNowThatSucceedsGetsOneEmailRegistrationConfirmed(t *testing.T) {
 	if got := postWebhook(t, f.srv, payload, stripepay.Sign(payload, webhookSecret, time.Now())); got != 200 {
 		t.Fatalf("webhook: %d", got)
 	}
-	_, body := f.waitForSubject(t, "Registration Confirmed — JCA Open")
+	_, body := f.waitForSubject(t, "Registration Confirmed — Somchai Niran — JCA Open")
 	for _, want := range []string{"Payment status: Paid", "Amount paid: 500 THB", "View Registration", "#code=" + code} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("confirmation is missing %q:\n%s", want, body)
@@ -225,7 +225,7 @@ func TestAPlaceUnpaidAtClosingIsCancelledItsFeeCancelledAndTheFamilyTold(t *test
 
 	f.notices(t, time.Now())
 	f.notices(t, time.Now().Add(10*time.Minute))
-	_, body := f.waitForSubject(t, "Registration Cancelled — JCA Open")
+	_, body := f.waitForSubject(t, "Registration Cancelled — Somchai Niran — JCA Open")
 	if !strings.Contains(body, "Payment status: Cancelled") || !strings.Contains(body, "has been released") {
 		t.Fatalf("cancellation should say the fee was cancelled and the place went:\n%s", body)
 	}

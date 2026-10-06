@@ -337,7 +337,8 @@ func Registry() []*Resource {
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",
 			// A payment is the record of money taken; it is corrected, never
 			// removed, so the history a family and the books see stays whole.
-			NoDelete: "payments can't be deleted — edit the payment instead",
+			NoDelete:   "payments can't be deleted — edit the payment instead",
+			AfterWrite: releaseCancelledEntry,
 			Cols: []Col{
 				// Not required: a payment outlives the student it was taken
 				// for, and a detached one carries the names below instead.
@@ -527,6 +528,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",
+			Duplicate: duplicateEntryMessage,
 			Cols: []Col{
 				{Name: "tournament_id", Kind: "text", Required: true},
 				// No longer required: a member of the public registering for an

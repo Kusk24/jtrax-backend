@@ -581,8 +581,10 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			// they are reached rather than pre-checked so that two simultaneous
 			// submissions cannot both pass a check and both insert.
 			if isUniqueViolation(err) {
+				// One email may enter several players; the same player twice
+				// is what is refused (0070).
 				httpx.Error(w, http.StatusConflict,
-					"that email address is already registered for this tournament", nil)
+					"this player is already registered for this tournament", nil)
 				return
 			}
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
