@@ -84,6 +84,7 @@ func Registry() []*Resource {
 	return []*Resource{
 		{
 			Name: "students", Table: "student", IDCol: "student_id", IDPrefix: "stu",
+			Check: checkStudentDOB,
 			Cols: []Col{
 				{Name: "user_account_id", Kind: "text"},
 				{Name: "name", Kind: "text", Required: true},

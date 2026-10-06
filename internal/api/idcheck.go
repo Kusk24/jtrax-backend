@@ -141,6 +141,10 @@ func useIDCheck(tx *sql.Tx, checkID, tournamentID, studentID string) (c idCheck,
 		return c, "", err
 	}
 	c.Name, c.DocumentType = name.String, docType.String
+	/* The card is the entry's date of birth; under a year old is a misread. */
+	if dobTooYoung(c.DateOfBirth) {
+		return c, "the date of birth on the ID card is less than a year ago — please upload a clearer photo", nil
+	}
 	return c, "", nil
 }
 
