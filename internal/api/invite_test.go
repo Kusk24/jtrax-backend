@@ -21,7 +21,12 @@ func TestTheOfficeInvitesAParentToSetTheirPassword(t *testing.T) {
 	if to != "sandy01234@gmail.com" {
 		t.Fatalf("sent to %q", to)
 	}
-	for _, want := range []string{"Hello Sandy Jones", "Penny", "Your sign-in email: sandy01234@gmail.com", "expires in 7 days", "/reset-password?token="} {
+	for _, want := range []string{
+		"Hello Sandy Jones", "We're happy to have you and Penny and Uri with us.",
+		"Parent Account", "Your sign-in email: sandy01234@gmail.com",
+		"Set Your Password:", "/reset-password?token=", "Open JTrax:",
+		"valid for 7 days", "Best regards,", "JTrax Parent Portal",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the invite does not say %q:\n%s", want, body)
 		}
@@ -142,10 +147,14 @@ func TestTheInviteCarriesTheChildsLogin(t *testing.T) {
 		t.Fatalf("invite with Penny's login: %d", status)
 	}
 	_, body := cap.last()
-	for _, want := range []string{"Penny's login ID: penny@jca.ac.th", "Penny's password: " + db.DevPassword, "Penny can sign in to the JTrax student app"} {
+	for _, want := range []string{"Student Login", "Login ID: penny@jca.ac.th", "Password: " + db.DevPassword, "Penny can also sign in to the JTrax student app"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the invite does not say %q:\n%s", want, body)
 		}
+	}
+	/* Penny signs in with her own email, so resets it herself: no guide. */
+	if strings.Contains(body, "Account & Security") {
+		t.Errorf("a child with their own email was given the parent's reset guide:\n%s", body)
 	}
 
 	if status := send([]map[string]any{{"name": "Penny", "loginId": "penny@jca.ac.th", "password": "not-her-password-1"}}); status != 422 {
@@ -160,5 +169,33 @@ func TestTheInviteCarriesTheChildsLogin(t *testing.T) {
 	}
 	if status := send([]map[string]any{{"name": "Someone", "loginId": "stu_someone_else", "password": "Their-Pass-12"}}); status != 422 {
 		t.Fatalf("another family's child's login was mailed: %d", status)
+	}
+}
+
+// A child who signs in with a username has their password reset by the
+// parent, so the welcome says where: Home, their card, Account & Security.
+func TestTheInviteShowsWhereToResetAChildsPassword(t *testing.T) {
+	srv, cap := newResetServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	_, acct, _ := admin.do("POST", "/api/v1/user-accounts", map[string]any{
+		"email": "stu_mia", "password": "Temp-Pass-12", "role": "Student", "display_name": "Mia",
+	})
+	_, stu, _ := admin.do("POST", "/api/v1/students", map[string]any{"name": "Mia", "user_account_id": acct["user_account_id"]})
+	admin.do("POST", "/api/v1/student-parents", map[string]any{"student_id": stu["student_id"], "parent_id": "par_sandy"})
+
+	status, out, _ := admin.do("POST", "/api/v1/user-accounts/usr_sandy/invite", map[string]any{
+		"studentLogins": []map[string]any{{"name": "Mia", "loginId": "stu_mia", "password": "Temp-Pass-12"}},
+	})
+	if status != 202 {
+		t.Fatalf("invite: %d %v", status, out)
+	}
+	_, body := cap.last()
+	for _, want := range []string{
+		"If Mia forgets the password", "On Home, tap Mia's card", "Scroll down to Account & Security", "Tap Reset Password",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the invite does not say %q:\n%s", want, body)
+		}
 	}
 }

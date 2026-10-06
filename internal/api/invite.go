@@ -76,8 +76,8 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 			httpx.JSON(w, http.StatusAccepted, map[string]any{"email": email, "delivered": false})
 			return
 		}
-		subject, body := "Welcome to JCA Chess School: set your password",
-			inviteEmail(displayName, email, childNamesOf(d, accountID), link, in.StudentLogins)
+		subject, body := "Welcome to JCA Chess School! ♟️",
+			inviteEmail(displayName, email, childNamesOf(d, accountID), link, cfg.PortalFor(role), in.StudentLogins)
 		if role == "Student" {
 			// An older student with their own address: the parent's welcome
 			// would tell them about "your child's" classes.
@@ -134,36 +134,83 @@ func isChildLogin(d *sql.DB, parentAccountID string, l studentLogin) bool {
 	return err == nil && auth.VerifyPassword(l.Password, hash)
 }
 
-func inviteEmail(name, email string, children []string, link string, logins []studentLogin) mail.Email {
-	about := "your child's"
-	if len(children) > 0 {
-		about = joinNames(children) + "'s"
+// inviteEmail is the parent's welcome: who they are signed in as, their
+// children's student logins, how to set a password, and — for a child with a
+// username rather than an email — where in the portal to reset theirs.
+func inviteEmail(name, email string, children []string, link, portal string, logins []studentLogin) mail.Email {
+	kids := joinNames(children)
+	welcome := "Welcome to JCA Chess School! We're happy to have you with us."
+	about, journey := "your child's", "your child's"
+	if kids != "" {
+		welcome = "Welcome to JCA Chess School! We're happy to have you and " + kids + " with us."
+		about, journey = kids+"'s", kids+"'s"
 	}
-	details := []mail.Detail{{Label: "Your sign-in email", Value: email}}
 	paragraphs := []string{
-		"JCA Chess School has created your JTrax parent account. With it you can follow " +
-			about + " classes, credits and practice, see announcements, and message the office.",
-		"Choose your password to get started.",
+		welcome,
+		"Your JTrax parent account has been created. Through JTrax, you can easily keep track of " + about +
+			" classes, credits, practice activities, announcements, and messages from the school.",
+		"To get started, please set a password for your parent account using the button below.",
 	}
+	details := []mail.Detail{{Label: "Parent Account"}, {Label: "Your sign-in email", Value: email}}
+
+	/* The children who sign in with a username: their password is the
+	   parent's to reset, in the portal. One with their own email resets it
+	   themselves. */
+	var usernames []string
 	if len(logins) > 0 {
 		names := make([]string, len(logins))
+		heading := "Student Login"
+		if len(logins) > 1 {
+			heading = "Student Logins"
+		}
+		details = append(details, mail.Detail{Label: heading})
 		for i, l := range logins {
 			names[i] = l.Name
+			idLabel, pwLabel := "Login ID", "Password"
+			if len(logins) > 1 {
+				idLabel, pwLabel = l.Name+"'s login ID", l.Name+"'s password"
+			}
 			details = append(details,
-				mail.Detail{Label: l.Name + "'s login ID", Value: l.LoginID},
-				mail.Detail{Label: l.Name + "'s password", Value: l.Password})
+				mail.Detail{Label: idLabel, Value: l.LoginID},
+				mail.Detail{Label: pwLabel, Value: l.Password})
+			if !strings.Contains(l.LoginID, "@") {
+				usernames = append(usernames, l.Name)
+			}
 		}
-		paragraphs = append(paragraphs, joinNames(names)+" can sign in to the JTrax student app with the login below. "+
-			"Keep it somewhere safe. The office can reset it if it is lost.")
+		paragraphs = append(paragraphs, joinNames(names)+
+			" can also sign in to the JTrax student app using the student login details below. "+
+			"Please keep these login details safe.")
 	}
+
+	var after []string
+	if len(usernames) > 0 {
+		card := usernames[0] + "'s card"
+		if len(usernames) > 1 {
+			card = "your child's card"
+		}
+		after = append(after,
+			"If "+joinNames(usernames)+" forgets the password, you can set a new one in the JTrax parent portal:",
+			"- Open JTrax and sign in",
+			"- On Home, tap "+card,
+			"- Scroll down to Account & Security",
+			"- Tap Reset Password",
+			"The school office can also help reset it.")
+	}
+	after = append(after,
+		"We look forward to supporting "+journey+" chess journey with JCA Chess School!",
+		"ยินดีต้อนรับสู่ JCA Chess School กรุณาตั้งรหัสผ่านบัญชีผู้ปกครอง JTrax ของคุณด้วยปุ่มด้านบน")
+
 	return mail.Email{
 		Heading:    "Welcome to JCA Chess School",
 		Greeting:   "Hello " + name + ",",
 		Paragraphs: paragraphs,
 		Details:    details,
-		Button:     &mail.Button{Label: "Set your password", URL: link},
-		Note: "The link works once and expires in 7 days. If it has expired, ask the office to send a new one. " +
-			"If you weren't expecting this email, you can ignore it.",
+		Button:     &mail.Button{Label: "Set Your Password", URL: link},
+		Second:     &mail.Button{Label: "Open JTrax", URL: strings.TrimSuffix(portal, "/") + "/"},
+		After:      after,
+		Note: "This password setup link is valid for 7 days and can only be used once. If it has expired, " +
+			"ask the school office to send a new one. If you weren't expecting this email, you can ignore it.",
+		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Parent Portal"},
 	}
 }
 
