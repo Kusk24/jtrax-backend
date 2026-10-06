@@ -223,3 +223,46 @@ func TestArrivalReminderAsksAFamilyOnce(t *testing.T) {
 		t.Errorf("each child keeps their own answer: Penny %v, Uri %v", penny["arrival_status"], uri["arrival_status"])
 	}
 }
+
+// Staff can chase everyone still to answer in one go: one email per family,
+// already answered entries skipped, and families cannot do it.
+func TestBatchArrivalReminder(t *testing.T) {
+	d := newDB(t)
+	cap := &captureSender{}
+	srv := httptest.NewServer(api.NewHandlerWithMail(d, mail.Config{AppURL: "https://portal.example"}, cap))
+	t.Cleanup(srv.Close)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	_, trn, _ := admin.do("POST", "/api/v1/tournaments", map[string]any{
+		"name": "Wellington Rapid", "start_date": academyDay(10), "arrival_reminder_days": 5,
+	})
+	var ids []string
+	for _, kid := range []struct{ id, name string }{{"stu_penny", "Penny"}, {"stu_uri", "Uri"}} {
+		_, reg, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+			"tournament_id": trn["tournament_id"], "student_id": kid.id, "participant_name": kid.name, "status": "Approved",
+		})
+		ids = append(ids, reg["tournament_registration_id"].(string))
+	}
+	_, other, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": trn["tournament_id"], "participant_name": "Olly", "contact_email": "olly@example.com",
+		"status": "Approved", "arrival_status": "Confirmed",
+	})
+	ids = append(ids, other["tournament_registration_id"].(string))
+	batch := "/api/v1/tournaments/" + trn["tournament_id"].(string) + "/arrival-reminders"
+
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("POST", batch, map[string]any{"registration_ids": ids}); status != 403 {
+		t.Fatalf("parent batch: want 403, got %d", status)
+	}
+	status, out, _ := admin.do("POST", batch, map[string]any{"registration_ids": ids})
+	if status != 200 || out["asked"] != float64(2) || out["skipped"] != float64(1) {
+		t.Fatalf("batch: %d %v", status, out)
+	}
+	if len(cap.sent) != 1 || !strings.Contains(cap.sent[0].Body, "Penny and Uri") {
+		t.Fatalf("want one family email naming both, got %d: %+v", len(cap.sent), cap.sent)
+	}
+	if status, _, _ := admin.do("POST", batch, map[string]any{"registration_ids": []string{}}); status != 400 {
+		t.Fatalf("empty batch: want 400, got %d", status)
+	}
+}

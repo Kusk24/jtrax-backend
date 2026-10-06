@@ -16,7 +16,9 @@ import (
 	"context"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -85,7 +87,13 @@ func sendArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, day st
 		due = append(due, r)
 	}
 	rows.Close()
+	return askFamilies(d, cfg, sender, due, "arrival_reminded_at IS NULL")
+}
 
+// askFamilies emails the given entries and returns how many were asked. Each
+// entry is claimed first, only if `claim` still holds, so two senders that
+// overlap cannot ask the same entry twice.
+func askFamilies(d *sql.DB, cfg mail.Config, sender mail.Sender, due []dueReminder, claim string) (int, error) {
 	/* One email per family: entries in the same tournament that would go to
 	   the same addresses — a parent with two children entered — are asked
 	   together, one link answering for each child. In order of first due. */
@@ -124,11 +132,9 @@ func sendArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, day st
 			if err != nil {
 				return asked, err
 			}
-			// Claimed before sending, and only if still unclaimed, so two runs
-			// that overlap cannot email the same family twice.
 			res, err := d.Exec(`UPDATE tournament_registration
 			                       SET arrival_reminded_at = ?, arrival_code_hash = ?
-			                     WHERE tournament_registration_id = ? AND arrival_reminded_at IS NULL`,
+			                     WHERE tournament_registration_id = ? AND `+claim,
 				time.Now().UTC().Format(time.RFC3339), hash, r.regID)
 			if err != nil {
 				return asked, err
@@ -243,6 +249,74 @@ func handleResendArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.Ha
 		}
 		sent := mailArrival(d, cfg, sender, due, code)
 		httpx.JSON(w, http.StatusOK, map[string]any{"sent": sent, "arrival_reminded_at": sentAt})
+	}
+}
+
+// handleBatchArrival asks the chosen entrants of one tournament in one go,
+// one email per family. Entries that have answered, are not approved, or
+// whose tournament has started are skipped rather than refused.
+func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireStaff(d, w, r) == nil {
+			return
+		}
+		var body struct {
+			IDs []string `json:"registration_ids"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || len(body.IDs) == 0 {
+			httpx.Error(w, http.StatusBadRequest, "choose who to ask", nil)
+			return
+		}
+		if len(body.IDs) > 1000 {
+			httpx.Error(w, http.StatusBadRequest, "too many entries at once", nil)
+			return
+		}
+		args := []any{r.PathValue("id"), today()}
+		marks := make([]string, len(body.IDs))
+		for i, id := range body.IDs {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := d.Query(`
+			SELECT r.tournament_registration_id, t.tournament_id, t.name, r.participant_name,
+			       r.contact_email, COALESCE(r.student_id, ''), COALESCE(t.start_date, ''), COALESCE(t.venue_name, '')
+			  FROM tournament_registration r
+			  JOIN tournament t ON t.tournament_id = r.tournament_id
+			 WHERE t.tournament_id = ?
+			   AND r.status = 'Approved'
+			   AND r.arrival_status = 'Pending'
+			   AND (COALESCE(t.start_date, '') = '' OR t.start_date >= ?)
+			   AND r.tournament_registration_id IN (`+strings.Join(marks, ",")+`)`, args...)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read the entries", err)
+			return
+		}
+		var due []dueReminder
+		for rows.Next() {
+			var e dueReminder
+			if err := rows.Scan(&e.regID, &e.tournamentID, &e.tournament, &e.participant,
+				&e.email, &e.studentID, &e.start, &e.venue); err != nil {
+				rows.Close()
+				httpx.Error(w, http.StatusInternalServerError, "could not read the entries", err)
+				return
+			}
+			due = append(due, e)
+		}
+		rows.Close()
+		/* After the rows are closed: the lookup needs the connection. */
+		reachable := due[:0]
+		for _, e := range due {
+			if len(arrivalRecipients(d, e)) > 0 {
+				reachable = append(reachable, e)
+			}
+		}
+		due = reachable
+		asked, err := askFamilies(d, cfg, sender, due, "arrival_status = 'Pending'")
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"asked": asked, "skipped": len(body.IDs) - asked})
 	}
 }
 
@@ -432,6 +506,8 @@ func mountArrival(mux *http.ServeMux, d *sql.DB, cfg mail.Config, sender mail.Se
 	mux.HandleFunc("POST "+a+"/answer", httpx.RateLimit(20, handleArrivalAnswer(d)))
 	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/arrival-reminder",
 		httpx.RateLimit(30, handleResendArrival(d, cfg, sender)))
+	mux.HandleFunc("POST /api/v1/tournaments/{id}/arrival-reminders",
+		httpx.RateLimit(10, handleBatchArrival(d, cfg, sender)))
 }
 
 // SendArrivalReminders runs one reminder pass as of `day`. Exported for tests,
