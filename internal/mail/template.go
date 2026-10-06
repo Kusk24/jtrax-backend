@@ -14,7 +14,8 @@ import (
 	"strings"
 )
 
-// Detail is one row of the details table: "Amount · 13,500 THB".
+// Detail is one row of the details table: "Amount · 13,500 THB". A row with
+// no Value is a section heading inside the table: "Student Login".
 type Detail struct {
 	Label string
 	Value string
@@ -34,6 +35,8 @@ type Email struct {
 	Paragraphs []string
 	Details    []Detail
 	Button     *Button
+	// Second is a quieter, outlined button beside the first: "Open JTrax".
+	Second *Button
 	// After is text under the button. A line starting "- " is a bullet;
 	// consecutive bullets make one list.
 	After []string
@@ -66,13 +69,23 @@ func (e Email) Text() string {
 		b.WriteString(p + "\n\n")
 	}
 	if len(e.Details) > 0 {
-		for _, d := range e.Details {
+		for i, d := range e.Details {
+			if d.Value == "" {
+				if i > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(d.Label + "\n")
+				continue
+			}
 			b.WriteString(d.Label + ": " + d.Value + "\n")
 		}
 		b.WriteString("\n")
 	}
 	if e.Button != nil {
 		b.WriteString(e.Button.Label + ":\n" + e.Button.URL + "\n\n")
+	}
+	if e.Second != nil {
+		b.WriteString(e.Second.Label + ":\n" + e.Second.URL + "\n\n")
 	}
 	for i, p := range e.After {
 		item, bullet := strings.CutPrefix(p, "- ")
@@ -122,6 +135,12 @@ func (e Email) HTML() string {
 			if i > 0 {
 				border = "border-top:1px solid " + line + ";"
 			}
+			if d.Value == "" {
+				fmt.Fprintf(&body,
+					`<tr><td colspan="2" style="%spadding:10px 16px 8px;background:%s;font-size:12.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:%s">%s</td></tr>`,
+					border, page, navy, esc(d.Label))
+				continue
+			}
 			fmt.Fprintf(&body,
 				`<tr><td style="%spadding:11px 16px;font-size:14px;color:%s">%s</td>`+
 					`<td align="right" style="%spadding:11px 16px;font-size:14px;font-weight:600;color:%s">%s</td></tr>`,
@@ -132,10 +151,18 @@ func (e Email) HTML() string {
 	if e.Button != nil {
 		fmt.Fprintf(&body,
 			`<table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 18px"><tr>`+
-				`<td style="border-radius:9px;background:%s"><a href="%s" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none">%s</a></td>`+
-				`</tr></table>`+
+				`<td style="border-radius:9px;background:%s"><a href="%s" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none">%s</a></td>`,
+			blue, esc(e.Button.URL), esc(e.Button.Label))
+		if e.Second != nil {
+			fmt.Fprintf(&body,
+				`<td style="width:10px"></td>`+
+					`<td style="border-radius:9px;border:1.5px solid %s"><a href="%s" style="display:inline-block;padding:10.5px 20px;font-size:15px;font-weight:600;color:%s;text-decoration:none">%s</a></td>`,
+				blue, esc(e.Second.URL), blue, esc(e.Second.Label))
+		}
+		fmt.Fprintf(&body,
+			`</tr></table>`+
 				`<p style="margin:0 0 14px;font-size:12.5px;color:%s">If the button doesn't work, copy this link into your browser:<br><a href="%s" style="color:%s;word-break:break-all">%s</a></p>`,
-			blue, esc(e.Button.URL), esc(e.Button.Label), muted, esc(e.Button.URL), blue, esc(e.Button.URL))
+			muted, esc(e.Button.URL), blue, esc(e.Button.URL))
 	}
 	inList := false
 	for _, p := range e.After {
