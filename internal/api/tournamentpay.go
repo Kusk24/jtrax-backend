@@ -21,7 +21,9 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"slices"
@@ -324,14 +326,25 @@ func releasePlace(tx *sql.Tx, regID string) (bool, error) {
 	return true, err
 }
 
-// handleReleasePlace is the desk marking an entry's fee Cancelled: the place
-// goes, as it would at closing. Staff only.
+// handleReleasePlace takes an entry out of the tournament, into Released
+// places. Staff only. Two reasons, sent as {"reason": ...}:
+//
+//   - "cancelled" (the default): the fee is called off. A paid entry is
+//     refused — that is a refund, not a cancellation.
+//   - "notAttending": the player is not coming. Paid or not, the place goes;
+//     a paid fee stays paid, since entry fees are not refunded.
 func handleReleasePlace(d *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireStaff(d, w, r) == nil {
 			return
 		}
 		regID := r.PathValue("id")
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		/* An empty body is the original call: a cancelled fee. */
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&in)
+		notAttending := in.Reason == "notAttending"
 		tx, err := d.Begin()
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
@@ -340,7 +353,7 @@ func handleReleasePlace(d *sql.DB) http.HandlerFunc {
 		defer tx.Rollback()
 		var paid int
 		tx.QueryRow(`SELECT COUNT(*) FROM payment WHERE tournament_registration_id = ? AND status = 'Paid'`, regID).Scan(&paid)
-		if paid > 0 {
+		if paid > 0 && !notAttending {
 			httpx.Error(w, http.StatusConflict, "this entry is paid; refund it on the payments screen before cancelling", nil)
 			return
 		}
@@ -348,6 +361,13 @@ func handleReleasePlace(d *sql.DB) http.HandlerFunc {
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
 			return
+		}
+		if ok && notAttending {
+			if _, err := tx.Exec(`UPDATE tournament_registration SET arrival_status = 'NotAttending', arrival_answered_at = ?
+			                       WHERE tournament_registration_id = ?`, sqliteNow(), regID); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+				return
+			}
 		}
 		if !ok {
 			httpx.Error(w, http.StatusConflict, "this entry is not in the tournament", nil)
