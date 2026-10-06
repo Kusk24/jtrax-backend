@@ -2,7 +2,14 @@ package api_test
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
+	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
 )
 
 // The seed links parent Sandy (usr_sandy) as mother of Penny (stu_penny) and
@@ -226,9 +233,9 @@ func TestCheckOutSendsTheCreditDeduction(t *testing.T) {
 	}
 }
 
-// Low credit is a staff decision now, not a side effect of checking out: a
-// check-out that leaves the balance under the line sends nothing about it.
-func TestCheckOutDoesNotSendLowCreditByItself(t *testing.T) {
+// A check-out that leaves the balance at or under the academy's line tells the
+// parent once, in the portal only — no email, no push.
+func TestCheckOutSendsLowCreditOnceInAppOnly(t *testing.T) {
 	srv := newServer(t)
 	admin := &client{t: t, srv: srv}
 	admin.login("admin@jca.ac.th")
@@ -238,25 +245,96 @@ func TestCheckOutDoesNotSendLowCreditByItself(t *testing.T) {
 		t.Fatalf("setting the low-credit rule failed")
 	}
 
-	// Sandy has low credit switched on, so the only thing that can keep it out
-	// of her inbox is that check-out no longer sends it.
-	sandy := &client{t: t, srv: srv}
-	sandy.login("sandy01234@gmail.com")
-	if status, _, _ := sandy.do("PUT", "/api/v1/notification-settings", map[string]any{
-		"type": "low_credit", "channel": "inapp", "enabled": true,
-	}); status != 200 {
-		t.Fatalf("switching low credit on failed")
-	}
-
 	checkOut(t, srv)
 	in := inbox(t, srv, "sandy01234@gmail.com")
-	if got := countType(in, "low_credit"); got != 0 {
-		t.Fatalf("check-out sent low_credit by itself: %d", got)
+	if got := countType(in, "low_credit"); got != 1 {
+		t.Fatalf("low_credit after check-out: %d, want 1", got)
 	}
 	// The receipt for the class still goes.
 	if got := countType(in, "credit_deducted"); got != 1 {
 		t.Fatalf("credit_deducted: %d, want 1", got)
 	}
+
+	d := dbOf(t, srv.URL)
+	var other int
+	d.QueryRow(`SELECT COUNT(*) FROM notification_delivery nd
+	              JOIN notification n ON n.notification_id = nd.notification_id
+	             WHERE n.type = 'low_credit' AND nd.channel <> 'inapp'`).Scan(&other)
+	if other != 0 {
+		t.Errorf("low_credit went out on %d other channels, want in-app only", other)
+	}
+
+	/* The hourly sweep finds Penny's same low balance and says nothing more
+	   about her (Uri, also under a line of 100, gets his own). */
+	api.RunCreditReminders(d, notify.New(d, nil, mail.Config{}), daytime())
+	penny := 0
+	for _, row := range inbox(t, srv, "sandy01234@gmail.com") {
+		if b, _ := row["body"].(string); row["type"] == "low_credit" && strings.HasPrefix(b, "Penny ") {
+			penny++
+		}
+	}
+	if penny != 1 {
+		t.Errorf("low_credit about Penny after the sweep: %d, want still 1", penny)
+	}
+}
+
+// A parent who switched low credit off is not told.
+func TestLowCreditRespectsTheParentsSwitch(t *testing.T) {
+	srv := newServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	admin.do("POST", "/api/v1/system-configuration", map[string]any{
+		"config_key": "credit_rule_low_credit", "config_value": "100",
+	})
+	sandy := &client{t: t, srv: srv}
+	sandy.login("sandy01234@gmail.com")
+	if status, _, _ := sandy.do("PUT", "/api/v1/notification-settings", map[string]any{
+		"type": "low_credit", "channel": "inapp", "enabled": false,
+	}); status != 200 {
+		t.Fatalf("switching low credit off failed")
+	}
+	checkOut(t, srv)
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "low_credit"); got != 0 {
+		t.Fatalf("low_credit reached a parent who turned it off: %d", got)
+	}
+}
+
+// Expiring credits are announced by the sweep once per expiry date, in-app
+// only, and never at night.
+func TestExpiringCreditsAreAnnouncedOnce(t *testing.T) {
+	srv := newServer(t)
+	d := dbOf(t, srv.URL)
+	soon := academytime.Now().AddDate(0, 0, 3).Format("2006-01-02")
+	if _, err := d.Exec(`INSERT INTO credit_transaction
+		(credit_transaction_id, enrollment_id, transaction_type, amount, expiry_date, transaction_date)
+		VALUES ('ctx_soon', 'enr_penny', 'purchase', 10, ?, ?)`, soon, academytime.Today()); err != nil {
+		t.Fatal(err)
+	}
+	svc := notify.New(d, nil, mail.Config{})
+
+	night := time.Date(2026, 10, 6, 23, 0, 0, 0, academytime.Location())
+	api.RunCreditReminders(d, svc, night)
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 0 {
+		t.Fatalf("credit_expiry sent at night: %d", got)
+	}
+
+	api.RunCreditReminders(d, svc, daytime())
+	api.RunCreditReminders(d, svc, daytime())
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 1 {
+		t.Fatalf("credit_expiry after two sweeps: %d, want 1", got)
+	}
+	var other int
+	d.QueryRow(`SELECT COUNT(*) FROM notification_delivery nd
+	              JOIN notification n ON n.notification_id = nd.notification_id
+	             WHERE n.type = 'credit_expiry' AND nd.channel <> 'inapp'`).Scan(&other)
+	if other != 0 {
+		t.Errorf("credit_expiry went out on %d other channels, want in-app only", other)
+	}
+}
+
+// daytime is 10:00 at the academy, when the sweep may send.
+func daytime() time.Time {
+	return time.Date(2026, 10, 6, 10, 0, 0, 0, academytime.Location())
 }
 
 func TestLowCreditReminderIsStaffOnly(t *testing.T) {

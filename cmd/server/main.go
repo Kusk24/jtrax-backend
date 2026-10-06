@@ -74,6 +74,9 @@ func main() {
 	// the day-before reminder, and the cancellation when its place is
 	// released (internal/api/entryemails.go).
 	api.StartEntryNotices(context.Background(), d, stripeClient, notifier)
+	// Low-credit and expiring-credit reminders, in-app, once each
+	// (internal/api/creditreminders.go).
+	api.StartCreditReminders(context.Background(), d, notifier)
 
 	port := os.Getenv("PORT")
 	if port == "" {
