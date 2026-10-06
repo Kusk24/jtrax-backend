@@ -319,6 +319,9 @@ func (in *registerInput) validate() string {
 		if _, err := time.Parse("2006-01-02", in.DateOfBirth); err != nil {
 			return "that date of birth does not look right"
 		}
+		if dobTooYoung(in.DateOfBirth) {
+			return errDOBTooYoung.Error()
+		}
 	}
 	if in.IsStudent && (in.StudentID == "" || len(in.StudentID) > 40) {
 		return "please give the JCA student ID so we can apply the discount"

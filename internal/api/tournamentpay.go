@@ -157,6 +157,9 @@ func createTournamentPayment(d *sql.DB, regID string, studentID sql.NullString, 
 const maxNoteLen = 2000
 
 func checkRegistrationNotes(row map[string]any) error {
+	if dob, _ := row["participant_date_of_birth"].(string); dobTooYoung(dob) {
+		return errDOBTooYoung
+	}
 	for _, name := range []string{"medical_notes", "remarks"} {
 		v, _ := row[name].(string)
 		if len(v) > maxNoteLen {
