@@ -11,6 +11,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
 	"github.com/Kusk24/jtrax-backend/internal/push"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
+	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
 // NewHandler builds the full API handler (CORS applied by the caller), reading
@@ -67,6 +68,10 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	notifier := notify.New(d, sender, mailCfg)
 	// Phones get pushes through Expo, which needs no key to be switched on.
 	notifier.SetPush(push.New(push.FromEnv()))
+	// Browsers get them through their own push services, once the VAPID keys
+	// are set (internal/webpush).
+	browserPush := webpush.New(webpush.FromEnv())
+	notifier.SetWebPush(browserPush)
 
 	mountUserAccounts(mux, d)
 	relay := mountGameRooms(mux, d)
@@ -114,7 +119,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// Notifications: the inbox and settings endpoints, plus the same service
 	// wired onto the attendance and announcement resources so a check-in or a
 	// new announcement turns into a notification through the existing writes.
-	mountNotifications(mux, d, notifier)
+	mountNotifications(mux, d, notifier, browserPush.PublicKey())
 	// Calling a class off refunds it and tells the families, in one request.
 	mountClassCancel(mux, d, notifier)
 	// Card payments: a checkout link for a pending payment, and the webhook

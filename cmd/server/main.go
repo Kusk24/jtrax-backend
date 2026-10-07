@@ -24,6 +24,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/push"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
+	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
 func main() {
@@ -68,6 +69,7 @@ func main() {
 	// Stripe (internal/api/stripe.go). Off until the Stripe key is set.
 	notifier := notify.New(d, mail.New(mailCfg), mailCfg)
 	notifier.SetPush(push.New(push.FromEnv()))
+	notifier.SetWebPush(webpush.New(webpush.FromEnv()))
 	stripeClient := stripepay.New(stripepay.FromEnv())
 	api.StartStripeReconciler(context.Background(), d, stripeClient, notifier)
 	// The emails about an unpaid tournament entry: payment not completed,
