@@ -222,3 +222,19 @@ func TestOnlyAPushServiceIsAnEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestTheContactIsTheAcademysSendingAddress(t *testing.T) {
+	cases := []struct{ explicit, mailFrom, appURL, want string }{
+		{"mailto:ops@jca.ac.th", "office@jca.ac.th", "https://portal.example", "mailto:ops@jca.ac.th"},
+		{"", "office@jca.ac.th", "https://portal.example", "office@jca.ac.th"},
+		{"", "JCA Chess Academy <office@jca.ac.th>", "", "office@jca.ac.th"},
+		{"", "", "https://portal.example/", "https://portal.example"},
+		{"", "not an address", "http://portal.example", ""},
+		{"  ", "", "", ""},
+	}
+	for _, c := range cases {
+		if got := contact(c.explicit, c.mailFrom, c.appURL); got != c.want {
+			t.Errorf("contact(%q, %q, %q) = %q, want %q", c.explicit, c.mailFrom, c.appURL, got, c.want)
+		}
+	}
+}
