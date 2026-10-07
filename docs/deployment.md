@@ -229,3 +229,23 @@ Two behaviours worth knowing when reading the code:
 - Completing a reset **deletes every session for that account** and voids any
   other outstanding link. If the reset happened because somebody else knew the
   old password, leaving their session alive would defeat the point.
+
+## Browser notifications
+
+A parent can switch notifications on for a browser in the portal's Settings;
+each one the inbox gets is then also sent through that browser's push service
+(Web Push, `internal/webpush`). It needs one key pair per deployment:
+
+| Variable | Notes |
+|---|---|
+| `WEBPUSH_VAPID_PUBLIC_KEY` / `WEBPUSH_VAPID_PRIVATE_KEY` | from `go run ./cmd/vapidkeys`; never committed. Changing them strands every existing subscription — browsers have to switch notifications on again |
+| `WEBPUSH_SUBJECT` | how a push service contacts whoever runs the server: an email address or an `https://` URL. Apple refuses pushes without one |
+
+**Leaving them unset is not an error.** The portal is told there is no key
+(`GET /api/v1/push-subscriptions/webpush-key` answers 404) and leaves the
+switch out, and browser deliveries stay `pending`.
+
+A browser subscription's endpoint is a URL this server POSTs to, so
+registration accepts only https endpoints on the known push services (Google,
+Mozilla, Apple, Microsoft) and refuses anything else. A subscription the push
+service reports gone (404/410) is marked failed and not tried again.

@@ -10,11 +10,13 @@ package api
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
@@ -22,12 +24,14 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/push"
+	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
 // mountNotifications wires the inbox, settings, subscriptions and the manual
 // credit-expiry trigger. The service is shared with the registry hooks that
-// fire on check-in and on a new announcement.
-func mountNotifications(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
+// fire on check-in and on a new announcement. webpushKey is the VAPID public
+// key browsers subscribe with; empty while browser push is not set up.
+func mountNotifications(mux *http.ServeMux, d *sql.DB, svc *notify.Service, webpushKey string) {
 	mux.HandleFunc("GET /api/v1/notifications", handleListNotifications(d))
 	mux.HandleFunc("POST /api/v1/notifications/{id}/read", handleMarkRead(d))
 	mux.HandleFunc("POST /api/v1/notifications/read-all", handleMarkAllRead(d))
@@ -35,6 +39,7 @@ func mountNotifications(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("GET /api/v1/notification-settings", handleGetSettings(d))
 	mux.HandleFunc("PUT /api/v1/notification-settings", handlePutSettings(d))
 
+	mux.HandleFunc("GET /api/v1/push-subscriptions/webpush-key", handleWebPushKey(d, webpushKey))
 	mux.HandleFunc("POST /api/v1/push-subscriptions", handleRegisterPush(d))
 	mux.HandleFunc("DELETE /api/v1/push-subscriptions", handleUnregisterPush(d))
 
@@ -243,8 +248,16 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 		// A phone registers an Expo push token and nothing else: that is the
 		// only kind the sender can deliver to, and the column is not a place
 		// to park whatever a client sends.
-		if len(in.Endpoint) > 512 || (in.Channel == notify.ChannelMobile && !push.IsExpoToken(in.Endpoint)) {
+		if in.Channel == notify.ChannelMobile && (len(in.Endpoint) > 512 || !push.IsExpoToken(in.Endpoint)) {
 			httpx.Error(w, http.StatusBadRequest, "that is not a push token this server can use", nil)
+			return
+		}
+		// A browser's endpoint is a URL this server will POST to, so it has to
+		// be a real push service's — never an address of the caller's choosing
+		// — and come with the two keys a message is encrypted with.
+		if in.Channel == notify.ChannelWebPush &&
+			(len(in.Endpoint) > 2048 || !webpush.AllowedEndpoint(in.Endpoint) || !keyOfLength(in.P256dh, 65) || !keyOfLength(in.Auth, 16)) {
+			httpx.Error(w, http.StatusBadRequest, "that is not a browser subscription this server can use", nil)
 			return
 		}
 		// endpoint is UNIQUE: the same browser re-registering updates its owner
@@ -263,6 +276,29 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		httpx.JSON(w, http.StatusCreated, map[string]any{"registered": true})
+	}
+}
+
+// keyOfLength reports whether s is base64url (padded or not) for exactly n
+// bytes — a subscription's p256dh is a 65-byte P-256 point, its auth 16 bytes.
+func keyOfLength(s string, n int) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+	return err == nil && len(raw) == n
+}
+
+// handleWebPushKey hands a signed-in browser the public key it subscribes
+// with. 404 while browser push is not set up, so the portal can leave the
+// switch out rather than offer one that cannot work.
+func handleWebPushKey(d *sql.DB, key string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireIdentity(d, w, r) == nil {
+			return
+		}
+		if key == "" {
+			httpx.Error(w, http.StatusNotFound, "browser notifications are not set up", nil)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"publicKey": key})
 	}
 }
 

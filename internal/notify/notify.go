@@ -25,6 +25,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/push"
+	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
 // Channels a notification can go out over.
@@ -111,6 +112,9 @@ type Service struct {
 	// push delivers to phones. Nil leaves phone deliveries pending, which is
 	// what they were before there was a sender.
 	push Pusher
+	// webpush delivers to browsers. Nil — no VAPID keys — leaves browser
+	// deliveries pending.
+	webpush WebPusher
 }
 
 // Pusher hands phone notifications to a push service and says, per message,
@@ -121,6 +125,19 @@ type Pusher interface {
 
 // SetPush turns phone delivery on.
 func (s *Service) SetPush(p Pusher) { s.push = p }
+
+// WebPusher hands one notification to one browser's push service.
+// *webpush.Client is the real one.
+type WebPusher interface {
+	Send(ctx context.Context, sub webpush.Subscription, payload []byte) webpush.Result
+}
+
+// SetWebPush turns browser delivery on. A nil client (no keys) leaves it off.
+func (s *Service) SetWebPush(c *webpush.Client) {
+	if c != nil {
+		s.webpush = c
+	}
+}
 
 // AppURL is the parent portal's address, for links in an email to somebody
 // with no account. Empty when it is not configured.
@@ -169,7 +186,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		email                              mail.Email
 	}
 	var emails []emailJob
-	var phones []pushJob
+	var phones, browsers []pushJob
 
 	for _, uid := range recipients {
 		if !prefEnabled(tx, uid, msg.Type, ChannelInApp) {
@@ -218,8 +235,10 @@ func (s *Service) Send(recipients []string, msg Message) error {
 					// Sent after the commit, like email; the row stays
 					// 'pending' until Expo has answered.
 					phones = append(phones, pushJob{deliveryID, uid, notifID, msg.Type, title, body, msg.Data})
+				} else if ch == ChannelWebPush && s.webpush != nil {
+					browsers = append(browsers, pushJob{deliveryID, uid, notifID, msg.Type, title, body, msg.Data})
 				}
-				// Browser push has no sender yet, so it stays 'pending'.
+				// Without a sender for the channel the row stays 'pending'.
 			}
 			if err := insertDelivery(tx, deliveryID, notifID, ch, status); err != nil {
 				return err
@@ -241,6 +260,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		s.markDelivery(j.deliveryID, "sent", "")
 	}
 	s.sendToPhones(phones)
+	s.sendToBrowsers(browsers)
 	return nil
 }
 
@@ -316,6 +336,64 @@ func (s *Service) sendToPhones(jobs []pushJob) {
 		default:
 			// Registered, but no token this sender can reach.
 			s.markDelivery(j.deliveryID, "failed", "no Expo push token")
+		}
+	}
+}
+
+// sendToBrowsers delivers each job to every browser its person switched
+// notifications on in, one request per browser — Web Push has no batching. A
+// delivery is 'sent' if it reached at least one of them. A browser whose push
+// service says the subscription is gone (notifications turned off there, site
+// data cleared) is marked failed, so it is not tried again.
+func (s *Service) sendToBrowsers(jobs []pushJob) {
+	if len(jobs) == 0 || s.webpush == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, j := range jobs {
+		rows, err := s.db.Query(
+			`SELECT push_subscription_id, endpoint, COALESCE(p256dh,''), COALESCE(auth,'') FROM push_subscription
+			  WHERE user_account_id = ? AND channel = ? AND failed_at IS NULL`, j.uid, ChannelWebPush)
+		if err != nil {
+			continue
+		}
+		type target struct {
+			id  string
+			sub webpush.Subscription
+		}
+		var targets []target
+		for rows.Next() {
+			var t target
+			if rows.Scan(&t.id, &t.sub.Endpoint, &t.sub.P256dh, &t.sub.Auth) == nil && t.sub.P256dh != "" && t.sub.Auth != "" {
+				targets = append(targets, t)
+			}
+		}
+		rows.Close()
+
+		data := map[string]any{"notificationId": j.notifID, "type": j.typ}
+		for k, v := range j.data {
+			data[k] = v
+		}
+		payload, _ := json.Marshal(map[string]any{"title": j.title, "body": j.body, "data": data})
+
+		reached, reason := false, "no browser subscription with keys"
+		for _, t := range targets {
+			r := s.webpush.Send(ctx, t.sub, payload)
+			if r.OK {
+				reached = true
+				continue
+			}
+			reason = r.Error
+			if r.Gone {
+				s.db.Exec(`UPDATE push_subscription SET failed_at = datetime('now')
+				            WHERE push_subscription_id = ?`, t.id)
+			}
+		}
+		if reached {
+			s.markDelivery(j.deliveryID, "sent", "")
+		} else {
+			s.markDelivery(j.deliveryID, "failed", reason)
 		}
 	}
 }
