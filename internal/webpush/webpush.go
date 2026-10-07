@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"strings"
@@ -37,8 +38,25 @@ func FromEnv() Config {
 	return Config{
 		PublicKey:  strings.TrimSpace(os.Getenv("WEBPUSH_VAPID_PUBLIC_KEY")),
 		PrivateKey: strings.TrimSpace(os.Getenv("WEBPUSH_VAPID_PRIVATE_KEY")),
-		Subject:    strings.TrimSpace(os.Getenv("WEBPUSH_SUBJECT")),
+		Subject:    contact(os.Getenv("WEBPUSH_SUBJECT"), os.Getenv("MAIL_FROM"), os.Getenv("APP_URL")),
 	}
+}
+
+// contact picks the subject: WEBPUSH_SUBJECT when it is set; otherwise the
+// address the academy's emails come from (MAIL_FROM, as on a password-reset
+// email), so a push service writes to the same inbox; otherwise the portal's
+// https address (APP_URL). Empty when none of them will do.
+func contact(explicit, mailFrom, appURL string) string {
+	if v := strings.TrimSpace(explicit); v != "" {
+		return v
+	}
+	if a, err := mail.ParseAddress(strings.TrimSpace(mailFrom)); err == nil {
+		return a.Address
+	}
+	if v := strings.TrimSuffix(strings.TrimSpace(appURL), "/"); strings.HasPrefix(v, "https://") {
+		return v
+	}
+	return ""
 }
 
 // Configured reports whether browser push can be switched on: both keys and a

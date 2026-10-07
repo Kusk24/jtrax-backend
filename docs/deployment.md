@@ -234,12 +234,13 @@ Two behaviours worth knowing when reading the code:
 
 A parent can switch notifications on for a browser in the portal's Settings;
 each one the inbox gets is then also sent through that browser's push service
-(Web Push, `internal/webpush`). It needs one key pair per deployment:
+(Web Push, `internal/webpush`). It needs one key pair per deployment, as plain
+`NAME=value` lines in the server's `.env` like every other variable:
 
 | Variable | Notes |
 |---|---|
 | `WEBPUSH_VAPID_PUBLIC_KEY` / `WEBPUSH_VAPID_PRIVATE_KEY` | from `go run ./cmd/vapidkeys`; never committed. Changing them strands every existing subscription — browsers have to switch notifications on again |
-| `WEBPUSH_SUBJECT` | how a push service contacts whoever runs the server: an email address or an `https://` URL. Apple refuses pushes without one |
+| `WEBPUSH_SUBJECT` | optional: how a push service contacts whoever runs the server, an email address or an `https://` URL. Unset, it is `MAIL_FROM` (the address the academy's emails come from), then `APP_URL`. Apple refuses pushes with none |
 
 **Leaving them unset is not an error.** The portal is told there is no key
 (`GET /api/v1/push-subscriptions/webpush-key` answers 404) and leaves the
