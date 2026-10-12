@@ -55,6 +55,9 @@ func TestEditAndVoidAPayment(t *testing.T) {
 	if status, _, _ := admin.do("POST", void, map[string]any{}); status != 400 {
 		t.Fatalf("no reason: want 400, got %d", status)
 	}
+	if status, _, _ := admin.do("POST", void, map[string]any{"reason": "incorrect_amount"}); status != 400 {
+		t.Fatalf("a reason no longer offered: want 400, got %d", status)
+	}
 	if status, _, _ := admin.do("POST", void, map[string]any{"reason": "other", "note": "  "}); status != 400 {
 		t.Fatalf("other with no words: want 400, got %d", status)
 	}
@@ -114,7 +117,7 @@ func TestVoidKeepsAnEnrolmentWithHistory(t *testing.T) {
 		t.Fatalf("payment: %d %v", status, pay)
 	}
 	if status, body, _ := admin.do("POST", "/api/v1/payments/"+pay["payment_id"].(string)+"/void",
-		map[string]any{"reason": "incorrect_amount"}); status != 200 {
+		map[string]any{"reason": "duplicate"}); status != 200 {
 		t.Fatalf("void: %d %v", status, body)
 	}
 	_, e, _ := admin.do("GET", "/api/v1/enrollments/enr_penny", nil)

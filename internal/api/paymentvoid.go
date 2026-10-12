@@ -23,7 +23,7 @@ import (
 )
 
 // voidReasons are the reasons a payment can be voided for.
-var voidReasons = []string{"incorrect_amount", "duplicate", "wrong_payer", "other"}
+var voidReasons = []string{"duplicate", "wrong_payer", "other"}
 
 // minVoidNote is the shortest explanation accepted for "other".
 const minVoidNote = 5
