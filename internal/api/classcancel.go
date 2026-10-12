@@ -178,6 +178,7 @@ func announceCancellation(d *sql.DB, svc *notify.Service, sessionID string, stud
 			},
 			Data:      map[string]any{"studentId": sid, "sessionId": sessionID, "date": day},
 			DedupeKey: "class_cancelled:" + sessionID + ":" + sid,
+			InAppOnly: true,
 		}); err == nil {
 			sent++
 		}

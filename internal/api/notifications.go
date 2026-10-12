@@ -562,6 +562,7 @@ func attendanceHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[strin
 				Body:      notify.Text{EN: name + " has arrived for class.", TH: name + " มาถึงคลาสแล้ว"},
 				Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 				DedupeKey: "checkin:" + attID,
+				InAppOnly: true,
 			})
 		}
 	}
@@ -710,6 +711,7 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 			Body:      notify.Text{EN: name + " has left class.", TH: name + " ออกจากคลาสแล้ว"},
 			Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 			DedupeKey: "checkout:" + attID,
+			InAppOnly: true,
 		})
 		return
 	}
@@ -730,6 +732,7 @@ func sendCheckoutNotifications(d *sql.DB, svc *notify.Service, recipients []stri
 		},
 		Data:      map[string]any{"studentId": studentID, "attendanceId": attID},
 		DedupeKey: "credit_deducted:" + attID,
+		InAppOnly: true,
 	})
 }
 

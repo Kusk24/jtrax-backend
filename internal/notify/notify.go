@@ -91,8 +91,9 @@ type Message struct {
 	// rest — so a receipt's figures are not written out twice.
 	EmailIntro Text
 	// InAppOnly keeps the message to the bell in the portal: no email, no
-	// push, whatever the person's channel settings — the academy's rule for
-	// credit reminders.
+	// push, whatever the person's channel settings. The academy's rule: only
+	// payment receipts and announcements reach a parent's inbox; check-in,
+	// check-out, credits used, class cancelled and credit reminders stay here.
 	InAppOnly bool
 }
 

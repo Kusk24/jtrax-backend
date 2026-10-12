@@ -85,19 +85,19 @@ func browserDelivery(t *testing.T, d *sql.DB, typ string) string {
 	return status
 }
 
-func TestACheckInIsPushedToTheParentsBrowser(t *testing.T) {
+func TestAnAnnouncementIsPushedToTheParentsBrowser(t *testing.T) {
 	withBrowserPush(t)
 	pushSvc, calls := fakePushService(t, http.StatusCreated)
 	d := newDB(t)
 	srv := newServerOn(t, d)
 	subscribeBrowser(t, d, pushSvc.URL+"/fcm/send/sandy")
 
-	checkInPenny(t, srv)
+	announceToAll(t, srv)
 
 	if n := calls(); n != 1 {
 		t.Fatalf("pushes to the browser: %d, want 1", n)
 	}
-	if got := browserDelivery(t, d, "check_in"); got != "sent" {
+	if got := browserDelivery(t, d, "announcement"); got != "sent" {
 		t.Fatalf("browser delivery: %q, want sent", got)
 	}
 }
@@ -111,8 +111,8 @@ func TestABrowserThatIsGoneIsNotTriedAgain(t *testing.T) {
 	srv := newServerOn(t, d)
 	subscribeBrowser(t, d, pushSvc.URL+"/fcm/send/old")
 
-	checkInPenny(t, srv)
-	if got := browserDelivery(t, d, "check_in"); got != "failed" {
+	announceToAll(t, srv)
+	if got := browserDelivery(t, d, "announcement"); got != "failed" {
 		t.Fatalf("browser delivery to a dropped subscription: %q, want failed", got)
 	}
 	var failedAt sql.NullString
@@ -140,11 +140,11 @@ func TestWithoutKeysABrowserDeliveryWaits(t *testing.T) {
 	srv := newServerOn(t, d)
 	subscribeBrowser(t, d, pushSvc.URL+"/fcm/send/sandy")
 
-	checkInPenny(t, srv)
+	announceToAll(t, srv)
 	if n := calls(); n != 0 {
 		t.Fatalf("pushed without keys: %d", n)
 	}
-	if got := browserDelivery(t, d, "check_in"); got != "pending" {
+	if got := browserDelivery(t, d, "announcement"); got != "pending" {
 		t.Fatalf("browser delivery: %q, want pending", got)
 	}
 }

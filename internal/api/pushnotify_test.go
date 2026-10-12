@@ -74,6 +74,19 @@ func checkInPenny(t *testing.T, srv *httptest.Server) {
 	}
 }
 
+// announceToAll posts an announcement to every parent — the kind of notice that
+// still goes out by push (a check-in stays in the portal's bell).
+func announceToAll(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	if status, obj, _ := admin.do("POST", "/api/v1/announcements", map[string]any{
+		"title": "Holiday", "body": "No class on Monday.", "author_user_account_id": "usr_admin1",
+	}); status != 201 {
+		t.Fatalf("announcement: %d %v", status, obj)
+	}
+}
+
 func deliveryStatus(t *testing.T, d *sql.DB, typ string) string {
 	t.Helper()
 	var status string
@@ -84,7 +97,7 @@ func deliveryStatus(t *testing.T, d *sql.DB, typ string) string {
 	return status
 }
 
-func TestACheckInIsPushedToTheParentsPhone(t *testing.T) {
+func TestAnAnnouncementIsPushedToTheParentsPhone(t *testing.T) {
 	expo := fakeExpo(t)
 	d := newDB(t)
 	srv := newServerOn(t, d)
@@ -92,17 +105,17 @@ func TestACheckInIsPushedToTheParentsPhone(t *testing.T) {
 	sandy.login("sandy01234@gmail.com")
 	registerPhone(t, sandy, "ExponentPushToken[sandy-phone]")
 
-	checkInPenny(t, srv)
+	announceToAll(t, srv)
 
 	sent := expo.all()
 	if len(sent) != 1 || sent[0]["to"] != "ExponentPushToken[sandy-phone]" {
 		t.Fatalf("push sent: %v", sent)
 	}
 	data, _ := sent[0]["data"].(map[string]any)
-	if data["type"] != "check_in" || data["studentId"] != "stu_penny" || data["notificationId"] == nil {
+	if data["type"] != "announcement" || data["notificationId"] == nil {
 		t.Fatalf("the push should carry what the app needs to open the right screen: %v", data)
 	}
-	if got := deliveryStatus(t, d, "check_in"); got != "sent" {
+	if got := deliveryStatus(t, d, "announcement"); got != "sent" {
 		t.Fatalf("mobile delivery: %q, want sent", got)
 	}
 }
@@ -117,8 +130,8 @@ func TestAPhoneThatIsGoneIsNotTriedAgain(t *testing.T) {
 	sandy.login("sandy01234@gmail.com")
 	registerPhone(t, sandy, "ExponentPushToken[old-phone]")
 
-	checkInPenny(t, srv)
-	if got := deliveryStatus(t, d, "check_in"); got != "failed" {
+	announceToAll(t, srv)
+	if got := deliveryStatus(t, d, "announcement"); got != "failed" {
 		t.Fatalf("mobile delivery to a removed app: %q, want failed", got)
 	}
 	var failedAt sql.NullString
@@ -135,7 +148,7 @@ func TestAPhoneThatIsGoneIsNotTriedAgain(t *testing.T) {
 		t.Fatalf("announcement: %d %v", status, obj)
 	}
 	// It did go out — to the inbox — just not to the removed phone.
-	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 1 {
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 2 {
 		t.Fatalf("announcement inbox: %d", got)
 	}
 	if n := len(expo.all()); n != 1 {
@@ -183,5 +196,32 @@ func TestOnlyAnExpoTokenIsAcceptedFromAPhone(t *testing.T) {
 		"channel": "mobile", "endpoint": "ExponentPushToken[x]",
 	}); status != 401 {
 		t.Errorf("anonymous registration: want 401, got %d", status)
+	}
+}
+
+// Class notices — check-in, check-out, credits used, class cancelled — stay
+// in the portal's bell: no push, no email, though the phone is registered.
+func TestACheckInStaysInTheBell(t *testing.T) {
+	expo := fakeExpo(t)
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	sandy := &client{t: t, srv: srv}
+	sandy.login("sandy01234@gmail.com")
+	registerPhone(t, sandy, "ExponentPushToken[sandy-phone]")
+
+	checkInPenny(t, srv)
+
+	if sent := expo.all(); len(sent) != 0 {
+		t.Fatalf("a check-in was pushed: %v", sent)
+	}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "check_in"); got != 1 {
+		t.Fatalf("check-in inbox: %d", got)
+	}
+	var other int
+	d.QueryRow(`SELECT COUNT(*) FROM notification_delivery nd
+	              JOIN notification n ON n.notification_id = nd.notification_id
+	             WHERE n.type = 'check_in' AND nd.channel <> 'inapp'`).Scan(&other)
+	if other != 0 {
+		t.Fatalf("check-in deliveries beyond the bell: %d", other)
 	}
 }
