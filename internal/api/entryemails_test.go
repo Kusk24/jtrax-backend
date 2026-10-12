@@ -141,27 +141,55 @@ func TestPayNowThatSucceedsGetsOneEmailRegistrationConfirmed(t *testing.T) {
 	}
 }
 
+// enteredAt moves an entry's registration to `when`, so a test can set the
+// timer's hour without depending on the hour it runs at.
+func (f *payFixture) enteredAt(regID string, when time.Time) {
+	f.d.Exec(`UPDATE tournament_registration SET registered_at = ? WHERE tournament_registration_id = ?`,
+		when.UTC().Format("2006-01-02 15:04:05"), regID)
+}
+
 func TestPayNowThatIsAbandonedIsToldThePaymentDidNotComplete(t *testing.T) {
 	f := publicPayServer(t, true)
 	id, _ := f.registerChoosing(t, "somchai@example.com", "now")
+	entered := at(1, 10)
+	f.enteredAt(id, entered)
 
 	// Not yet: the Stripe page could still be open.
-	f.notices(t, time.Now())
+	f.notices(t, entered)
 	if f.count("Registration Reserved") != 0 {
 		t.Fatal("the failed-payment notice went before the page could have closed")
 	}
 	// Half an hour on with no payment: the place is held, the fee owed.
-	f.notices(t, time.Now().Add(32*time.Minute))
+	f.notices(t, entered.Add(32*time.Minute))
 	_, body := f.waitForSubject(t, "Registration Reserved — Payment Required")
 	if !strings.Contains(body, "We were unable to complete your online payment") {
 		t.Fatalf("should say why it was sent:\n%s", body)
 	}
-	f.notices(t, time.Now().Add(40*time.Minute))
+	f.notices(t, entered.Add(40*time.Minute))
 	if n := f.count("Registration Reserved"); n != 1 {
 		t.Fatalf("failed-payment notice sent %d times", n)
 	}
 	if got := f.paymentStatus(t, id); got != "Pending" {
 		t.Fatalf("a failed payment leaves the fee %q, want Pending", got)
+	}
+}
+
+// A payment that fails in the night is told at 09:00, not at 02:32.
+func TestAPaymentThatFailsInTheNightIsToldAtNine(t *testing.T) {
+	f := publicPayServer(t, true)
+	id, _ := f.registerChoosing(t, "somchai@example.com", "now")
+	f.enteredAt(id, at(1, 2))
+
+	f.notices(t, at(1, 2).Add(32*time.Minute))
+	f.notices(t, at(1, 8))
+	if n := f.count("Registration Reserved"); n != 0 {
+		t.Fatalf("emailed in the night: %v", f.subjects())
+	}
+	f.notices(t, at(1, 9))
+	f.waitForSubject(t, "Registration Reserved — Payment Required")
+	f.notices(t, at(1, 10))
+	if n := f.count("Registration Reserved"); n != 1 {
+		t.Fatalf("failed-payment notice sent %d times", n)
 	}
 }
 
@@ -223,8 +251,19 @@ func TestAPlaceUnpaidAtClosingIsCancelledItsFeeCancelledAndTheFamilyTold(t *test
 	f.d.Exec(`UPDATE tournament_registration SET registered_at = ? WHERE tournament_registration_id = ?`, day(-5)+" 03:00:00", id)
 	f.d.Exec(`UPDATE tournament SET registration_deadline = ? WHERE tournament_id = ?`, day(-1), f.tourID)
 
-	f.notices(t, time.Now())
-	f.notices(t, time.Now().Add(10*time.Minute))
+	// Closing is at midnight: the place is released and its Stripe page
+	// closed at once, but the family is not written to in the night.
+	f.notices(t, at(0, 3))
+	if n := f.count("Registration Cancelled"); n != 0 {
+		t.Fatalf("emailed in the night: %v", f.subjects())
+	}
+	var open string
+	f.d.QueryRow(`SELECT COALESCE(stripe_session_id,'') FROM payment WHERE tournament_registration_id = ?`, id).Scan(&open)
+	if open != "" {
+		t.Fatal("the released place's Stripe page waited for the morning")
+	}
+	f.notices(t, at(0, 9))
+	f.notices(t, at(0, 9).Add(10*time.Minute))
 	_, body := f.waitForSubject(t, "Registration Cancelled — Somchai Niran — JCA Open")
 	if !strings.Contains(body, "Payment status: Cancelled") || !strings.Contains(body, "has been released") {
 		t.Fatalf("cancellation should say the fee was cancelled and the place went:\n%s", body)

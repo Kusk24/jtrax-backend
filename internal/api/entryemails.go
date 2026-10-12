@@ -299,9 +299,18 @@ func claim(d *sql.DB, column, regID string) bool {
 // few minutes more is not noticed.
 const noticeEvery = 5 * time.Minute
 
-// reminderHour is the academy hour from which a reminder may go: the day
-// before closing, but not at midnight.
+// reminderHour is the academy hour from which a timed email may go. Every
+// email a timer sends — the payment reminder, a failed payment, a released
+// place, the arrival question — waits for it, so nobody is written to in the
+// night; one that fell due overnight goes at 09:00. The work behind it (a
+// place released, a Stripe page closed) is not held back, only the email.
 const reminderHour = 9
+
+// emailHours says whether `now` is late enough in the academy's day for a
+// timed email.
+func emailHours(now time.Time) bool {
+	return now.In(academytime.Location()).Hour() >= reminderHour
+}
 
 // StartEntryNotices runs RunEntryNotices on a timer until ctx ends. Started
 // by the server, not by NewHandler, so tests control when it runs.
@@ -329,13 +338,14 @@ func RunEntryNotices(ctx context.Context, d *sql.DB, client *stripepay.Client, s
 	if err := sweepUnpaidEntries(d, day); err != nil {
 		log.Printf("entry notices: %v", err)
 	}
-	if err := noticeFailedPayments(ctx, d, client, svc, now); err != nil {
+	daytime := emailHours(now)
+	if err := noticeFailedPayments(ctx, d, client, svc, now, daytime); err != nil {
 		log.Printf("entry notices: failed payments: %v", err)
 	}
-	if err := noticeCancellations(ctx, d, client, svc); err != nil {
+	if err := noticeCancellations(ctx, d, client, svc, daytime); err != nil {
 		log.Printf("entry notices: cancellations: %v", err)
 	}
-	if now.In(academytime.Location()).Hour() >= reminderHour {
+	if daytime {
 		if err := noticeReminders(d, client, svc, day); err != nil {
 			log.Printf("entry notices: reminders: %v", err)
 		}
@@ -364,7 +374,7 @@ func ids(d *sql.DB, query string, args ...any) ([]string, error) {
 // noticeFailedPayments tells a "pay now" family whose payment did not go
 // through that the place is held and the fee still owed — once the Stripe
 // page has closed unpaid, or half an hour on if it never opened.
-func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Client, svc *notify.Service, now time.Time) error {
+func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Client, svc *notify.Service, now time.Time, daytime bool) error {
 	cutoff := now.UTC().Add(-checkoutWindow).Format(sqliteTimeLayout)
 	list, err := ids(d, `
 		SELECT r.tournament_registration_id FROM tournament_registration r
@@ -387,7 +397,9 @@ func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Clie
 				continue
 			}
 		}
-		if claim(d, "reserved_emailed_at", regID) {
+		// Before 09:00 the entry is left unclaimed, and the next pass after
+		// it sends the email.
+		if daytime && claim(d, "reserved_emailed_at", regID) {
 			sendEntryNotice(d, svc, regID, noticePaymentFailed, client != nil)
 		}
 	}
@@ -396,7 +408,7 @@ func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Clie
 
 // noticeCancellations closes the Stripe page of every released place, so it
 // can no longer take money, and tells the family the place has gone.
-func noticeCancellations(ctx context.Context, d *sql.DB, client *stripepay.Client, svc *notify.Service) error {
+func noticeCancellations(ctx context.Context, d *sql.DB, client *stripepay.Client, svc *notify.Service, daytime bool) error {
 	list, err := ids(d, `
 		SELECT r.tournament_registration_id FROM tournament_registration r
 		 WHERE r.status = 'Withdrawn' AND r.released_at IS NOT NULL
@@ -417,7 +429,9 @@ func noticeCancellations(ctx context.Context, d *sql.DB, client *stripepay.Clien
 			d.Exec(`UPDATE payment SET stripe_session_id = NULL, stripe_checkout_url = NULL
 			         WHERE tournament_registration_id = ? AND status = 'Cancelled'`, regID)
 		}
-		if claim(d, "cancelled_emailed_at", regID) {
+		// The page is closed at once, whatever the hour; the email waits
+		// for 09:00.
+		if daytime && claim(d, "cancelled_emailed_at", regID) {
 			sendEntryNotice(d, svc, regID, noticeCancelled, client != nil)
 		}
 	}
