@@ -347,8 +347,9 @@ func Registry() []*Resource {
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",
 			// A payment is the record of money taken; it is corrected, never
 			// removed, so the history a family and the books see stays whole.
-			NoDelete:   "payments can't be deleted — edit the payment instead",
-			AfterWrite: releaseCancelledEntry,
+			NoDelete:     "payments can't be deleted — edit or void the payment instead",
+			AfterWrite:   releaseCancelledEntry,
+			BeforeUpdate: auditPaymentEdit,
 			Cols: []Col{
 				// Not required: a payment outlives the student it was taken
 				// for, and a detached one carries the names below instead.
@@ -374,6 +375,11 @@ func Registry() []*Resource {
 				// credit package. The portal reads it to tell a family which
 				// of their registrations is still owed for.
 				{Name: "tournament_registration_id", Kind: "text"},
+			},
+			// Shown, never written here: voiding is its own act (paymentvoid.go).
+			Derived: []Derived{
+				{Name: "voided_at", Expr: "payment.voided_at", Roles: []string{"Parent", "Student"}},
+				{Name: "void_reason", Expr: "payment.void_reason"},
 			},
 			ReadRoles: []string{"Parent", "Student"},
 			Scope: map[string]ScopeFn{

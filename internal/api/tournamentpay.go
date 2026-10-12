@@ -72,7 +72,7 @@ func handleRegistrationStripeLink(d *sql.DB, client *stripepay.Client, cfg strip
 			SELECT r.student_id, r.participant_name, r.status,
 			       COALESCE(r.fee_charged, r.fee_quoted), t.name,
 			       (SELECT p.payment_id FROM payment p
-			         WHERE p.tournament_registration_id = r.tournament_registration_id)
+			         WHERE p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided')
 			  FROM tournament_registration r
 			  JOIN tournament t ON t.tournament_id = r.tournament_id
 			 WHERE r.tournament_registration_id = ?
@@ -144,7 +144,7 @@ func createTournamentPayment(d *sql.DB, regID string, studentID sql.NullString, 
 	}
 	var existing string
 	if e := d.QueryRow(
-		`SELECT payment_id FROM payment WHERE tournament_registration_id = ?`, regID).
+		`SELECT payment_id FROM payment WHERE tournament_registration_id = ? AND status <> 'Voided'`, regID).
 		Scan(&existing); e != nil {
 		return "", e
 	}
@@ -234,7 +234,7 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			       p.payment_id, p.status
 			  FROM tournament_registration r
 			  JOIN tournament t ON t.tournament_id = r.tournament_id
-			  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id
+			  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided'
 			 WHERE r.tournament_registration_id = ?`, regID).
 			Scan(&studentID, &participantName, &status, &fee, &tournamentName,
 				&existingPayment, &existingStatus)
@@ -440,7 +440,7 @@ func syncRegistrationPayment(tx *sql.Tx, regID string) error {
 	err := tx.QueryRow(`
 		SELECT COALESCE(r.fee_charged, r.fee_quoted), p.payment_id, p.status, p.final_amount
 		  FROM tournament_registration r
-		  JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id
+		  JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided'
 		 WHERE r.tournament_registration_id = ?`, regID).Scan(&fee, &paymentID, &status, &paid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil

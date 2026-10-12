@@ -53,7 +53,7 @@ func StartEntrySweeper(ctx context.Context, d *sql.DB) {
 // nothing recorded, a Pending one, or one Cancelled when its place went.
 const unpaid = `NOT EXISTS (SELECT 1 FROM payment p
 	                  WHERE p.tournament_registration_id = r.tournament_registration_id
-	                    AND p.status NOT IN ('Pending','Cancelled'))`
+	                    AND p.status NOT IN ('Pending','Cancelled','Voided'))`
 
 // sweepUnpaidEntries applies the two rules as they stand on `day`.
 func sweepUnpaidEntries(d *sql.DB, day string) error {

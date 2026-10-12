@@ -174,7 +174,7 @@ func findPublicEntry(d *sql.DB, regID, code string) (*publicEntry, error) {
 		  FROM tournament_registration r
 		  JOIN tournament t ON t.tournament_id = r.tournament_id
 		  LEFT JOIN tournament_category c ON c.tournament_category_id = r.tournament_category_id
-		  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id
+		  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided'
 		 WHERE r.tournament_registration_id = ?`, regID).
 		Scan(&e.TournamentID, &e.TournamentName, &e.ParticipantName, &e.Category,
 			&e.Fee, &e.status, &e.studentID, &stored, &e.paymentID, &e.paymentStatus)

@@ -90,6 +90,10 @@ type Resource struct {
 	AfterInsert func(tx *sql.Tx, rowID string) error
 	// BeforeDelete undoes what AfterWrite wrote, in the delete's transaction.
 	BeforeDelete func(tx *sql.Tx, rowID string) error
+	// BeforeUpdate runs in the update's transaction before the row changes,
+	// with the row as it was and the fields being written — to refuse the
+	// edit (a *ClientError), or to record it.
+	BeforeUpdate func(tx *sql.Tx, caller *auth.Identity, rowID string, existing, patch map[string]any) error
 	// Duplicate, when set, names a uniqueness refusal in words: given the
 	// database's error, it returns what to tell the person, or "" when the
 	// error is not one it knows. Answered with 409 instead of a generic 400.
@@ -482,15 +486,23 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 		}
 		args = append(args, r.PathValue("id"))
 		query := "UPDATE " + rs.Table + " SET " + strings.Join(sets, ", ") + " WHERE " + rs.IDCol + " = ?"
-		if rs.AfterWrite == nil {
+		if rs.AfterWrite == nil && rs.BeforeUpdate == nil {
 			_, err = d.Exec(query, args...)
 		} else {
 			/* Re-run rather than adjust: moving a student to a longer class has
 			   to change what the afternoon cost, and the hook works that out
 			   from the row as it now stands. */
 			err = inTx(d, func(tx *sql.Tx) error {
+				if rs.BeforeUpdate != nil {
+					if e := rs.BeforeUpdate(tx, id, r.PathValue("id"), existing, patch); e != nil {
+						return e
+					}
+				}
 				if _, e := tx.Exec(query, args...); e != nil {
 					return e
+				}
+				if rs.AfterWrite == nil {
+					return nil
 				}
 				return rs.AfterWrite(tx, r.PathValue("id"))
 			})

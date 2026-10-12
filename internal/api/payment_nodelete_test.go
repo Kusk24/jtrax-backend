@@ -17,7 +17,7 @@ func TestPaymentCannotBeDeleted(t *testing.T) {
 	id, _ := created["payment_id"].(string)
 
 	status, obj, _ := c.do("DELETE", "/api/v1/payments/"+id, nil)
-	if status != 405 || obj["error"] != "payments can't be deleted — edit the payment instead" {
+	if status != 405 || obj["error"] != "payments can't be deleted — edit or void the payment instead" {
 		t.Errorf("delete: status %d, %v; want 405 with the reason", status, obj)
 	}
 	if status, _, _ := c.do("GET", "/api/v1/payments/"+id, nil); status != 200 {
