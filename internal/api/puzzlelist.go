@@ -130,6 +130,10 @@ func refreshList(d *sql.DB, lc *lichess.Client, studentID string) error {
 	if err != nil {
 		return err
 	}
+	mix := listMix(own)
+	if err := rebalanceList(d, studentID, mix); err != nil {
+		return err
+	}
 	have := map[string]int{}
 	used := map[int]bool{}
 	rows, err := d.Query(`SELECT tier, position FROM puzzle_list WHERE student_id = ?`, studentID)
@@ -191,7 +195,6 @@ func refreshList(d *sql.DB, lc *lichess.Client, studentID string) error {
 		}
 		return nil
 	}
-	mix := listMix(own)
 	for _, name := range tierOrder {
 		if want := mix[name] - have[name]; want > 0 {
 			if err := take(name, want); err != nil {
@@ -228,6 +231,30 @@ func refreshList(d *sql.DB, lc *lichess.Client, studentID string) error {
 		if _, err := d.Exec(`INSERT OR IGNORE INTO puzzle_list (student_id, puzzle_id, position, tier, added_on)
 		                     VALUES (?, ?, ?, ?, ?)`, studentID, p.id, pos, p.tier, day); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// rebalanceList takes out untouched puzzles (not opened, not solved) from a
+// level that has more than its share, so a level the office changes today
+// reshapes the list today; refreshList then fills the gaps at the right
+// levels. Puzzles a child has started stay where they are.
+func rebalanceList(d *sql.DB, studentID string, mix map[string]int) error {
+	for _, name := range tierOrder {
+		var n int
+		if err := d.QueryRow(`SELECT COUNT(*) FROM puzzle_list WHERE student_id = ? AND tier = ?`,
+			studentID, name).Scan(&n); err != nil {
+			return err
+		}
+		if extra := n - mix[name]; extra > 0 {
+			if _, err := d.Exec(`
+				DELETE FROM puzzle_list WHERE rowid IN (
+				  SELECT rowid FROM puzzle_list
+				   WHERE student_id = ? AND tier = ? AND solved_on IS NULL AND opened_at IS NULL
+				   ORDER BY position DESC LIMIT ?)`, studentID, name, extra); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
