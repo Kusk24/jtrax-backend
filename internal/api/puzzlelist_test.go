@@ -212,3 +212,46 @@ func puzzlesSolved(t *testing.T, c *client) float64 {
 	n, _ := body["puzzlesSolved"].(float64)
 	return n
 }
+
+// A level the office changes today reshapes the list today: untouched puzzles
+// from the old level make way, and one the pupil has opened stays.
+func TestTheListFollowsALevelChangeTheSameDay(t *testing.T) {
+	stub := newPuzzleStub(t, 640)
+	t.Setenv("LICHESS_API_BASE", stub.srv.URL)
+	d := newDB(t)
+	setLevel(t, d, "penny@jca.ac.th", "Beginner")
+	c := &client{t: t, srv: newServerOn(t, d)}
+	c.login("penny@jca.ac.th")
+
+	list := puzzleList(t, c)
+	var opened string
+	for _, p := range list {
+		if p["tier"] == "beginner" {
+			opened = p["puzzleId"].(string)
+			break
+		}
+	}
+	if status, _, _ := c.do("POST", "/api/v1/puzzles/list/"+opened+"/open", nil); status != 200 {
+		t.Fatalf("open: %d", status)
+	}
+
+	setLevel(t, d, "penny@jca.ac.th", "Intermediate")
+	stub.rating = 1000 // tops up the Intermediate band
+	after := puzzleList(t, c)
+	if len(after) != 20 {
+		t.Fatalf("want 20 puzzles, got %d", len(after))
+	}
+	n := tierCounts(after)
+	if n["intermediate"] != 13 {
+		t.Fatalf("mix after moving to Intermediate = %v, want 13 intermediate", n)
+	}
+	kept := false
+	for _, p := range after {
+		if p["puzzleId"] == opened {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("the puzzle the pupil had opened should stay")
+	}
+}
