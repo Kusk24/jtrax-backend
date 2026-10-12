@@ -211,6 +211,10 @@ func Registry() []*Resource {
 				// moves with the design. See 0022.
 				{Name: "icon", Kind: "text"},
 				{Name: "level", Kind: "text", Enum: classLevels},
+				// Which certificate its hours count toward — JCA Starters,
+				// Juniors or NXT — whatever the class type; blank for one
+				// outside the three (certificates.go).
+				{Name: "certificate_course", Kind: "text", Enum: certificateCourses},
 				// The usual price of one credit — what a new package or a custom
 				// credit sale starts from; never binding (0067).
 				{Name: "price_per_credit", Kind: "real"},
