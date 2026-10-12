@@ -79,6 +79,9 @@ func main() {
 	// Low-credit and expiring-credit reminders, in-app, once each
 	// (internal/api/creditreminders.go).
 	api.StartCreditReminders(context.Background(), d, notifier)
+	// Announcements scheduled for later tell parents when they start showing
+	// (internal/api/announcementwindow.go).
+	api.StartAnnouncementSchedule(context.Background(), d, notifier)
 
 	port := os.Getenv("PORT")
 	if port == "" {

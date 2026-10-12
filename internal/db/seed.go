@@ -142,14 +142,14 @@ func Seed(d *sql.DB, password string) error {
 			VALUES (?,?,?,?,?,?)`,
 			[]any{"ctx_3", "enr_penny", "consumption", -1, "2026-05-05", "att_1"}},
 
-		{`INSERT INTO announcement (announcement_id, title, body, author_user_account_id, posted_at, has_attachment) VALUES (?,?,?,?,?,?)`,
+		{`INSERT INTO announcement (announcement_id, title, body, author_user_account_id, posted_at, has_attachment, notified_at) VALUES (?,?,?,?,?,?,?)`,
 			[]any{"ann_1", "Class Moved to Room 1B",
 				"Penny's Beginner Chess class on Wed will be held in Room 1B instead of 1A due to maintenance.",
-				"usr_serene", "2026-05-10T08:10:00", 1}},
-		{`INSERT INTO announcement (announcement_id, title, body, author_user_account_id, posted_at, has_attachment) VALUES (?,?,?,?,?,?)`,
+				"usr_serene", "2026-05-10T08:10:00", 1, "2026-05-10T08:10:00"}},
+		{`INSERT INTO announcement (announcement_id, title, body, author_user_account_id, posted_at, has_attachment, notified_at) VALUES (?,?,?,?,?,?,?)`,
 			[]any{"ann_2", "Public Holiday Closure",
 				"The Bangkok branch will be closed on May 12 for a public holiday. All classes that day are rescheduled.",
-				"usr_admin1", "2026-05-09T17:00:00", 1}},
+				"usr_admin1", "2026-05-09T17:00:00", 1, "2026-05-09T17:00:00"}},
 
 		{`INSERT INTO tournament (tournament_id, name, tournament_status, start_date, end_date, venue_name, venue_address, organizer_name, registration_deadline, early_bird_fee, regular_fee, max_participants)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,

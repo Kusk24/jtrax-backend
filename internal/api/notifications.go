@@ -572,27 +572,15 @@ func attendanceHook(svc *notify.Service) func(*sql.DB, *auth.Identity, map[strin
 // announcements.go). Staff-authored text is free-form and single-language, so
 // the same title/body goes to everyone regardless of their language preference.
 func announcementHook(_ *sql.DB, svc *notify.Service) func(*sql.DB, *auth.Identity, map[string]any, bool) {
-	return func(d *sql.DB, _ *auth.Identity, row map[string]any, created bool) {
-		if !created {
-			return // editing an announcement does not re-notify the school
-		}
+	return func(d *sql.DB, _ *auth.Identity, row map[string]any, _ bool) {
+		/* Told once, when parents can first see it: now for one already
+		   showing, else by the schedule (announcementwindow.go). An edit that
+		   moves the start to now is picked up the same way. */
 		annID := rowStr(row, "announcement_id")
-		title := rowStr(row, "title")
-		body := rowStr(row, "body")
 		if annID == "" {
 			return
 		}
-		recipients := announcementAccounts(d, annID, rowStr(row, "audience"))
-		if len(recipients) == 0 {
-			return
-		}
-		svc.Send(recipients, notify.Message{
-			Type:      notify.TypeAnnouncement,
-			Title:     notify.Text{EN: title, TH: title},
-			Body:      notify.Text{EN: body, TH: body},
-			Data:      map[string]any{"announcementId": annID},
-			DedupeKey: "announcement:" + annID,
-		})
+		RunAnnouncementScheduleFor(d, svc, annID, academyMinute())
 	}
 }
 

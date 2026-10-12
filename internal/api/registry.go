@@ -426,18 +426,30 @@ func Registry() []*Resource {
 				// classes or parents picked, as a JSON array.
 				{Name: "audience", Kind: "text", Enum: []string{"all", "classes", "parents"}},
 				{Name: "audience_ids", Kind: "text"},
+				// When parents see it, on the academy's clock (see
+				// announcementwindow.go). Blank: from posting, no end.
+				{Name: "show_from", Kind: "text"},
+				{Name: "show_until", Kind: "text"},
 			},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
-			Check: checkAnnouncementAudience,
+			Check: func(row map[string]any) error {
+				if err := checkAnnouncementAudience(row); err != nil {
+					return err
+				}
+				return checkAnnouncementWindow(row)
+			},
 			// Resolved once, when it is posted: see resolveAnnouncementAudience.
 			AfterWrite: resolveAnnouncementAudience,
 			Scope: map[string]ScopeFn{
 				// Everything addressed to every parent, and whatever was
 				// addressed to this one.
+				// Only inside its window.
 				"Parent": func(id *auth.Identity) (string, []any) {
+					now := academyMinute()
 					return `(audience = 'all' OR announcement_id IN
-						(SELECT announcement_id FROM announcement_recipient WHERE parent_id = ?))`,
-						[]any{id.ParentID}
+						(SELECT announcement_id FROM announcement_recipient WHERE parent_id = ?))
+						AND ` + visibleNow,
+						[]any{id.ParentID, now, now}
 				},
 				// Announcements are for families; students are not an audience.
 				"Student": func(id *auth.Identity) (string, []any) {
