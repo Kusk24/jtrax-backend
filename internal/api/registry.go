@@ -105,7 +105,12 @@ func Registry() []*Resource {
 				{Name: "fide_id", Kind: "text"},
 				{Name: "last_attended_date", Kind: "text"},
 				{Name: "streak_count", Kind: "int"},
+				// Left the academy: set to archive, cleared to restore. The
+				// record and its history stay either way.
+				{Name: "archived_at", Kind: "text"},
+				{Name: "archived_reason", Kind: "text"},
 			},
+			AfterWrite: studentAfterWrite,
 			// The login email, which the student table deliberately does not
 			// duplicate. Staff only: teachers can already list every student,
 			// and a name is not an email address.
