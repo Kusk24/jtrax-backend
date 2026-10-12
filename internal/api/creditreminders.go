@@ -60,7 +60,8 @@ func lowCreditTargets(d *sql.DB, onlyStudent string) ([]lowTarget, float64, erro
 		                  WHERE ct.enrollment_id IS NULL AND ct.student_id = e.student_id), 0)
 		  FROM student_enrollment e
 		  JOIN student s ON s.student_id = e.student_id
-		 WHERE e.status = 'Active' AND (? = '' OR e.student_id = ?)`, onlyStudent, onlyStudent)
+		 WHERE e.status = 'Active' AND COALESCE(s.archived_at, '') = ''
+		   AND (? = '' OR e.student_id = ?)`, onlyStudent, onlyStudent)
 	if err != nil {
 		return nil, line, err
 	}
@@ -112,6 +113,7 @@ func expiringTargets(d *sql.DB, days int) ([]expiryTarget, error) {
 		   JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
 		   JOIN student s ON s.student_id = e.student_id
 		  WHERE ct.expiry_date IS NOT NULL
+		    AND COALESCE(s.archived_at, '') = ''
 		    AND date(ct.expiry_date) >= ?
 		    AND date(ct.expiry_date) <= date(?, '+' || ? || ' days')
 		  GROUP BY e.student_id, s.name`, today(), today(), days)

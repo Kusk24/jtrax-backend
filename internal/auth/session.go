@@ -57,6 +57,18 @@ func DeleteSession(d *sql.DB, token string) error {
 
 var ErrNoSession = errors.New("no valid session")
 
+// ErrArchived is a student who has left the academy: their account stays,
+// but it no longer signs in.
+var ErrArchived = errors.New("this account is archived")
+
+// IsArchivedStudent says whether the account belongs to an archived student.
+func IsArchivedStudent(d *sql.DB, userAccountID string) bool {
+	var archived bool
+	d.QueryRow(`SELECT COALESCE(archived_at, '') <> '' FROM student WHERE user_account_id = ?`,
+		userAccountID).Scan(&archived)
+	return archived
+}
+
 // Lookup resolves a bearer token to the caller's Identity.
 func Lookup(d *sql.DB, token string) (*Identity, error) {
 	if token == "" {
@@ -77,6 +89,10 @@ func Lookup(d *sql.DB, token string) (*Identity, error) {
 		return nil, err
 	}
 	if exp, err := time.Parse(time.RFC3339, expires); err != nil || time.Now().After(exp) {
+		return nil, ErrNoSession
+	}
+	// Archived after signing in: the session ends with the archive.
+	if id.Role == "Student" && IsArchivedStudent(d, id.UserAccountID) {
 		return nil, ErrNoSession
 	}
 	// Attach the role-row id; each query misses harmlessly for other roles.

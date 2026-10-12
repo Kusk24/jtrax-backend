@@ -72,6 +72,9 @@ func refuseBooking(tx *sql.Tx, bookingID string) error {
 // in to a class they were booked on — early, by hand — is no longer booked,
 // so the start does not check them in a second time.
 func attendanceAfterInsert(tx *sql.Tx, attendanceID string) error {
+	if err := refuseArchivedAttendance(tx, attendanceID); err != nil {
+		return err
+	}
 	if err := refuseClashingAttendance(tx, attendanceID); err != nil {
 		return err
 	}
