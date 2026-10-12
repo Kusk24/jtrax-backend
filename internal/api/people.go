@@ -101,6 +101,7 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 	res.PaymentRows += n
 
 	for _, q := range []string{
+		`DELETE FROM student_certificate WHERE student_id = ?`,
 		`DELETE FROM student_enrollment WHERE student_id = ?`,
 		`DELETE FROM practice_activity WHERE student_id = ?`,
 		`DELETE FROM practice_settings WHERE student_id = ?`,
