@@ -2,7 +2,7 @@
 # the SQLite and libSQL drivers — so CGO stays off and the result is a static
 # binary on a distroless base with no shell and no package manager.
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Dependencies first so edits to the source do not re-download the module cache.
