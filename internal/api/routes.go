@@ -78,6 +78,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)
 	mountCertificates(mux, d)
+	mountPaymentVoid(mux, d)
 	mountPuzzleBank(mux, d)
 	mountPractice(mux, d)
 	mountProgress(mux, d)

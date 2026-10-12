@@ -77,7 +77,7 @@ func loadEntryFacts(d *sql.DB, regID string) (*entryFacts, error) {
 		  FROM tournament_registration r
 		  JOIN tournament t ON t.tournament_id = r.tournament_id
 		  LEFT JOIN tournament_category c ON c.tournament_category_id = r.tournament_category_id
-		  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id
+		  LEFT JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided'
 		 WHERE r.tournament_registration_id = ?`, regID).
 		Scan(&f.TournamentID, &f.TournamentName, &f.Participant, &f.Category,
 			&f.Email, &f.Source, &f.Status, &f.StartDate, &f.EndDate,
@@ -368,7 +368,7 @@ func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Clie
 	cutoff := now.UTC().Add(-checkoutWindow).Format(sqliteTimeLayout)
 	list, err := ids(d, `
 		SELECT r.tournament_registration_id FROM tournament_registration r
-		  JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id
+		  JOIN payment p ON p.tournament_registration_id = r.tournament_registration_id AND p.status <> 'Voided'
 		 WHERE r.source = 'Public' AND r.status = 'Approved' AND r.pay_choice = 'now'
 		   AND r.reserved_emailed_at IS NULL AND p.status = 'Pending'
 		   AND r.registered_at <= ?`, cutoff)
@@ -378,7 +378,7 @@ func noticeFailedPayments(ctx context.Context, d *sql.DB, client *stripepay.Clie
 	for _, regID := range list {
 		var session string
 		d.QueryRow(`SELECT COALESCE(stripe_session_id,'') FROM payment
-		             WHERE tournament_registration_id = ?`, regID).Scan(&session)
+		             WHERE tournament_registration_id = ? AND status <> 'Voided'`, regID).Scan(&session)
 		if session != "" && client != nil {
 			// Still open means they may be paying now; paid means the
 			// confirmation has just gone instead.
