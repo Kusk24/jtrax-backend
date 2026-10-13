@@ -11,10 +11,8 @@ package api
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -187,33 +185,12 @@ func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			return
 		}
 		// Logged in full for whoever reads the server log; the console gets
-		// only the reason code and the status.
+		// only the reason code and the status, as a failed scan does.
 		log.Printf("ocr test: %s: %v", chooser.Model(), err)
-		var status *ocr.StatusError
-		switch {
-		case errors.As(err, &status):
-			result["status"] = status.Status
-			switch status.Status {
-			case http.StatusNotFound:
-				result["reason"] = "model_unavailable"
-			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
-				result["reason"] = "key_rejected"
-			case http.StatusTooManyRequests:
-				result["reason"] = "quota"
-			default:
-				result["reason"] = "provider_error"
-			}
-		case errors.Is(err, context.DeadlineExceeded):
-			result["reason"] = "unreachable"
-		default:
-			// A *url.Error is the request never getting an answer: DNS, TLS,
-			// a refused connection.
-			var urlErr *url.Error
-			if errors.As(err, &urlErr) {
-				result["reason"] = "unreachable"
-			} else {
-				result["reason"] = "provider_error"
-			}
+		reason, status := providerFailure(err)
+		result["reason"] = reason
+		if status != 0 {
+			result["status"] = status
 		}
 		httpx.JSON(w, http.StatusOK, result)
 	}

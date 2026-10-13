@@ -42,32 +42,32 @@ func readIDCard(d *sql.DB, provider ocr.Provider, w http.ResponseWriter, r *http
 	provider = scannerFor(d, provider)
 	reader, ok := provider.(ocr.IDCardReader)
 	if provider == nil || !ok {
-		httpx.Error(w, http.StatusServiceUnavailable,
-			"ID card reading is not available right now — please try again later", nil)
+		scanFailed(w, http.StatusServiceUnavailable,
+			"ID card reading is not available right now — please try again later", "not_configured", 0, nil)
 		return nil
 	}
 
 	// Cap what can be read before parsing, not after.
 	r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
 	if err := r.ParseMultipartForm(maxScanBytes); err != nil {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "image is too large (10 MB maximum)", err)
+		scanFailed(w, http.StatusRequestEntityTooLarge, "image is too large (10 MB maximum)", "too_large", 0, err)
 		return nil
 	}
 	defer r.MultipartForm.RemoveAll()
 
 	file, _, err := r.FormFile("image")
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "expected an image field named 'image'", err)
+		scanFailed(w, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
 		return nil
 	}
 	defer file.Close()
 	data, err := io.ReadAll(file)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "could not read the uploaded image", err)
+		scanFailed(w, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
 		return nil
 	}
 	if len(data) == 0 {
-		httpx.Error(w, http.StatusBadRequest, "the uploaded image is empty", nil)
+		scanFailed(w, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
 		return nil
 	}
 	// Sniff the bytes rather than trust the declared type: the browser's
@@ -75,24 +75,24 @@ func readIDCard(d *sql.DB, provider ocr.Provider, w http.ResponseWriter, r *http
 	// a third party.
 	mime := http.DetectContentType(data)
 	if !scannableTypes[mime] {
-		httpx.Error(w, http.StatusUnsupportedMediaType,
-			"upload a photo of the card (JPEG, PNG, WebP or HEIC)", nil)
+		scanFailed(w, http.StatusUnsupportedMediaType,
+			"upload a photo of the card (JPEG, PNG, WebP or HEIC)", "not_an_image", 0, nil)
 		return nil
 	}
 
 	card, err := reader.ExtractIDCard(r.Context(), data, mime)
 	if err != nil {
 		// The provider's error can quote the request, which is the child's
-		// identity document, so it stays internal.
-		httpx.Error(w, http.StatusBadGateway,
-			"could not read the card — try a clearer, straighter photo", err)
+		// identity document, so it stays internal: the reply names only the
+		// kind of failure and the provider's status.
+		providerFailed(w, "card", err)
 		return nil
 	}
 	if _, err := time.Parse("2006-01-02", strings.TrimSpace(card.DateOfBirth.Value)); err != nil {
 		// The date of birth is what the check is for; a card read without
 		// one has verified nothing.
-		httpx.Error(w, http.StatusUnprocessableEntity,
-			"could not read the date of birth — try a clearer, straighter photo", nil)
+		scanFailed(w, http.StatusUnprocessableEntity,
+			"could not read the date of birth — try a clearer, straighter photo", "no_date_of_birth", 0, nil)
 		return nil
 	}
 	return card
