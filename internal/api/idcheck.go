@@ -73,7 +73,7 @@ func readIDCard(d *sql.DB, provider ocr.Provider, w http.ResponseWriter, r *http
 	// Sniff the bytes rather than trust the declared type: the browser's
 	// content type is caller-supplied, and this decides what is sent on to
 	// a third party.
-	mime := http.DetectContentType(data)
+	mime := sniffImage(data)
 	if !scannableTypes[mime] {
 		scanFailed(w, http.StatusUnsupportedMediaType,
 			"upload a photo of the card (JPEG, PNG, WebP or HEIC)", "not_an_image", 0, nil)
