@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
@@ -38,7 +39,7 @@ func StartArrivalReminders(ctx context.Context, d *sql.DB, cfg mail.Config, send
 		ticker := time.NewTicker(sweepEvery)
 		defer ticker.Stop()
 		for {
-			if n, err := sendArrivalReminders(d, cfg, sender, today()); err != nil {
+			if n, err := runArrivalReminders(d, cfg, sender, academytime.Now()); err != nil {
 				log.Printf("arrival reminders: %v", err)
 			} else if n > 0 {
 				log.Printf("arrival reminders: asked %d entrants", n)
@@ -50,6 +51,15 @@ func StartArrivalReminders(ctx context.Context, d *sql.DB, cfg mail.Config, send
 			}
 		}
 	}()
+}
+
+// runArrivalReminders is one timer pass: the reminders due today, from 09:00
+// (reminderHour), so the question never reaches a family in the night.
+func runArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, now time.Time) (int, error) {
+	if !emailHours(now) {
+		return 0, nil
+	}
+	return sendArrivalReminders(d, cfg, sender, now.In(academytime.Location()).Format("2006-01-02"))
 }
 
 type dueReminder struct {
@@ -514,4 +524,10 @@ func mountArrival(mux *http.ServeMux, d *sql.DB, cfg mail.Config, sender mail.Se
 // which decide when the timer would have fired.
 func SendArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, day string) (int, error) {
 	return sendArrivalReminders(d, cfg, sender, day)
+}
+
+// RunArrivalReminders is the timer's pass at `now`, its hour included.
+// Exported for tests.
+func RunArrivalReminders(d *sql.DB, cfg mail.Config, sender mail.Sender, now time.Time) (int, error) {
+	return runArrivalReminders(d, cfg, sender, now)
 }

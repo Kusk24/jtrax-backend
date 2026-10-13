@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
@@ -264,5 +265,37 @@ func TestBatchArrivalReminder(t *testing.T) {
 	}
 	if status, _, _ := admin.do("POST", batch, map[string]any{"registration_ids": []string{}}); status != 400 {
 		t.Fatalf("empty batch: want 400, got %d", status)
+	}
+}
+
+// The timer asks from 09:00 on the day, not at midnight when the day turns.
+func TestArrivalReminderWaitsForNineInTheMorning(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, trn, _ := admin.do("POST", "/api/v1/tournaments", map[string]any{
+		"name": "Wellington Rapid", "start_date": academyDay(10), "arrival_reminder_days": 5,
+	})
+	if status, reg, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": trn["tournament_id"], "student_id": "stu_penny",
+		"participant_name": "Penny", "status": "Approved",
+	}); status != 201 {
+		t.Fatalf("register: %d %v", status, reg)
+	}
+	cap := &captureSender{}
+	cfg := mail.Config{AppURL: "https://portal.example"}
+
+	for _, early := range []time.Time{at(5, 0).Add(5 * time.Minute), at(5, 8).Add(59 * time.Minute)} {
+		if n, err := api.RunArrivalReminders(d, cfg, cap, early); err != nil || n != 0 {
+			t.Fatalf("asked at %s: %d, %v", early.Format("15:04"), n, err)
+		}
+	}
+	if n, err := api.RunArrivalReminders(d, cfg, cap, at(5, 9)); err != nil || n != 1 {
+		t.Fatalf("at 09:00: asked %d, %v", n, err)
+	}
+	if n, _ := api.RunArrivalReminders(d, cfg, cap, at(5, 14)); n != 0 {
+		t.Fatalf("asked again: %d", n)
 	}
 }
