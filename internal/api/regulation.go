@@ -161,7 +161,9 @@ func handleGetRegulation(d *sql.DB) http.HandlerFunc {
 		// Inline: a parent taps the link and reads; the browser only offers a
 		// download for types it cannot show.
 		w.Header().Set("Content-Disposition", `inline; filename="`+filename+`"`)
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		// Checked again on every open: a replaced regulation (a new prize
+		// table, a changed rule) must not be read from a five-minute-old copy.
+		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(data)
 	}
 }
