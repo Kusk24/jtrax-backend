@@ -401,8 +401,8 @@ func arrivalEmail(appURL, tournament, start, venue string, codes []arrivalCode) 
 		},
 		Choices: choices,
 		After: []string{
-			"Tap an answer, then Confirm on the page that opens. You can change it until the tournament starts.",
-			tournament + " จะเริ่มวันที่ " + start + whereTH + " กรุณายืนยันว่า " + who + " จะเข้าร่วมหรือไม่ โดยกดปุ่มด้านบน แล้วกดยืนยันในหน้าที่เปิดขึ้น",
+			"Tap an answer, then Confirm on the page that opens. To change it afterwards, contact us (below).",
+			tournament + " จะเริ่มวันที่ " + start + whereTH + " กรุณายืนยันว่า " + who + " จะเข้าร่วมหรือไม่ โดยกดปุ่มด้านบน แล้วกดยืนยันในหน้าที่เปิดขึ้น หากต้องการเปลี่ยนคำตอบภายหลัง กรุณาติดต่อเรา (ด้านล่าง)",
 		},
 		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Parent Portal"},
 	}
