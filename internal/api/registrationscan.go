@@ -12,6 +12,7 @@ package api
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"io"
 	"net/http"
 
@@ -31,6 +32,39 @@ var scannableTypes = map[string]bool{
 	"image/webp": true,
 	"image/heic": true,
 	"image/heif": true,
+}
+
+// sniffImage is http.DetectContentType with HEIC and HEIF added. The standard
+// sniffer does not know them, so a photo an iPhone or a Samsung saved as HEIC
+// was refused as "not an image", by a message that asks for HEIC.
+//
+// Both are ISO media files: a box size, "ftyp", then the major brand and the
+// compatible brands. AVIF is built the same way and can share the mif1 brand,
+// so a file that also names avif is left to the standard sniffer.
+func sniffImage(data []byte) string {
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return http.DetectContentType(data)
+	}
+	end := int(binary.BigEndian.Uint32(data[:4]))
+	if end > len(data) || end < 16 {
+		end = min(len(data), 64)
+	}
+	brands := map[string]bool{}
+	for i := 8; i+4 <= end; i += 4 {
+		if i == 12 {
+			continue // the minor version, not a brand
+		}
+		brands[string(data[i:i+4])] = true
+	}
+	switch {
+	case brands["avif"] || brands["avis"]:
+		return http.DetectContentType(data)
+	case brands["heic"] || brands["heix"] || brands["hevc"] || brands["hevx"]:
+		return "image/heic"
+	case brands["mif1"] || brands["msf1"] || brands["heim"] || brands["heis"]:
+		return "image/heif"
+	}
+	return http.DetectContentType(data)
 }
 
 func mountRegistrationScan(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
@@ -91,7 +125,7 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// Sniff the bytes rather than trust the declared type: the browser's
 		// content type is caller-supplied, and this decides what is sent on to
 		// a third party.
-		mime := http.DetectContentType(data)
+		mime := sniffImage(data)
 		if !scannableTypes[mime] {
 			httpx.Error(w, http.StatusUnsupportedMediaType,
 				"upload a photo of the form (JPEG, PNG, WebP or HEIC)", nil)

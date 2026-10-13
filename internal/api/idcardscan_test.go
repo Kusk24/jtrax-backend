@@ -150,3 +150,45 @@ func TestScanningACardRefusesSomethingThatIsNotAnImage(t *testing.T) {
 		t.Errorf("a mis-picked file must cost nothing at the provider, got %d calls", reader.calls)
 	}
 }
+
+// An iPhone or a Samsung can save a photo as HEIC. The standard sniffer does
+// not know it, so it was refused as not an image by a message that asks for
+// HEIC. AVIF shares the container and is not taken for it.
+func TestAHEICPhotoOfACardIsRead(t *testing.T) {
+	box := func(brands ...string) []byte {
+		b := []byte{0, 0, 0, byte(8 + 4*len(brands)), 'f', 't', 'y', 'p'}
+		for _, brand := range brands {
+			b = append(b, brand...)
+		}
+		return append(b, make([]byte, 32)...)
+	}
+	cases := []struct {
+		name  string
+		image []byte
+		want  string
+	}{
+		{"iPhone HEIC", box("heic", "\x00\x00\x00\x00", "mif1", "heic"), "image/heic"},
+		{"HEIF", box("mif1", "\x00\x00\x00\x00", "mif1", "heic"), "image/heic"},
+		{"plain HEIF", box("mif1", "\x00\x00\x00\x00", "mif1"), "image/heif"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reader := &fakeCardReader{err: context.Canceled}
+			srv, id := cardServer(t, reader)
+			postScan(t, srv, "", "image", c.image, "/api/v1/public/tournaments/"+id+"/scan-id")
+			if reader.gotMime != c.want {
+				t.Errorf("sent to the reader as %q, want %q", reader.gotMime, c.want)
+			}
+		})
+	}
+
+	t.Run("AVIF is not HEIF", func(t *testing.T) {
+		reader := &fakeCardReader{card: &ocr.IDCard{}}
+		srv, id := cardServer(t, reader)
+		status, _ := postScan(t, srv, "", "image", box("avif", "\x00\x00\x00\x00", "avif", "mif1"),
+			"/api/v1/public/tournaments/"+id+"/scan-id")
+		if status != 415 || reader.calls != 0 {
+			t.Errorf("AVIF: got %d with %d provider calls, want 415 and none", status, reader.calls)
+		}
+	})
+}
