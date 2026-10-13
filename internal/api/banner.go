@@ -138,9 +138,10 @@ func handleGetBanner(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", mime)
-		// Short: the organiser may swap the picture, and the pages add a
-		// version to the address when they know it changed.
-		w.Header().Set("Cache-Control", "private, max-age=60")
+		// Checked again on every view: the organiser may swap the picture
+		// (its prize, its dates), and the public page must show the new one
+		// at once, not after a minute in someone's browser cache.
+		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(data)
 	}
 }
