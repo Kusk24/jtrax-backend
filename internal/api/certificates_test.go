@@ -1,6 +1,6 @@
-// Certificates by course: private and group hours of one course add up, other
-// courses stay apart, 50 hours alone certifies nobody, and a course is
-// certified once.
+// Certificates by course: hours are the credits charged for a course's
+// classes, private and group add up, other courses stay apart, 50 hours alone
+// certifies nobody, and a course is certified once.
 package api_test
 
 import (
@@ -22,6 +22,15 @@ func TestCertificatesByCourse(t *testing.T) {
 		if status != 201 {
 			t.Fatalf("class %s: %d %v", name, status, row)
 		}
+		// Enrolled with credits, so each visit is charged — the charge is
+		// what the hours are.
+		_, enr, _ := admin.do("POST", "/api/v1/enrollments", map[string]any{
+			"student_id": "stu_penny", "class_id": row["class_id"], "enrolled_date": "2026-06-01", "status": "Active",
+		})
+		admin.do("POST", "/api/v1/credit-transactions", map[string]any{
+			"enrollment_id": enr["enrollment_id"], "transaction_type": "purchase",
+			"amount": 100, "transaction_date": "2026-06-01",
+		})
 		return row["class_id"].(string)
 	}
 	private := class("JCA Starters", "Private", "starters")
@@ -123,4 +132,56 @@ func TestCertificatesByCourse(t *testing.T) {
 	if status, _, _ := parent.do("GET", "/api/v1/students/"+other["student_id"].(string)+"/certificates", nil); status != 404 {
 		t.Fatalf("another family's child: want 404, got %d", status)
 	}
+}
+
+// Only class charges are hours: a visit to a course's class the child is not
+// enrolled in charges nothing and adds nothing, and a desk adjustment to the
+// credits is not time in class.
+func TestCertificateHoursAreClassChargesOnly(t *testing.T) {
+	srv := newServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, cls, _ := admin.do("POST", "/api/v1/classes", map[string]any{
+		"name": "JCA Starters", "class_type": "Group", "certificate_course": "starters",
+	})
+	_, other, _ := admin.do("POST", "/api/v1/classes", map[string]any{
+		"name": "JCA Starters", "class_type": "Private", "certificate_course": "starters",
+	})
+	_, enr, _ := admin.do("POST", "/api/v1/enrollments", map[string]any{
+		"student_id": "stu_penny", "class_id": cls["class_id"], "enrolled_date": "2026-06-01", "status": "Active",
+	})
+	admin.do("POST", "/api/v1/credit-transactions", map[string]any{
+		"enrollment_id": enr["enrollment_id"], "transaction_type": "purchase", "amount": 20, "transaction_date": "2026-06-01",
+	})
+	admin.do("POST", "/api/v1/credit-transactions", map[string]any{
+		"enrollment_id": enr["enrollment_id"], "transaction_type": "manual_adjustment", "amount": -5, "transaction_date": "2026-06-02",
+	})
+	attend := func(classID any, date, out string) {
+		_, ses, _ := admin.do("POST", "/api/v1/class-sessions", map[string]any{
+			"class_id": classID, "session_date": date, "start_time": "08:00", "end_time": "18:00", "session_status": "Completed",
+		})
+		if status, row, _ := admin.do("POST", "/api/v1/attendance", map[string]any{
+			"student_id": "stu_penny", "session_id": ses["session_id"],
+			"check_in_time": date + "T08:00:00", "check_out_time": date + "T" + out,
+		}); status != 201 {
+			t.Fatalf("attendance: %d %v", status, row)
+		}
+	}
+	attend(cls["class_id"], "2026-07-01", "10:15:00")   // charged 2.25
+	attend(other["class_id"], "2026-07-02", "12:00:00") // not enrolled: charged nothing
+
+	status, body, _ := admin.do("GET", "/api/v1/students/stu_penny/certificates", nil)
+	if status != 200 {
+		t.Fatalf("certificates: %d %v", status, body)
+	}
+	for _, x := range body["courses"].([]any) {
+		if m := x.(map[string]any); m["course"] == "starters" {
+			if m["hours"] != 2.25 {
+				t.Fatalf("starters hours = %v, want 2.25 (the one class charge)", m["hours"])
+			}
+			return
+		}
+	}
+	t.Fatal("no starters course")
 }
