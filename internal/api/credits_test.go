@@ -545,7 +545,8 @@ func TestEarlyCheckOutRoundsToTheNearestQuarterHour(t *testing.T) {
 	}
 }
 
-// With the rounding step set to 0, the exact minutes are charged.
+// With the rounding step set to 0, the exact minutes are charged, to one
+// decimal: 82 minutes is 1.4 credits, 55 minutes 0.9 (not 0.9166…).
 func TestEarlyCheckOutCanChargeExactMinutes(t *testing.T) {
 	c := &client{t: t, srv: newServer(t)}
 	c.login("admin@jca.ac.th")
@@ -557,7 +558,29 @@ func TestEarlyCheckOutCanChargeExactMinutes(t *testing.T) {
 	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "16:00", 10)
 
 	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T08:22:00Z")
-	if got := balanceOf(c, enrolmentID); !near(got, 10-82.0/60) {
-		t.Fatalf("want exactly 82 minutes charged, left %v", got)
+	if got := balanceOf(c, enrolmentID); !near(got, 8.6) {
+		t.Fatalf("82 minutes should be 1.4 credits, left %v", got)
+	}
+
+	studentID, sessionID, enrolmentID = desk(t, c, "14:00", "16:00", 10)
+	checkInOut(t, c, studentID, sessionID, "2026-08-21T07:00:00Z", "2026-08-21T07:55:00Z")
+	if got := balanceOf(c, enrolmentID); got != 9.1 {
+		t.Fatalf("55 minutes should be 0.9 credits exactly, left %v", got)
+	}
+}
+
+// A class whose length is not a whole number of hundredths of an hour is
+// stored to two decimals: 80 minutes is 1.33 credits, not 1.3333….
+func TestAChargeHasAtMostTwoDecimals(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("admin@jca.ac.th")
+	studentID, sessionID, enrolmentID := desk(t, c, "14:00", "15:20", 10)
+	if status, att, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID, "check_in_time": "2026-08-21T07:00:00Z",
+	}); status != 201 {
+		t.Fatalf("check in: %d (%v)", status, att)
+	}
+	if got := balanceOf(c, enrolmentID); got != 8.67 {
+		t.Fatalf("80 minutes should leave 8.67 credits, got %v", got)
 	}
 }

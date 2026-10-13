@@ -103,11 +103,16 @@ func attendedHours(tx *sql.Tx, hours float64, date, start, checkIn, checkOut str
 	if minutes <= 0 {
 		return 0
 	}
+	charged := minutes / 60
 	if step := checkoutRoundMinutes(tx); step > 0 {
-		minutes = math.Round(minutes/step) * step
+		charged = math.Round(minutes/step) * step / 60
+	} else {
+		// No rounding step set (0): the exact time, to one decimal — 55
+		// minutes is 0.9 credit, not 0.9166….
+		charged = math.Round(charged*10) / 10
 	}
 	// Rounding up must never cost more than the whole class would have.
-	return math.Min(minutes/60, hours)
+	return math.Min(charged, hours)
 }
 
 // enrolmentForCharge picks the enrolment the credits come off: the student's
@@ -183,7 +188,9 @@ func chargeAttendance(tx *sql.Tx, attendanceID string) error {
 	if enrolment == "" {
 		return nil
 	}
-	hours := attendedHours(tx, scheduled, date, start, checkIn.String, checkOut.String)
+	// Never more than two decimals in the ledger: a class of 80 minutes is
+	// 1.33 credits, not 1.3333…, so a balance never reads 512.0397047.
+	hours := math.Round(attendedHours(tx, scheduled, date, start, checkIn.String, checkOut.String)*100) / 100
 	if hours <= 0 {
 		return nil
 	}
