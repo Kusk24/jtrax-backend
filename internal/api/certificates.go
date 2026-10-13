@@ -1,11 +1,14 @@
 // Certificates by course.
 //
 // JCA Starters, JCA Juniors and JCA NXT each take 50 hours of class (the
-// academy's certificate_hours) and a passed assessment. Hours are the time a
-// student was actually in class — clipped to the session, as a class is
-// charged — added up across every class of the course, private and group
-// alike, never across courses. They are worked out from attendance on every
-// read, so a corrected check-in moves them at once.
+// academy's certificate_hours) and a passed assessment. Hours are the credits
+// charged for classes — one credit is one hour — added up across every class
+// of the course, private and group alike, never across courses. So hours and
+// credits used can never disagree: an early leave rounded at check-out moves
+// both the same way. Only class charges count (consumption tied to an
+// attendance); a top-up, a desk adjustment or a transfer is not time in
+// class, and a visit nothing was charged for adds no hours. They are read from
+// the ledger on every request, so a corrected check-in moves them at once.
 //
 // Reaching the hours certifies nobody: the office marks a student certified
 // after the assessment, once per course.
@@ -18,7 +21,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -39,66 +41,34 @@ func requiredHours(d *sql.DB) float64 {
 	return defaultCertificateHours
 }
 
-// courseHours is the hours attended in each certificate course.
-func courseHours(d *sql.DB, studentID string, now time.Time) (map[string]float64, error) {
+// courseHours is the hours attended in each certificate course: the credits
+// its classes charged this student.
+func courseHours(d *sql.DB, studentID string) (map[string]float64, error) {
 	rows, err := d.Query(`
-		SELECT c.certificate_course, s.session_date, s.start_time, s.end_time,
-		       COALESCE(a.check_in_time, ''), COALESCE(a.check_out_time, '')
-		  FROM attendance a
-		  JOIN class_session s ON s.session_id = a.session_id
-		  JOIN class c ON c.class_id = s.class_id
-		 WHERE a.student_id = ? AND COALESCE(c.certificate_course, '') <> ''
-		   AND COALESCE(a.check_in_time, '') <> ''`, studentID)
+		SELECT c.certificate_course, -SUM(ct.amount)
+		  FROM credit_transaction ct
+		  JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
+		  JOIN class c ON c.class_id = e.class_id
+		 WHERE e.student_id = ? AND ct.transaction_type = 'consumption'
+		   AND ct.attendance_id IS NOT NULL
+		   AND COALESCE(c.certificate_course, '') <> ''
+		 GROUP BY c.certificate_course`, studentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]float64{}
 	for rows.Next() {
-		var course, day, start, end, in, outAt string
-		if err := rows.Scan(&course, &day, &start, &end, &in, &outAt); err != nil {
+		var course string
+		var hours float64
+		if err := rows.Scan(&course, &hours); err != nil {
 			return nil, err
 		}
-		out[course] += visitHours(day, start, end, in, outAt, now)
+		if hours > 0 {
+			out[course] = hours
+		}
 	}
 	return out, rows.Err()
-}
-
-// visitHours is one visit, unrounded (charging rounds; certificates do not): from arrival (or the start) to leaving (or the
-// end, or now while the class is still on), inside the session.
-func visitHours(day, start, end, in, out string, now time.Time) float64 {
-	day = strings.TrimSpace(day)
-	if len(day) > 10 {
-		day = day[:10]
-	}
-	begin, ok1 := academytime.At(day, clock5(start))
-	finish, ok2 := academytime.At(day, clock5(end))
-	if !ok1 || !ok2 || !finish.After(begin) {
-		return 0
-	}
-	from := begin
-	if t, ok := academytime.Moment(in); ok && t.After(from) {
-		from = t
-	}
-	to := finish
-	if t, ok := academytime.Moment(out); ok {
-		if t.Before(to) {
-			to = t
-		}
-	} else if now.Before(to) {
-		to = now
-	}
-	if !to.After(from) {
-		return 0
-	}
-	return to.Sub(from).Hours()
-}
-
-func clock5(s string) string {
-	if len(s) >= 5 {
-		return s[:5]
-	}
-	return s
 }
 
 type courseCertificate struct {
@@ -113,7 +83,7 @@ type courseCertificate struct {
 // studentCertificates is each course the student is in, has hours in, or is
 // certified for.
 func studentCertificates(d *sql.DB, studentID string) ([]courseCertificate, error) {
-	hours, err := courseHours(d, studentID, academytime.Now())
+	hours, err := courseHours(d, studentID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +182,7 @@ func handleCertify(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusNotFound, "no such student", nil)
 			return
 		}
-		hours, err := courseHours(d, studentID, academytime.Now())
+		hours, err := courseHours(d, studentID)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not read hours", err)
 			return
