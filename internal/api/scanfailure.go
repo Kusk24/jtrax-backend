@@ -58,7 +58,7 @@ func providerFailure(err error) (reason string, status int) {
 func providerFailureSentence(reason string, status int) string {
 	switch reason {
 	case "model_unavailable":
-		return fmt.Sprintf("the scan model is not available (status %d) — an admin can choose another under Settings → Scan model", status)
+		return fmt.Sprintf("the scan model is not available (status %d) — an admin can choose another under Settings → Form scanning", status)
 	case "key_rejected":
 		return fmt.Sprintf("the scan service refused the server's key (status %d)", status)
 	case "quota":
