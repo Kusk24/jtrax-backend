@@ -130,7 +130,7 @@ func (g *gemini) Test(ctx context.Context) error {
 		"generationConfig": map[string]any{"temperature": 0},
 	})
 	// An empty answer to a trivial prompt still means the model was reached.
-	if errors.Is(err, errNoCandidate) {
+	if errors.Is(err, ErrNoCandidate) {
 		return nil
 	}
 	return err
@@ -169,8 +169,9 @@ func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]
 	})
 }
 
-// errNoCandidate is a successful call that came back with nothing to read.
-var errNoCandidate = errors.New("gemini: no candidate returned")
+// ErrNoCandidate is a successful call that came back with nothing to read.
+// Exported so a failed scan can say so rather than blame the connection.
+var ErrNoCandidate = errors.New("gemini: no candidate returned")
 
 // call posts one request and returns the first candidate's text. The scans and
 // the connection test share it, so the test takes the same route a scan does.
@@ -214,7 +215,7 @@ func (g *gemini) call(ctx context.Context, payload map[string]any) ([]byte, erro
 	}
 	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
 		// A safety filter or an unreadable photo both land here.
-		return nil, errNoCandidate
+		return nil, ErrNoCandidate
 	}
 	return []byte(out.Candidates[0].Content.Parts[0].Text), nil
 }

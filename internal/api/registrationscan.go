@@ -101,9 +101,9 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		form, err := provider.Extract(r.Context(), data, mime)
 		if err != nil {
 			// The provider's error can quote the request, which is the child's
-			// data, so it stays internal and the caller gets a plain sentence.
-			httpx.Error(w, http.StatusBadGateway,
-				"could not read the form — try a clearer, straighter photo", err)
+			// data, so it stays internal: the reply names only the kind of
+			// failure and the provider's status.
+			providerFailed(w, "form", err)
 			return
 		}
 
