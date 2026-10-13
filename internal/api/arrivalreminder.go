@@ -401,8 +401,8 @@ func arrivalEmail(appURL, tournament, start, venue string, codes []arrivalCode) 
 		},
 		Choices: choices,
 		After: []string{
-			"Tap an answer, then Confirm on the page that opens. You can change it until the tournament starts.",
-			tournament + " จะเริ่มวันที่ " + start + whereTH + " กรุณายืนยันว่า " + who + " จะเข้าร่วมหรือไม่ โดยกดปุ่มด้านบน แล้วกดยืนยันในหน้าที่เปิดขึ้น",
+			"Tap an answer, then Confirm on the page that opens. To change it afterwards, contact us (below).",
+			tournament + " จะเริ่มวันที่ " + start + whereTH + " กรุณายืนยันว่า " + who + " จะเข้าร่วมหรือไม่ โดยกดปุ่มด้านบน แล้วกดยืนยันในหน้าที่เปิดขึ้น หากต้องการเปลี่ยนคำตอบภายหลัง กรุณาติดต่อเรา (ด้านล่าง)",
 		},
 		Signoff: []string{"Best regards,", "JCA Chess School", "JTrax Parent Portal"},
 	}
@@ -414,10 +414,18 @@ type arrivalEntry struct {
 	ParticipantName string `json:"participantName"`
 	StartDate       string `json:"startDate"`
 	Venue           string `json:"venue,omitempty"`
-	Status          string `json:"status"`
+	VenueAddress    string `json:"venueAddress,omitempty"`
+	VenueMapURL     string `json:"venueMapUrl,omitempty"`
+	// HasBanner says the page can ask for the tournament's banner with the
+	// same link (POST …/banner) — registration has usually closed by the
+	// time this is asked, so the public banner address no longer serves it.
+	HasBanner bool   `json:"hasBanner"`
+	Status    string `json:"status"`
 	// Open is false once the tournament has started or the entry is no
 	// longer in it: the answer can then no longer change.
 	Open bool `json:"open"`
+
+	tournamentID string
 }
 
 var errNoArrival = errors.New("no such reminder")
@@ -429,12 +437,15 @@ func findArrival(d *sql.DB, regID, code string) (*arrivalEntry, error) {
 	var e arrivalEntry
 	var stored, regStatus string
 	err := d.QueryRow(`
-		SELECT t.name, r.participant_name, COALESCE(t.start_date, ''), COALESCE(t.venue_name, ''),
+		SELECT t.tournament_id, t.name, r.participant_name, COALESCE(t.start_date, ''), COALESCE(t.venue_name, ''),
+		       COALESCE(t.venue_address, ''), COALESCE(t.venue_map_url, ''),
+		       EXISTS(SELECT 1 FROM tournament_banner b WHERE b.tournament_id = t.tournament_id),
 		       r.arrival_status, r.status, COALESCE(r.arrival_code_hash, '')
 		  FROM tournament_registration r
 		  JOIN tournament t ON t.tournament_id = r.tournament_id
 		 WHERE r.tournament_registration_id = ?`, regID).
-		Scan(&e.TournamentName, &e.ParticipantName, &e.StartDate, &e.Venue, &e.Status, &regStatus, &stored)
+		Scan(&e.tournamentID, &e.TournamentName, &e.ParticipantName, &e.StartDate, &e.Venue,
+			&e.VenueAddress, &e.VenueMapURL, &e.HasBanner, &e.Status, &regStatus, &stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNoArrival
 	}
@@ -446,6 +457,37 @@ func findArrival(d *sql.DB, regID, code string) (*arrivalEntry, error) {
 	}
 	e.Open = regStatus == "Approved" && (e.StartDate == "" || e.StartDate >= today())
 	return &e, nil
+}
+
+// handleArrivalBanner sends the tournament's banner to the holder of a
+// reminder link. POST, like the page itself, so the code stays out of
+// addresses and logs; the page turns the bytes into the picture.
+func handleArrivalBanner(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code, ok := readCode(w, r)
+		if !ok {
+			return
+		}
+		e, err := findArrival(d, r.PathValue("id"), code)
+		if errors.Is(err, errNoArrival) || (err == nil && !e.HasBanner) {
+			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			return
+		}
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load banner", err)
+			return
+		}
+		var mime string
+		var data []byte
+		if err := d.QueryRow(`SELECT content_type, bytes FROM tournament_banner WHERE tournament_id = ?`,
+			e.tournamentID).Scan(&mime, &data); err != nil {
+			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			return
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(data)
+	}
 }
 
 // handleArrival shows the holder of a reminder link what they are answering.
@@ -514,6 +556,7 @@ func mountArrival(mux *http.ServeMux, d *sql.DB, cfg mail.Config, sender mail.Se
 	const a = "/api/v1/public/arrival/{id}"
 	mux.HandleFunc("POST "+a, httpx.RateLimit(30, handleArrival(d)))
 	mux.HandleFunc("POST "+a+"/answer", httpx.RateLimit(20, handleArrivalAnswer(d)))
+	mux.HandleFunc("POST "+a+"/banner", httpx.RateLimit(30, handleArrivalBanner(d)))
 	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/arrival-reminder",
 		httpx.RateLimit(30, handleResendArrival(d, cfg, sender)))
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/arrival-reminders",
