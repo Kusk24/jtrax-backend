@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -297,5 +299,57 @@ func TestArrivalReminderWaitsForNineInTheMorning(t *testing.T) {
 	}
 	if n, _ := api.RunArrivalReminders(d, cfg, cap, at(5, 14)); n != 0 {
 		t.Fatalf("asked again: %d", n)
+	}
+}
+
+// The confirm page gets the venue in full and, through the link, the
+// tournament's banner — though registration has closed and the public banner
+// address no longer serves it. A wrong code gets neither.
+func TestTheArrivalLinkShowsTheVenueAndBanner(t *testing.T) {
+	d := newDB(t)
+	srv := newServerOn(t, d)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, trn, _ := admin.do("POST", "/api/v1/tournaments", map[string]any{
+		"name": "Wellington Rapid", "start_date": academyDay(10), "arrival_reminder_days": 5,
+		"venue_name": "Assumption University", "venue_address": "Samut Prakan",
+	})
+	tid := trn["tournament_id"].(string)
+	_, reg, _ := admin.do("POST", "/api/v1/tournament-registrations", map[string]any{
+		"tournament_id": tid, "student_id": "stu_penny", "participant_name": "Penny", "status": "Approved",
+	})
+	regID := reg["tournament_registration_id"].(string)
+	if _, err := d.Exec(`INSERT INTO tournament_banner (tournament_id, content_type, bytes) VALUES (?, 'image/png', ?)`,
+		tid, []byte("\x89PNG banner")); err != nil {
+		t.Fatal(err)
+	}
+	cap := &captureSender{}
+	if n, err := api.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 1 {
+		t.Fatalf("reminder: %d %v", n, err)
+	}
+	code := arrivalCode.FindStringSubmatch(cap.sent[0].Body)[2]
+
+	public := &client{t: t, srv: srv}
+	status, entry, _ := public.do("POST", "/api/v1/public/arrival/"+regID, map[string]any{"code": code})
+	if status != 200 || entry["venueAddress"] != "Samut Prakan" || entry["hasBanner"] != true {
+		t.Fatalf("read: %d %v", status, entry)
+	}
+
+	banner := func(code string) (int, string) {
+		res, err := http.Post(srv.URL+"/api/v1/public/arrival/"+regID+"/banner", "application/json",
+			strings.NewReader(`{"code":"`+code+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(body)
+	}
+	if status, body := banner(code); status != 200 || body != "\x89PNG banner" {
+		t.Fatalf("banner through the link: %d %q", status, body)
+	}
+	if status, _ := banner(strings.Repeat("0", 64)); status != 404 {
+		t.Fatalf("banner with a wrong code: want 404, got %d", status)
 	}
 }
