@@ -102,3 +102,42 @@ func TestTheCardScansOtherFailuresHaveCodes(t *testing.T) {
 		}
 	})
 }
+
+// The staff form scan says why too, so the admin console can.
+func TestAFailedFormScanSaysWhy(t *testing.T) {
+	t.Run("provider", func(t *testing.T) {
+		srv := scanServer(t, &fakeScanner{err: fmt.Errorf("gemini: %w", &ocr.StatusError{Status: 404})})
+		status, out := postScan(t, srv, tokenFor(t, srv, "admin@jca.ac.th"), "image", onePixelPNG)
+		msg, _ := out["error"].(string)
+		if status != 502 || out["reason"] != "model_unavailable" || out["status"] != float64(404) ||
+			!strings.HasPrefix(msg, "could not read the form: ") {
+			t.Errorf("got %d %v", status, out)
+		}
+	})
+	t.Run("before the provider", func(t *testing.T) {
+		srv := scanServer(t, &fakeScanner{form: &ocr.Form{}})
+		token := tokenFor(t, srv, "admin@jca.ac.th")
+		for _, c := range []struct {
+			field  string
+			data   []byte
+			status int
+			reason string
+		}{
+			{"image", []byte("%PDF-1.7\n"), 415, "not_an_image"},
+			{"image", []byte{}, 400, "no_image"},
+			{"notimage", onePixelPNG, 400, "no_image"},
+		} {
+			status, out := postScan(t, srv, token, c.field, c.data)
+			if status != c.status || out["reason"] != c.reason {
+				t.Errorf("%s %q: got %d %v, want %d %s", c.field, c.data, status, out["reason"], c.status, c.reason)
+			}
+		}
+	})
+	t.Run("not configured", func(t *testing.T) {
+		srv := scanServer(t, nil)
+		status, out := postScan(t, srv, tokenFor(t, srv, "admin@jca.ac.th"), "image", onePixelPNG)
+		if status != 503 || out["reason"] != "not_configured" {
+			t.Errorf("got %d %v, want 503 not_configured", status, out["reason"])
+		}
+	})
+}

@@ -90,8 +90,8 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// without a restart.
 		provider := scannerFor(d, provider)
 		if provider == nil {
-			httpx.Error(w, http.StatusServiceUnavailable,
-				"form scanning is not configured on this server", nil)
+			scanFailed(w, http.StatusServiceUnavailable,
+				"form scanning is not configured on this server", "not_configured", 0, nil)
 			return
 		}
 
@@ -99,26 +99,26 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// server buffers whatever was sent.
 		r.Body = http.MaxBytesReader(w, r.Body, maxScanBytes)
 		if err := r.ParseMultipartForm(maxScanBytes); err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge,
-				"image is too large (10 MB maximum)", err)
+			scanFailed(w, http.StatusRequestEntityTooLarge,
+				"image is too large (10 MB maximum)", "too_large", 0, err)
 			return
 		}
 		defer r.MultipartForm.RemoveAll()
 
 		file, header, err := r.FormFile("image")
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "expected an image field named 'image'", err)
+			scanFailed(w, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
 			return
 		}
 		defer file.Close()
 
 		data, err := io.ReadAll(file)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "could not read the uploaded image", err)
+			scanFailed(w, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
 			return
 		}
 		if len(data) == 0 {
-			httpx.Error(w, http.StatusBadRequest, "the uploaded image is empty", nil)
+			scanFailed(w, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
 			return
 		}
 
@@ -127,8 +127,8 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// a third party.
 		mime := sniffImage(data)
 		if !scannableTypes[mime] {
-			httpx.Error(w, http.StatusUnsupportedMediaType,
-				"upload a photo of the form (JPEG, PNG, WebP or HEIC)", nil)
+			scanFailed(w, http.StatusUnsupportedMediaType,
+				"upload a photo of the form (JPEG, PNG, WebP or HEIC)", "not_an_image", 0, nil)
 			return
 		}
 
