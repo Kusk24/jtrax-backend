@@ -150,6 +150,13 @@ func ChangePassword(d *sql.DB, userAccountID, current, next, keepToken string) e
 // open reset link is spent and every session is ended, so the child signs in
 // again with the new password everywhere.
 func SetPassword(d *sql.DB, userAccountID, next string) error {
+	return SetPasswordKeeping(d, userAccountID, next, "")
+}
+
+// SetPasswordKeeping is SetPassword that spares one session, keepToken — an
+// admin replacing their own password from the console stays signed in there,
+// as ChangePassword does. An empty keepToken spares none.
+func SetPasswordKeeping(d *sql.DB, userAccountID, next, keepToken string) error {
 	newHash, err := HashPassword(next)
 	if err != nil {
 		return err
@@ -166,7 +173,8 @@ func SetPassword(d *sql.DB, userAccountID, next string) error {
 	if _, err := tx.Exec(`UPDATE password_reset SET used_at = ? WHERE user_account_id = ? AND used_at IS NULL`, now, userAccountID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ?`, userAccountID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ? AND token_hash <> ?`,
+		userAccountID, hashSessionToken(keepToken)); err != nil {
 		return err
 	}
 	return tx.Commit()
