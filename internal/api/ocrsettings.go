@@ -17,11 +17,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
 )
 
 const ocrModelKey = "ocr_model"
+
+// Who last chose the model, and when: one choice applies to every scan in the
+// academy, so Settings says whose it is. A name, not an account id, so it
+// still reads after the account is gone — like payment_audit.
+const (
+	ocrModelByKey = "ocr_model_by"
+	ocrModelAtKey = "ocr_model_at"
+)
 
 // scannerFor is the provider as the console has configured it: the saved model
 // if there is one, otherwise the model the server started with. Read on every
@@ -39,11 +48,20 @@ func scannerFor(d *sql.DB, p ocr.Provider) ocr.Provider {
 	return p
 }
 
-func savedOCRModel(d *sql.DB) string {
-	var model string
-	d.QueryRow(`SELECT config_value FROM system_configuration WHERE config_key = ?`,
-		ocrModelKey).Scan(&model)
-	return model
+func savedOCRModel(d *sql.DB) string { return configValue(d, ocrModelKey) }
+
+// setConfig writes one system_configuration value.
+func setConfig(d *sql.DB, key, value string) error {
+	_, err := d.Exec(`INSERT INTO system_configuration (config_key, config_value) VALUES (?, ?)
+	                  ON CONFLICT (config_key) DO UPDATE SET config_value = excluded.config_value`, key, value)
+	return err
+}
+
+// configValue is one system_configuration value, empty when unset.
+func configValue(d *sql.DB, key string) string {
+	var value string
+	d.QueryRow(`SELECT config_value FROM system_configuration WHERE config_key = ?`, key).Scan(&value)
+	return value
 }
 
 func mountOCRSettings(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
@@ -67,6 +85,9 @@ func ocrState(d *sql.DB, provider ocr.Provider) map[string]any {
 		"savedModel":   savedOCRModel(d),
 		"model":        "",
 		"defaultModel": "",
+		"usage":        scanCost(d),
+		"savedBy":      configValue(d, ocrModelByKey),
+		"savedAt":      configValue(d, ocrModelAtKey),
 	}
 	if chooser, ok := provider.(ocr.ModelChooser); ok {
 		out["defaultModel"] = chooser.Model()
@@ -77,32 +98,34 @@ func ocrState(d *sql.DB, provider ocr.Provider) map[string]any {
 	return out
 }
 
-func requireAdmin(d *sql.DB, w http.ResponseWriter, r *http.Request) bool {
+func requireAdmin(d *sql.DB, w http.ResponseWriter, r *http.Request) *auth.Identity {
 	id := requireIdentity(d, w, r)
 	if id == nil {
-		return false
+		return nil
 	}
 	if id.Role != "Admin" {
 		httpx.Error(w, http.StatusForbidden, "not allowed", nil)
-		return false
+		return nil
 	}
-	return true
+	return id
 }
 
 func handleOCRGet(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireAdmin(d, w, r) {
+		if requireAdmin(d, w, r) == nil {
 			return
 		}
 		httpx.JSON(w, http.StatusOK, ocrState(d, provider))
 	}
 }
 
-// handleOCRPut saves the model. An empty model removes the saved one, so the
-// server goes back to the model it started with.
+// handleOCRPut saves the model, for every scan in the academy, and who chose
+// it. An empty model removes the saved one, so the server goes back to the
+// model it started with.
 func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireAdmin(d, w, r) {
+		caller := requireAdmin(d, w, r)
+		if caller == nil {
 			return
 		}
 		var body struct {
@@ -121,9 +144,17 @@ func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 				"model name may use only lowercase letters, digits, dots and dashes", nil)
 			return
 		} else {
-			_, err = d.Exec(`INSERT INTO system_configuration (config_key, config_value) VALUES (?, ?)
-			                 ON CONFLICT (config_key) DO UPDATE SET config_value = excluded.config_value`,
-				ocrModelKey, model)
+			err = setConfig(d, ocrModelKey, model)
+		}
+		if err == nil {
+			chooser := caller.DisplayName
+			if chooser == "" {
+				chooser = caller.Email
+			}
+			err = setConfig(d, ocrModelByKey, chooser)
+		}
+		if err == nil {
+			err = setConfig(d, ocrModelAtKey, time.Now().UTC().Format(time.RFC3339))
 		}
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not save the model", err)
@@ -142,7 +173,7 @@ func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 // nothing else from the provider's reply.
 func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireAdmin(d, w, r) {
+		if requireAdmin(d, w, r) == nil {
 			return
 		}
 		var body struct {
@@ -223,7 +254,7 @@ func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 	var cached []ocr.ModelInfo
 	var cachedAt time.Time
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireAdmin(d, w, r) {
+		if requireAdmin(d, w, r) == nil {
 			return
 		}
 		out := map[string]any{"models": []scanModel{}, "pricesAsOf": ocr.PricesAsOf, "pricesSource": ocr.PricesSource}

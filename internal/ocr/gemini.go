@@ -97,6 +97,9 @@ type gemini struct {
 	// production leaves them empty and uses Google's endpoints.
 	base       string
 	modelsBase string
+	// usage is told the tokens of every call Google answered. Nil reports
+	// nothing.
+	usage func(Usage)
 }
 
 // NewGemini builds the provider. A blank key yields nil, so a deployment with
@@ -129,8 +132,14 @@ func (g *gemini) WithModel(model string) Provider {
 // Test asks for one word of text, with no image. That costs a small fraction of
 // a scan, and it goes through the same key, model and endpoint a scan does. So
 // a 404 here is the same 404 a scan would get.
+func (g *gemini) ReportUsage(report func(Usage)) Provider {
+	c := *g
+	c.usage = report
+	return &c
+}
+
 func (g *gemini) Test(ctx context.Context) error {
-	_, err := g.call(ctx, map[string]any{
+	_, err := g.call(ctx, "test", map[string]any{
 		"contents": []any{map[string]any{
 			"parts": []any{map[string]any{"text": "Reply with the single word OK."}},
 		}},
@@ -212,8 +221,8 @@ func (g *gemini) url() string {
 // the things that matter to every call: temperature 0, a forced response
 // schema, the key in a header rather than the query string, and an upstream
 // error body that is never forwarded to the caller.
-func (g *gemini) generate(ctx context.Context, prompt string, schema map[string]any, image []byte, mime string) ([]byte, error) {
-	return g.call(ctx, map[string]any{
+func (g *gemini) generate(ctx context.Context, kind, prompt string, schema map[string]any, image []byte, mime string) ([]byte, error) {
+	return g.call(ctx, kind, map[string]any{
 		"contents": []any{map[string]any{
 			"parts": []any{
 				map[string]any{"text": prompt},
@@ -238,7 +247,8 @@ var ErrNoCandidate = errors.New("gemini: no candidate returned")
 
 // call posts one request and returns the first candidate's text. The scans and
 // the connection test share it, so the test takes the same route a scan does.
-func (g *gemini) call(ctx context.Context, payload map[string]any) ([]byte, error) {
+// kind names the call for the usage report.
+func (g *gemini) call(ctx context.Context, kind string, payload map[string]any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -272,9 +282,20 @@ func (g *gemini) call(ctx context.Context, payload map[string]any) ([]byte, erro
 				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
+		} `json:"usageMetadata"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("gemini: could not decode reply: %w", err)
+	}
+	// Answered, so billed, whether or not there is anything to read in it.
+	if g.usage != nil {
+		u := out.UsageMetadata
+		g.usage(Usage{Model: g.model, Kind: kind, InputTokens: u.PromptTokenCount,
+			OutputTokens: u.CandidatesTokenCount + u.ThoughtsTokenCount})
 	}
 	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
 		// A safety filter or an unreadable photo both land here.
@@ -284,7 +305,7 @@ func (g *gemini) call(ctx context.Context, payload map[string]any) ([]byte, erro
 }
 
 func (g *gemini) Extract(ctx context.Context, image []byte, mime string) (*Form, error) {
-	raw, err := g.generate(ctx, extractPrompt, geminiSchema, image, mime)
+	raw, err := g.generate(ctx, "form", extractPrompt, geminiSchema, image, mime)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +344,7 @@ var geminiIDCardSchema = map[string]any{
 }
 
 func (g *gemini) ExtractIDCard(ctx context.Context, image []byte, mime string) (*IDCard, error) {
-	raw, err := g.generate(ctx, idCardPrompt, geminiIDCardSchema, image, mime)
+	raw, err := g.generate(ctx, "id_card", idCardPrompt, geminiIDCardSchema, image, mime)
 	if err != nil {
 		return nil, err
 	}

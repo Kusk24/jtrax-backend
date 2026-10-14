@@ -3,8 +3,12 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
 )
@@ -242,5 +246,68 @@ func TestOnlyAnAdminSeesTheModelList(t *testing.T) {
 	}
 	if status, _, _ := (&client{t: t, srv: srv}).do("GET", "/api/v1/ocr/models", nil); status != http.StatusUnauthorized {
 		t.Errorf("anonymous: want 401, got %d", status)
+	}
+}
+
+// What scanning costs, in Settings: each call Google answered is kept with its
+// tokens and priced at the model's price on the day.
+func TestSettingsSayWhatScanningHasCost(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"{}"}]}}],
+		  "usageMetadata":{"promptTokenCount":2000,"candidatesTokenCount":300,"thoughtsTokenCount":500}}`)
+	}))
+	t.Cleanup(stub.Close)
+	srv := scanServer(t, ocr.New(ocr.Config{Provider: "gemini", APIKey: "test-key", BaseURL: stub.URL}))
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	if status, _ := postScan(t, srv, admin.token, "image", onePixelPNG); status != 200 {
+		t.Fatalf("scan: %d", status)
+	}
+	admin.do("POST", "/api/v1/ocr/test", nil)
+
+	_, state, _ := admin.do("GET", "/api/v1/ocr", nil)
+	usage, _ := state["usage"].(map[string]any)
+	if usage["scans"] != float64(1) || usage["tests"] != float64(1) {
+		t.Fatalf("usage = %v, want 1 scan and 1 test", usage)
+	}
+	if usage["inputTokens"] != float64(4000) || usage["outputTokens"] != float64(1600) {
+		t.Errorf("tokens = %v in, %v out; want 4000 and 1600", usage["inputTokens"], usage["outputTokens"])
+	}
+	price, _, _ := ocr.PriceOn(state["model"].(string), time.Now().UTC())
+	want := (4000*price.InputPerMillion + 1600*price.OutputPerMillion) / 1e6
+	if got, _ := usage["costUSD"].(float64); math.Abs(got-want) > 1e-9 {
+		t.Errorf("costUSD = %v, want %v", got, want)
+	}
+	// The average scan leaves the test out.
+	if usage["avgScanInputTokens"] != float64(2000) || usage["avgScanOutputTokens"] != float64(800) {
+		t.Errorf("average scan = %v in, %v out; want 2000 and 800", usage["avgScanInputTokens"], usage["avgScanOutputTokens"])
+	}
+}
+
+// One admin's choice is every scan's model, so Settings says whose choice it
+// is and when it was made.
+func TestSettingsSayWhoChoseTheModel(t *testing.T) {
+	srv := scanServer(t, newChooser())
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, state, _ := admin.do("GET", "/api/v1/ocr", nil)
+	if state["savedBy"] != "" || state["savedAt"] != "" {
+		t.Fatalf("before any choice: %v / %v", state["savedBy"], state["savedAt"])
+	}
+
+	before := time.Now().Add(-time.Second)
+	_, state, _ = admin.do("PUT", "/api/v1/ocr", map[string]string{"model": "gemini-3.6-flash"})
+	by, _ := state["savedBy"].(string)
+	at, err := time.Parse(time.RFC3339, fmt.Sprint(state["savedAt"]))
+	if by == "" || err != nil || at.Before(before) {
+		t.Fatalf("after saving: by %q at %v (%v)", by, state["savedAt"], err)
+	}
+
+	// Going back to the server's default is a choice too.
+	_, state, _ = admin.do("PUT", "/api/v1/ocr", map[string]string{"model": ""})
+	if state["savedModel"] != "" || state["savedBy"] != by {
+		t.Errorf("reset: %v by %v", state["savedModel"], state["savedBy"])
 	}
 }
