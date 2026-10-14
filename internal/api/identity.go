@@ -71,7 +71,7 @@ func handleLogin(d *sql.DB) http.HandlerFunc {
 		// A correct password clears the budget, so earlier fumbles are not
 		// still counted against them for the rest of the minute.
 		loginLimiter.Forget(email)
-		if auth.IsArchivedStudent(d, accountID) {
+		if auth.IsArchived(d, accountID) {
 			httpx.Error(w, http.StatusForbidden, auth.ErrArchived.Error(), nil)
 			return
 		}

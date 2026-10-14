@@ -128,6 +128,8 @@ func Registry() []*Resource {
 			Cols: []Col{
 				{Name: "user_account_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
+				// Set when their last child here was archived (0079).
+				{Name: "archived_at", Kind: "text"},
 			},
 			Derived: []Derived{
 				{Name: "email", Expr: "(SELECT ua.email FROM user_account ua WHERE ua.user_account_id = parent.user_account_id)"},
