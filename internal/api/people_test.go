@@ -296,3 +296,29 @@ func TestASnapshotAlreadyOnThePaymentIsNotOverwritten(t *testing.T) {
 		t.Fatalf("the class snapshot was overwritten: %v", kept["class_name"])
 	}
 }
+
+// A deleted parent's email can be used again, though they had been sent a
+// notification (which kept their login before), and the old login is gone.
+func TestADeletedParentsEmailCanBeUsedAgain(t *testing.T) {
+	srv := newServer(t)
+	checkInPenny(t, srv) // Sandy is told: a notification points at her login.
+	c := &client{t: t, srv: srv}
+	c.login("admin@jca.ac.th")
+
+	if status, res, _ := c.do("DELETE", "/api/v1/parents/par_sandy/cascade", nil); status != 200 {
+		t.Fatalf("cascade: %d (%v)", status, res)
+	}
+	status, row, _ := c.do("POST", "/api/v1/user-accounts", map[string]any{
+		"email": "sandy01234@gmail.com", "password": "newparent123", "role": "Parent", "display_name": "New Parent",
+	})
+	if status != 201 {
+		t.Fatalf("the email should be free for a new parent: %d %v", status, row)
+	}
+	// The new account signs in; nothing of the old one does.
+	fresh := &client{t: t, srv: srv}
+	if status, _, _ := fresh.do("POST", "/api/v1/auth/login", map[string]any{
+		"email": "sandy01234@gmail.com", "password": "newparent123",
+	}); status != 200 {
+		t.Fatalf("the new parent should sign in, got %d", status)
+	}
+}
