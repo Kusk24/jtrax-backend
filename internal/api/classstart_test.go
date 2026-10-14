@@ -86,19 +86,32 @@ func TestBookingAFutureClassSpendsNothingUntilItStarts(t *testing.T) {
 		t.Fatal("the student was checked in before the class started")
 	}
 
-	// The start: checked in, charged one hour, the booking gone.
+	// The start: the class runs, the student is still only expected — not
+	// checked in, not charged — until the desk checks them in.
 	api.RunClassStarts(d, at10(date, 0))
-	if attendanceCount(d, sessionID) != 1 || bookingCount(d, sessionID) != 0 {
-		t.Fatalf("at the start: %d attendance, %d bookings; want 1 and 0",
-			attendanceCount(d, sessionID), bookingCount(d, sessionID))
-	}
-	if got := balanceOf(c, enrolmentID); !near(got, 9) {
-		t.Fatalf("at the start the hour is spent: balance %v, want 9", got)
+	if attendanceCount(d, sessionID) != 0 || bookingCount(d, sessionID) != 1 || !near(balanceOf(c, enrolmentID), 10) {
+		t.Fatalf("at the start: %d attendance, %d bookings, balance %v; want 0, 1 and 10",
+			attendanceCount(d, sessionID), bookingCount(d, sessionID), balanceOf(c, enrolmentID))
 	}
 	var status string
 	d.QueryRow(`SELECT session_status FROM class_session WHERE session_id = ?`, sessionID).Scan(&status)
 	if status != "Ongoing" {
 		t.Fatalf("a started class reads %q, want Ongoing", status)
+	}
+
+	// Checked in on arrival: the booking is used up, the class charged.
+	if st, row, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID,
+		"check_in_time": at10(date, 0).UTC().Format(time.RFC3339),
+	}); st != 201 {
+		t.Fatalf("check in: %d (%v)", st, row)
+	}
+	if attendanceCount(d, sessionID) != 1 || bookingCount(d, sessionID) != 0 {
+		t.Fatalf("after check-in: %d attendance, %d bookings; want 1 and 0",
+			attendanceCount(d, sessionID), bookingCount(d, sessionID))
+	}
+	if got := balanceOf(c, enrolmentID); !near(got, 9) {
+		t.Fatalf("checked in for the hour: balance %v, want 9", got)
 	}
 
 	// Later passes charge nothing more.
@@ -152,13 +165,19 @@ func TestRescheduledLaterTheBookingWaitsForTheNewTime(t *testing.T) {
 	book(t, c, studentID, sessionID)
 	c.do("PATCH", "/api/v1/class-sessions/"+sessionID, map[string]any{"start_time": "14:00", "end_time": "15:00"})
 
+	statusOf := func() string {
+		var st string
+		d.QueryRow(`SELECT session_status FROM class_session WHERE session_id = ?`, sessionID).Scan(&st)
+		return st
+	}
 	api.RunClassStarts(d, at10(date, 5)) // the old start
-	if attendanceCount(d, sessionID) != 0 {
-		t.Fatal("checked in at the old time")
+	if statusOf() != "Scheduled" {
+		t.Fatalf("started at the old time: %s", statusOf())
 	}
 	api.RunClassStarts(d, at10(date, 4*60))
-	if attendanceCount(d, sessionID) != 1 {
-		t.Fatal("not checked in at the new time")
+	if statusOf() != "Ongoing" || bookingCount(d, sessionID) != 1 || attendanceCount(d, sessionID) != 0 {
+		t.Fatalf("at the new time: %s, %d bookings, %d attendance; want Ongoing, 1, 0",
+			statusOf(), bookingCount(d, sessionID), attendanceCount(d, sessionID))
 	}
 }
 
@@ -169,21 +188,20 @@ func TestAClassThatHasStartedTakesCheckInsNotBookings(t *testing.T) {
 	}
 }
 
-func TestABookingThatCannotBeChargedStaysWithTheReason(t *testing.T) {
+// A booked student who never comes is not charged: the class starts and ends
+// without them, and their booking stays as the record of who was expected.
+func TestABookedStudentWhoNeverComesIsNotCharged(t *testing.T) {
 	date := day(6)
-	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 0) // no credits
-	if status, row := book(t, c, studentID, sessionID); status != 201 {
-		t.Fatalf("book: %d (%v)", status, row)
-	}
+	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 10)
+	book(t, c, studentID, sessionID)
 	api.RunClassStarts(d, at10(date, 0))
-	var reason sql.NullString
-	d.QueryRow(`SELECT failed_reason FROM session_booking WHERE session_id = ?`, sessionID).Scan(&reason)
-	if attendanceCount(d, sessionID) != 0 || !reason.Valid || reason.String == "" {
-		t.Fatalf("want the booking kept with a reason and no attendance; got %d attendance, reason %v",
-			attendanceCount(d, sessionID), reason)
+	api.RunClassStarts(d, at10(date, 120)) // long after the end
+	if attendanceCount(d, sessionID) != 0 || bookingCount(d, sessionID) != 1 {
+		t.Fatalf("want no attendance and the booking kept; got %d and %d",
+			attendanceCount(d, sessionID), bookingCount(d, sessionID))
 	}
-	if got := balanceOf(c, enrolmentID); !near(got, 0) {
-		t.Fatalf("a refused start touched the balance: %v", got)
+	if got := balanceOf(c, enrolmentID); !near(got, 10) {
+		t.Fatalf("a student who never came was charged: balance %v", got)
 	}
 }
 
@@ -208,6 +226,13 @@ func TestAClassChargeNamesItsStudent(t *testing.T) {
 	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 10)
 	book(t, c, studentID, sessionID)
 	api.RunClassStarts(d, at10(date, 0))
+	// Checked in on arrival, as the desk does for a booked student.
+	if st, row, _ := c.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": studentID, "session_id": sessionID,
+		"check_in_time": at10(date, 0).UTC().Format(time.RFC3339),
+	}); st != 201 {
+		t.Fatalf("check in: %d (%v)", st, row)
+	}
 	var who sql.NullString
 	if err := d.QueryRow(`SELECT student_id FROM credit_transaction
 	                       WHERE transaction_type = 'consumption' AND enrollment_id = ?`, enrolmentID).Scan(&who); err != nil {
