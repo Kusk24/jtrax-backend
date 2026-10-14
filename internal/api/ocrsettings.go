@@ -67,6 +67,7 @@ func ocrState(d *sql.DB, provider ocr.Provider) map[string]any {
 		"savedModel":   savedOCRModel(d),
 		"model":        "",
 		"defaultModel": "",
+		"usage":        scanCost(d),
 	}
 	if chooser, ok := provider.(ocr.ModelChooser); ok {
 		out["defaultModel"] = chooser.Model()

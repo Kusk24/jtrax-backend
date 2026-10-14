@@ -32,6 +32,9 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 // reading instead of calling a paid API.
 func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) http.Handler {
 	mux := http.NewServeMux()
+	// Every answered call to the scan service is kept with its tokens, for
+	// the cost line in Settings (scancost.go).
+	scanner = recordScanUsage(d, scanner)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
