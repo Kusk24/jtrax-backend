@@ -125,6 +125,13 @@ func handleUpdateMe(d *sql.DB) http.HandlerFunc {
 			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
 			return
 		}
+		// A parent's name is the academy's record of them, changed by the
+		// office: their profile in the portal is read-only. A student still
+		// names themselves in the student panel.
+		if in.DisplayName != nil && id.Role == "Parent" {
+			httpx.Error(w, http.StatusForbidden, "a parent's name is changed by the academy", nil)
+			return
+		}
 		if in.Language != nil && *in.Language != "EN" && *in.Language != "TH" {
 			httpx.Error(w, http.StatusBadRequest, "languagePreference must be EN or TH", nil)
 			return
