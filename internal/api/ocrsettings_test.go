@@ -284,3 +284,30 @@ func TestSettingsSayWhatScanningHasCost(t *testing.T) {
 		t.Errorf("average scan = %v in, %v out; want 2000 and 800", usage["avgScanInputTokens"], usage["avgScanOutputTokens"])
 	}
 }
+
+// One admin's choice is every scan's model, so Settings says whose choice it
+// is and when it was made.
+func TestSettingsSayWhoChoseTheModel(t *testing.T) {
+	srv := scanServer(t, newChooser())
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, state, _ := admin.do("GET", "/api/v1/ocr", nil)
+	if state["savedBy"] != "" || state["savedAt"] != "" {
+		t.Fatalf("before any choice: %v / %v", state["savedBy"], state["savedAt"])
+	}
+
+	before := time.Now().Add(-time.Second)
+	_, state, _ = admin.do("PUT", "/api/v1/ocr", map[string]string{"model": "gemini-3.6-flash"})
+	by, _ := state["savedBy"].(string)
+	at, err := time.Parse(time.RFC3339, fmt.Sprint(state["savedAt"]))
+	if by == "" || err != nil || at.Before(before) {
+		t.Fatalf("after saving: by %q at %v (%v)", by, state["savedAt"], err)
+	}
+
+	// Going back to the server's default is a choice too.
+	_, state, _ = admin.do("PUT", "/api/v1/ocr", map[string]string{"model": ""})
+	if state["savedModel"] != "" || state["savedBy"] != by {
+		t.Errorf("reset: %v by %v", state["savedModel"], state["savedBy"])
+	}
+}
