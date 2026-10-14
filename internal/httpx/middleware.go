@@ -18,7 +18,10 @@ func CORS(allowedOrigins []string, next http.Handler) http.Handler {
 		if origin := r.Header.Get("Origin"); origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			// Every method a route is mounted with. PUT was missing, so a
+			// browser-built client could not save a notification setting or
+			// the scan model, though the native phone app could.
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
