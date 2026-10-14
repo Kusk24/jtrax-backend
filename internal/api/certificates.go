@@ -47,9 +47,12 @@ func courseHours(d *sql.DB, studentID string) (map[string]float64, error) {
 	rows, err := d.Query(`
 		SELECT c.certificate_course, -SUM(ct.amount)
 		  FROM credit_transaction ct
-		  JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
-		  JOIN class c ON c.class_id = e.class_id
-		 WHERE e.student_id = ? AND ct.transaction_type = 'consumption'
+		  /* A charge keeps its student and class when its course is deleted
+		     from the child (the entry is detached, not removed): counted by
+		     those, the hours stay. */
+		  LEFT JOIN student_enrollment e ON e.enrollment_id = ct.enrollment_id
+		  JOIN class c ON c.class_id = COALESCE(e.class_id, ct.class_id)
+		 WHERE COALESCE(e.student_id, ct.student_id) = ? AND ct.transaction_type = 'consumption'
 		   AND ct.attendance_id IS NOT NULL
 		   AND COALESCE(c.certificate_course, '') <> ''
 		 GROUP BY c.certificate_course`, studentID)
@@ -105,9 +108,12 @@ func studentCertificates(d *sql.DB, studentID string) ([]courseCertificate, erro
 	}
 	rows.Close()
 	enrolled := map[string]bool{}
+	// Only courses the child is in now: a course left or deleted is not one
+	// they are working toward (a certificate already earned is kept below).
 	rows, err = d.Query(`SELECT DISTINCT c.certificate_course FROM student_enrollment e
 	                       JOIN class c ON c.class_id = e.class_id
-	                      WHERE e.student_id = ? AND COALESCE(c.certificate_course, '') <> ''`, studentID)
+	                      WHERE e.student_id = ? AND COALESCE(c.certificate_course, '') <> ''
+	                        AND e.deleted_date IS NULL AND COALESCE(e.status, 'Active') = 'Active'`, studentID)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +128,9 @@ func studentCertificates(d *sql.DB, studentID string) ([]courseCertificate, erro
 	out := []courseCertificate{}
 	for _, course := range certificateCourses {
 		c, done := issued[course]
-		if !done && !enrolled[course] && hours[course] == 0 {
+		// A course in progress shows while the child is enrolled in it; one
+		// already certified always shows, being a record of what they earned.
+		if !done && !enrolled[course] {
 			continue
 		}
 		c.Course = course

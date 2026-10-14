@@ -185,3 +185,68 @@ func TestCertificateHoursAreClassChargesOnly(t *testing.T) {
 	}
 	t.Fatal("no starters course")
 }
+
+// A course deleted from the child is not listed — they are not working toward
+// it — but its hours are not lost: the charges are detached, not removed, and
+// count again when the child is back in the course.
+func TestADeletedCourseKeepsItsHours(t *testing.T) {
+	srv := newServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	_, cls, _ := admin.do("POST", "/api/v1/classes", map[string]any{
+		"name": "JCA Starters", "class_type": "Group", "certificate_course": "starters",
+	})
+	enrol := func() string {
+		_, e, _ := admin.do("POST", "/api/v1/enrollments", map[string]any{
+			"student_id": "stu_penny", "class_id": cls["class_id"], "enrolled_date": "2026-06-01", "status": "Active",
+		})
+		admin.do("POST", "/api/v1/credit-transactions", map[string]any{
+			"enrollment_id": e["enrollment_id"], "transaction_type": "purchase", "amount": 20, "transaction_date": "2026-06-01",
+		})
+		return e["enrollment_id"].(string)
+	}
+	first := enrol()
+	_, ses, _ := admin.do("POST", "/api/v1/class-sessions", map[string]any{
+		"class_id": cls["class_id"], "session_date": "2026-07-01", "start_time": "08:00", "end_time": "18:00", "session_status": "Completed",
+	})
+	admin.do("POST", "/api/v1/attendance", map[string]any{
+		"student_id": "stu_penny", "session_id": ses["session_id"],
+		"check_in_time": "2026-07-01T08:00:00", "check_out_time": "2026-07-01T10:00:00",
+	})
+
+	starters := func() map[string]any {
+		_, body, _ := admin.do("GET", "/api/v1/students/stu_penny/certificates", nil)
+		for _, x := range body["courses"].([]any) {
+			if m := x.(map[string]any); m["course"] == "starters" {
+				return m
+			}
+		}
+		return nil
+	}
+	if got := starters(); got == nil || got["hours"] != float64(2) {
+		t.Fatalf("enrolled: %v, want 2 hours", got)
+	}
+
+	// Deleted from Penny the way the console does it: entries detached,
+	// the enrolment withdrawn and dated.
+	_, _, txs := admin.do("GET", "/api/v1/credit-transactions?enrollment_id="+first, nil)
+	if len(txs) < 2 {
+		t.Fatalf("want the purchase and the class charge to detach, found %d", len(txs))
+	}
+	for _, tx := range txs {
+		admin.do("PATCH", "/api/v1/credit-transactions/"+tx["credit_transaction_id"].(string), map[string]any{
+			"enrollment_id": nil, "student_id": "stu_penny", "class_id": cls["class_id"],
+		})
+	}
+	admin.do("PATCH", "/api/v1/enrollments/"+first, map[string]any{"status": "Withdrawn", "deleted_date": "2026-07-02"})
+	if got := starters(); got != nil {
+		t.Fatalf("a deleted course should not be listed: %v", got)
+	}
+
+	// Back in the course: the two hours are still hers.
+	enrol()
+	if got := starters(); got == nil || got["hours"] != float64(2) {
+		t.Fatalf("back in the course: %v, want the 2 hours kept", got)
+	}
+}
