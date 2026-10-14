@@ -29,22 +29,43 @@ type deleteResult struct {
 	PaymentRows int64 `json:"payment_rows"`
 }
 
-// deleteAccount removes a login and its sessions. Best-effort: an account still
-// referenced by something outside the ER model — a game the student played, an
-// announcement they posted — stays, and the caller is told. Rewriting that
-// history to free the row would be a worse trade than one orphaned login.
+// deleteAccount removes a login: its sessions, and what was only ever its own
+// — the notifications it was sent, its notification switches, its phones and
+// browsers. An account still referenced by history worth keeping (a game the
+// student played, an announcement posted, a certificate signed) stays, but is
+// retired: its email is released and it can no longer sign in, so the office
+// can give the address to someone new. False when the row had to stay.
 func deleteAccount(tx *sql.Tx, accountID string) bool {
 	if accountID == "" {
 		return true
 	}
-	tx.Exec(`DELETE FROM auth_session WHERE user_account_id = ?`, accountID)
-	tx.Exec(`DELETE FROM password_reset WHERE user_account_id = ?`, accountID)
+	for _, q := range []string{
+		`DELETE FROM auth_session WHERE user_account_id = ?`,
+		`DELETE FROM password_reset WHERE user_account_id = ?`,
+		`DELETE FROM notification_delivery WHERE notification_id IN
+		   (SELECT notification_id FROM notification WHERE user_account_id = ?)`,
+		`DELETE FROM notification WHERE user_account_id = ?`,
+		`DELETE FROM notification_setting WHERE user_account_id = ?`,
+		`DELETE FROM push_subscription WHERE user_account_id = ?`,
+	} {
+		tx.Exec(q, accountID)
+	}
 	// SQLite leaves a transaction usable after a constraint failure, so a
 	// refusal here does not cost the rest of the cascade.
-	if _, err := tx.Exec(`DELETE FROM user_account WHERE user_account_id = ?`, accountID); err != nil {
-		return false
+	if _, err := tx.Exec(`DELETE FROM user_account WHERE user_account_id = ?`, accountID); err == nil {
+		return true
 	}
-	return true
+	retireAccount(tx, accountID)
+	return false
+}
+
+// retireAccount frees a kept login's email and locks it: the address becomes
+// one nobody can own or type (deleted+<id>@deleted.invalid) and the password
+// hash one no password matches.
+func retireAccount(tx *sql.Tx, accountID string) {
+	tx.Exec(`UPDATE user_account
+	            SET email = 'deleted+' || user_account_id || '@deleted.invalid', password_hash = '!'
+	          WHERE user_account_id = ?`, accountID)
 }
 
 // removeStudent deletes one student and everything pointing at them. Order is

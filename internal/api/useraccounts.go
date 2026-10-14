@@ -69,8 +69,12 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 		if requireStaff(d, w, r) == nil {
 			return
 		}
+		// A retired login (a deleted person whose history still points at it,
+		// people.go) is not an account anyone has: it is not listed.
 		rows, err := d.Query(`SELECT user_account_id, email, role, display_name,
-			language_preference, theme_preference FROM user_account ORDER BY user_account_id`)
+			language_preference, theme_preference FROM user_account
+			WHERE email NOT LIKE 'deleted+%@deleted.invalid'
+			ORDER BY user_account_id`)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
 			return
