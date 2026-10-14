@@ -4,11 +4,11 @@
 // Attendance is charged the moment it is written (credits.go), so a class's
 // roster cannot be its attendance until the class is running — a lesson next
 // Saturday would cost the family its credits today. Until the start, the
-// roster is bookings, which cost nothing. At the start each booking becomes an
-// attendance row through the same rules a check-in at the desk passes —
-// cancelled class, one class at a time, expired credits, the negative limit —
-// and is charged exactly as one would be. Taking a no-show off the roster
-// afterwards refunds them, as it always has.
+// roster is bookings, which cost nothing. At the start the class turns
+// Ongoing and the bookings stay what they are: the students expected. Each is
+// checked in at the desk when they arrive, through the same rules as any
+// check-in, and charged from their arrival; the check-in uses up the booking
+// (attendanceAfterInsert). A booked student who never comes is not charged.
 package api
 
 import (
@@ -114,8 +114,8 @@ func StartClassStarts(ctx context.Context, d *sql.DB) {
 	}()
 }
 
-// RunClassStarts checks in everyone booked on a class that has started by
-// `now`, and marks a Scheduled class that has started as Ongoing.
+// RunClassStarts marks a Scheduled class that has started by `now` as
+// Ongoing. Its bookings are left for the desk to check in on arrival.
 func RunClassStarts(d *sql.DB, now time.Time) error {
 	now = now.In(academytime.Location())
 	day, clock := now.Format("2006-01-02"), now.Format("15:04")
@@ -126,69 +126,5 @@ func RunClassStarts(d *sql.DB, now time.Time) error {
 	                      WHERE s.session_status = 'Scheduled' AND `+started, day, day, clock); err != nil {
 		return err
 	}
-
-	rows, err := d.Query(`
-		SELECT b.booking_id, b.session_id, b.student_id, s.session_date, s.start_time
-		  FROM session_booking b JOIN class_session s ON s.session_id = b.session_id
-		 WHERE b.failed_reason IS NULL AND `+started, day, day, clock)
-	if err != nil {
-		return err
-	}
-	type due struct{ booking, session, student, day, start string }
-	var list []due
-	for rows.Next() {
-		var x due
-		if err := rows.Scan(&x.booking, &x.session, &x.student, &x.day, &x.start); err != nil {
-			rows.Close()
-			return err
-		}
-		list = append(list, x)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, x := range list {
-		if err := startBooking(d, x.booking, x.session, x.student, x.day, x.start); err != nil {
-			log.Printf("class starts: booking %s: %v", x.booking, err)
-		}
-	}
 	return nil
-}
-
-// startBooking turns one booking into attendance, checked in at the class's
-// start, and charges it. A rule that refuses it — expired credits, the
-// negative limit, a clash — leaves the booking with the reason instead.
-func startBooking(d *sql.DB, bookingID, sessionID, studentID, day, start string) error {
-	checkIn := time.Now().UTC()
-	if t, ok := academytime.At(day, start); ok {
-		checkIn = t.UTC()
-	}
-	tx, err := d.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	attendanceID := newID("att")
-	stamp := sqliteNow()
-	if _, err := tx.Exec(`
-		INSERT INTO attendance (attendance_id, student_id, session_id, check_in_time, created_at, updated_at)
-		VALUES (?,?,?,?,?,?)`,
-		attendanceID, studentID, sessionID, checkIn.Format("2006-01-02T15:04:05.000Z"), stamp, stamp); err != nil {
-		return err
-	}
-	err = attendanceAfterInsert(tx, attendanceID)
-	if err == nil {
-		err = chargeAttendance(tx, attendanceID)
-	}
-	var refused *ClientError
-	if errors.As(err, &refused) {
-		tx.Rollback()
-		_, uerr := d.Exec(`UPDATE session_booking SET failed_reason = ? WHERE booking_id = ?`, refused.Message, bookingID)
-		return uerr
-	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
