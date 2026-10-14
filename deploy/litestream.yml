@@ -1,0 +1,23 @@
+# Litestream — continuous replication of the production SQLite file.
+#
+# Installed on the box as /etc/litestream.yml. Every location comes from the
+# environment (/etc/litestream.env, mode 600), so this file names no bucket:
+#
+#   JTRAX_DB_PATH           the live database, e.g. /home/ec2-user/data/jtrax.db
+#   LITESTREAM_REPLICA_URL  s3://<bucket>/jtrax?region=ap-southeast-1
+#   LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY
+#
+# Locally the same file replicates to a folder (file:///tmp/replica), which is
+# how restore-check.sh is tested. Requires WAL mode, which db.Open sets.
+# Runbook: jtrax-docs ops/backups-with-litestream.
+dbs:
+  - path: ${JTRAX_DB_PATH}
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
+
+# A full snapshot a day, kept for 30 days, with every change since the latest
+# one streamed within seconds. The Lightsail daily snapshot stays as a second,
+# independent copy.
+snapshot:
+  interval: 24h
+  retention: 720h
