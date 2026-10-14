@@ -169,3 +169,78 @@ func TestTheTestButtonSaysWhenThereIsNoKey(t *testing.T) {
 		t.Fatalf("test with no key: %v", got)
 	}
 }
+
+// A chooser whose key can also list models, the way Gemini's can.
+type fakeLister struct {
+	*fakeChooser
+	models []ocr.ModelInfo
+	err    error
+	calls  int
+}
+
+func (f *fakeLister) ListModels(context.Context) ([]ocr.ModelInfo, error) {
+	f.calls++
+	return f.models, f.err
+}
+
+// Settings offers Google's own list, each with its price, so an admin sees
+// what a model costs before choosing it.
+func TestTheModelListComesFromGoogleWithPrices(t *testing.T) {
+	lister := &fakeLister{fakeChooser: newChooser(), models: []ocr.ModelInfo{
+		{Name: "gemini-3.8-flash", DisplayName: "Gemini 3.8 Flash"},
+		{Name: "gemini-3.7-flash", DisplayName: "Gemini 3.7 Flash"},
+	}}
+	srv := scanServer(t, lister)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	status, out, _ := admin.do("GET", "/api/v1/ocr/models", nil)
+	if status != 200 {
+		t.Fatalf("status %d (%v)", status, out)
+	}
+	models, _ := out["models"].([]any)
+	if len(models) != 2 {
+		t.Fatalf("models = %v", out["models"])
+	}
+	first := models[0].(map[string]any)
+	price, _ := first["price"].(map[string]any)
+	if first["name"] != "gemini-3.8-flash" || price["inputPerMillion"] != 0.75 || price["outputPerMillion"] != 3.75 {
+		t.Errorf("first = %v, want 3.8-flash at 0.75 / 3.75", first)
+	}
+	if _, has := models[1].(map[string]any)["price"]; has {
+		t.Errorf("a model with no price on file must show none: %v", models[1])
+	}
+	if out["pricesAsOf"] != ocr.PricesAsOf || out["pricesSource"] != ocr.PricesSource {
+		t.Errorf("where the prices come from must be said: %v", out)
+	}
+
+	// Asked again within ten minutes, Google is not.
+	admin.do("GET", "/api/v1/ocr/models", nil)
+	if lister.calls != 1 {
+		t.Errorf("want one call to Google, got %d", lister.calls)
+	}
+}
+
+func TestAModelListGoogleRefusedSaysWhy(t *testing.T) {
+	lister := &fakeLister{fakeChooser: newChooser(), err: fmt.Errorf("gemini: %w", &ocr.StatusError{Status: 403})}
+	srv := scanServer(t, lister)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+
+	status, out, _ := admin.do("GET", "/api/v1/ocr/models", nil)
+	if status != 200 || out["reason"] != "key_rejected" || out["status"] != float64(403) {
+		t.Fatalf("got %d %v, want 200 key_rejected 403", status, out)
+	}
+}
+
+func TestOnlyAnAdminSeesTheModelList(t *testing.T) {
+	srv := scanServer(t, &fakeLister{fakeChooser: newChooser()})
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("GET", "/api/v1/ocr/models", nil); status != http.StatusForbidden {
+		t.Errorf("parent: want 403, got %d", status)
+	}
+	if status, _, _ := (&client{t: t, srv: srv}).do("GET", "/api/v1/ocr/models", nil); status != http.StatusUnauthorized {
+		t.Errorf("anonymous: want 401, got %d", status)
+	}
+}

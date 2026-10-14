@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -52,6 +53,9 @@ func mountOCRSettings(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
 	// quota, so a stuck client pressing it in a loop is limited.
 	mux.HandleFunc("POST /api/v1/ocr/test",
 		httpx.RateLimit(10, handleOCRTest(d, provider)))
+	// A call to Google each time the list is not cached, so limited like Test.
+	mux.HandleFunc("GET /api/v1/ocr/models",
+		httpx.RateLimit(10, handleOCRModels(d, provider)))
 }
 
 // ocrState is what the console shows. It never includes the key.
@@ -193,5 +197,76 @@ func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			result["status"] = status
 		}
 		httpx.JSON(w, http.StatusOK, result)
+	}
+}
+
+// scanModel is one entry in Settings' picker: a model the key can call, with
+// its price today and the next one Google has announced. No price when the
+// model is not in ocr's table.
+type scanModel struct {
+	Name        string     `json:"name"`
+	DisplayName string     `json:"displayName"`
+	Price       *ocr.Price `json:"price,omitempty"`
+	NextPrice   *ocr.Price `json:"nextPrice,omitempty"`
+}
+
+// How long Google's list is kept before it is asked again. Models change over
+// weeks, and every Settings visit would otherwise be a call to Google.
+const modelListLife = 10 * time.Minute
+
+// handleOCRModels lists the models the server's key can call, newest first,
+// with their prices. It answers 200 even when Google does not, with the reason
+// and status a failed scan gives, so Settings can keep its built-in list and
+// say why.
+func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
+	var mu sync.Mutex
+	var cached []ocr.ModelInfo
+	var cachedAt time.Time
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(d, w, r) {
+			return
+		}
+		out := map[string]any{"models": []scanModel{}, "pricesAsOf": ocr.PricesAsOf, "pricesSource": ocr.PricesSource}
+		lister, ok := provider.(ocr.ModelLister)
+		if provider == nil || !ok {
+			out["reason"] = "not_configured"
+			httpx.JSON(w, http.StatusOK, out)
+			return
+		}
+
+		mu.Lock()
+		models, fresh := cached, time.Since(cachedAt) < modelListLife
+		mu.Unlock()
+		if !fresh {
+			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			defer cancel()
+			listed, err := lister.ListModels(ctx)
+			if err != nil {
+				log.Printf("ocr models: %v", err)
+				reason, status := providerFailure(err)
+				out["reason"] = reason
+				if status != 0 {
+					out["status"] = status
+				}
+				httpx.JSON(w, http.StatusOK, out)
+				return
+			}
+			mu.Lock()
+			cached, cachedAt = listed, time.Now()
+			mu.Unlock()
+			models = listed
+		}
+
+		today := time.Now()
+		list := make([]scanModel, 0, len(models))
+		for _, m := range models {
+			entry := scanModel{Name: m.Name, DisplayName: m.DisplayName}
+			if now, next, ok := ocr.PriceOn(m.Name, today); ok {
+				entry.Price, entry.NextPrice = &now, next
+			}
+			list = append(list, entry)
+		}
+		out["models"] = list
+		httpx.JSON(w, http.StatusOK, out)
 	}
 }
