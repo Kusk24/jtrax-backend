@@ -643,3 +643,78 @@ func TestALateArrivalIsChargedForTheTimeAttended(t *testing.T) {
 		}
 	}
 }
+
+// Settings is told how each type can reach a parent besides the bell, so it
+// offers email, phone and browser switches only where they mean something.
+func TestEachTypeSaysHowItCanArrive(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	_, out, _ := parent.do("GET", "/api/v1/notification-settings", nil)
+	byType, _ := out["channelsByType"].(map[string]any)
+	join := func(typ string) string {
+		var names []string
+		for _, c := range byType[typ].([]any) {
+			names = append(names, c.(string))
+		}
+		return strings.Join(names, ",")
+	}
+	for _, typ := range []string{"announcement", "payment_received"} {
+		if got := join(typ); got != "inapp,email,webpush,mobile" {
+			t.Errorf("%s arrives by %q, want every channel", typ, got)
+		}
+	}
+	for _, typ := range []string{"check_in", "check_out", "credit_deducted", "low_credit", "credit_expiry", "class_cancelled"} {
+		if got := join(typ); got != "inapp" {
+			t.Errorf("%s arrives by %q, want in-app only", typ, got)
+		}
+	}
+}
+
+// A parent can keep announcements in the app and stop them by email.
+func TestAParentCanStopAnnouncementsByEmailOnly(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	if status, _, _ := parent.do("PUT", "/api/v1/notification-settings", map[string]any{
+		"type": "announcement", "channel": "email", "enabled": false,
+	}); status != 200 {
+		t.Fatalf("saving the email switch: %d", status)
+	}
+	teacher := &client{t: t, srv: srv}
+	teacher.login("serene@jca.ac.th")
+	teacher.do("POST", "/api/v1/announcements", map[string]any{
+		"title": "Songkran break", "body": "No classes 13-15 April.", "author_user_account_id": "usr_serene",
+	})
+
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 1 {
+		t.Fatalf("the announcement is still in the app: got %d, want 1", got)
+	}
+	var email string
+	dbOf(t, srv.URL).QueryRow(`SELECT nd.status FROM notification_delivery nd
+	   JOIN notification n ON n.notification_id = nd.notification_id
+	  WHERE n.type = 'announcement' AND n.user_account_id = 'usr_sandy' AND nd.channel = 'email'`).Scan(&email)
+	if email != "skipped_by_preference" {
+		t.Errorf("email delivery = %q, want skipped_by_preference", email)
+	}
+}
+
+// The rule is the sender's, not each caller's: a check-in that forgot to say
+// "in-app only" still stays in the app.
+func TestOnlyReceiptsAndAnnouncementsLeaveTheApp(t *testing.T) {
+	srv := newServer(t)
+	d := dbOf(t, srv.URL)
+	svc := notify.New(d, nil, mail.Config{})
+	if err := svc.Send([]string{"usr_sandy"}, notify.Message{
+		Type: notify.TypeCheckIn, Title: notify.Text{EN: "Checked in"}, Body: notify.Text{EN: "Penny has arrived."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var other int
+	d.QueryRow(`SELECT COUNT(*) FROM notification_delivery nd
+	              JOIN notification n ON n.notification_id = nd.notification_id
+	             WHERE n.type = 'check_in' AND nd.channel <> 'inapp'`).Scan(&other)
+	if other != 0 {
+		t.Errorf("a check-in went out on %d other channels, want in-app only", other)
+	}
+}

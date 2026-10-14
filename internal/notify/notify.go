@@ -53,6 +53,22 @@ const (
 	TypeClassCancelled = "class_cancelled"
 )
 
+// leavesTheApp is the academy's rule for which types go beyond the portal's
+// bell: only payment receipts and announcements are emailed and pushed.
+// Check-in, check-out, credits used, class cancelled and credit reminders stay
+// in the app. Send enforces it, and Settings is told it (ChannelsFor), so a
+// parent is only offered a channel a type can actually arrive on.
+var leavesTheApp = map[string]bool{TypeAnnouncement: true, TypePayment: true}
+
+// ChannelsFor is the channels a type can arrive on, in-app first. In-app is
+// the type's own switch; the rest are how else it reaches the person.
+func ChannelsFor(typ string) []string {
+	if leavesTheApp[typ] {
+		return Channels
+	}
+	return []string{ChannelInApp}
+}
+
 // DefaultEnabled says whether a person receives this type without ever having
 // touched their settings. Everything defaults on. The low-credit nudge used to
 // be opt-in, back when it fired by itself at every check-out; since 2026-09-24
@@ -209,7 +225,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		}
 
 		for _, ch := range Channels {
-			if msg.InAppOnly && ch != ChannelInApp {
+			if (msg.InAppOnly || !leavesTheApp[msg.Type]) && ch != ChannelInApp {
 				continue
 			}
 			deliveryID := newID("ndl")

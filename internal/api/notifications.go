@@ -161,14 +161,20 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 		   type the school has off is simply not offered — the person's saved
 		   choice is kept, and applies again when the school turns it back on. */
 		school := map[string]bool{}
+		/* How each type can reach the person besides the bell: only payment
+		   receipts and announcements are emailed and pushed, so only those
+		   are offered email, phone and browser switches. */
+		channelsByType := map[string][]string{}
 		for _, typ := range allTypes {
 			school[typ] = notify.SchoolEnabled(d, typ)
+			channelsByType[typ] = notify.ChannelsFor(typ)
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{
-			"settings":      settings,
-			"types":         []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypeClassCancelled},
-			"channels":      notify.Channels,
-			"schoolEnabled": school,
+			"settings":       settings,
+			"types":          []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypeClassCancelled},
+			"channels":       notify.Channels,
+			"channelsByType": channelsByType,
+			"schoolEnabled":  school,
 		})
 	}
 }
