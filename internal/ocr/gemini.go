@@ -20,6 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -30,6 +33,9 @@ import (
 const defaultGeminiModel = "gemini-3.8-flash"
 
 const geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
+
+// The models the key can call, for Settings' picker.
+const geminiModelsEndpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
 // The instruction. It is deliberately explicit about the two mistakes a model
 // makes on this form: inventing a plausible value for a blank line, and
@@ -87,9 +93,10 @@ type gemini struct {
 	key   string
 	model string
 	http  *http.Client
-	// base is overridden in tests to point at a local server; production leaves
-	// it empty and uses Google's endpoint.
-	base string
+	// base and modelsBase are overridden in tests to point at a local server;
+	// production leaves them empty and uses Google's endpoints.
+	base       string
+	modelsBase string
 }
 
 // NewGemini builds the provider. A blank key yields nil, so a deployment with
@@ -134,6 +141,62 @@ func (g *gemini) Test(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// ListModels asks Google which models this key can call and keeps the ones
+// that can read a photo (ForScanning), newest name first. Same key, same header
+// as a scan; a few pages at most.
+func (g *gemini) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	base := g.modelsBase
+	if base == "" {
+		base = geminiModelsEndpoint
+	}
+	var out []ModelInfo
+	pageToken := ""
+	for page := 0; page < 5; page++ {
+		target := base + "?pageSize=1000"
+		if pageToken != "" {
+			target += "&pageToken=" + url.QueryEscape(pageToken)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-goog-api-key", g.key)
+		resp, err := g.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		var body struct {
+			Models []struct {
+				Name                       string   `json:"name"`
+				DisplayName                string   `json:"displayName"`
+				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+			} `json:"models"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("gemini: %w", &StatusError{Status: resp.StatusCode})
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("gemini: could not decode the model list: %w", err)
+		}
+		for _, m := range body.Models {
+			name := strings.TrimPrefix(m.Name, "models/")
+			if ForScanning(name) && slices.Contains(m.SupportedGenerationMethods, "generateContent") {
+				out = append(out, ModelInfo{Name: name, DisplayName: m.DisplayName})
+			}
+		}
+		if body.NextPageToken == "" {
+			break
+		}
+		pageToken = body.NextPageToken
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name > out[j].Name })
+	return out, nil
 }
 
 func (g *gemini) url() string {
