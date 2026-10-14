@@ -58,3 +58,47 @@ func TestArchivedStudentIsOutOfDayToDay(t *testing.T) {
 		t.Fatalf("restored check-in: want 201, got %d %v", status, body)
 	}
 }
+
+// A guardian archived with their last child: no sign-in, no announcements to
+// every parent; restored, both come back. Their record stays.
+func TestArchivedParentIsOutOfDayToDay(t *testing.T) {
+	srv := newServer(t)
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	sandy := &client{t: t, srv: srv}
+	sandy.login("sandy01234@gmail.com")
+
+	if status, body, _ := admin.do("PATCH", "/api/v1/parents/par_sandy", map[string]any{"archived_at": "2026-10-14"}); status != 200 {
+		t.Fatalf("archive parent: %d %v", status, body)
+	}
+	if status, _, _ := sandy.do("GET", "/api/v1/auth/me", nil); status != 401 {
+		t.Fatalf("archived parent's session: want 401, got %d", status)
+	}
+	if status, _, _ := sandy.do("POST", "/api/v1/auth/login", map[string]string{"email": "sandy01234@gmail.com", "password": db.DevPassword}); status != 403 {
+		t.Fatalf("archived parent's login: want 403, got %d", status)
+	}
+
+	// An announcement to everyone does not reach her.
+	if status, body, _ := admin.do("POST", "/api/v1/announcements", map[string]any{
+		"title": "Holiday", "body": "No class on Monday.", "author_user_account_id": "usr_admin1",
+	}); status != 201 {
+		t.Fatalf("announcement: %d %v", status, body)
+	}
+	if status, _, _ := admin.do("GET", "/api/v1/parents/par_sandy", nil); status != 200 {
+		t.Fatalf("an archived parent's record is kept, got %d", status)
+	}
+
+	// Restored: signs in, and the next announcement reaches her.
+	if status, body, _ := admin.do("PATCH", "/api/v1/parents/par_sandy", map[string]any{"archived_at": nil}); status != 200 {
+		t.Fatalf("restore parent: %d %v", status, body)
+	}
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 0 {
+		t.Fatalf("the announcement sent while archived reached her: %d", got)
+	}
+	admin.do("POST", "/api/v1/announcements", map[string]any{
+		"title": "Welcome back", "body": "Classes resume.", "author_user_account_id": "usr_admin1",
+	})
+	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 1 {
+		t.Fatalf("restored, she should get the next announcement: %d", got)
+	}
+}

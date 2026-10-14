@@ -592,7 +592,8 @@ func parentAccountsOf(d *sql.DB, studentID string) []string {
 	rows, err := d.Query(
 		`SELECT p.user_account_id FROM student_parent sp
 		   JOIN parent p ON p.parent_id = sp.parent_id
-		  WHERE sp.student_id = ? AND p.user_account_id IS NOT NULL`, studentID)
+		  WHERE sp.student_id = ? AND p.user_account_id IS NOT NULL
+		    AND COALESCE(p.archived_at, '') = ''`, studentID)
 	if err != nil {
 		return nil
 	}

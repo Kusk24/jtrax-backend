@@ -101,12 +101,17 @@ func announcementAccounts(d *sql.DB, announcementID, audience string) []string {
 	var rows *sql.Rows
 	var err error
 	if audience == "" || audience == "all" {
-		rows, err = d.Query(`SELECT user_account_id FROM user_account WHERE role = 'Parent'`)
+		// Every guardian, less those archived with their children.
+		rows, err = d.Query(`SELECT ua.user_account_id FROM user_account ua
+			 WHERE ua.role = 'Parent'
+			   AND NOT EXISTS (SELECT 1 FROM parent p
+			                    WHERE p.user_account_id = ua.user_account_id AND COALESCE(p.archived_at, '') <> '')`)
 	} else {
 		rows, err = d.Query(`
 			SELECT p.user_account_id FROM announcement_recipient r
 			  JOIN parent p ON p.parent_id = r.parent_id
-			 WHERE r.announcement_id = ? AND p.user_account_id IS NOT NULL`, announcementID)
+			 WHERE r.announcement_id = ? AND p.user_account_id IS NOT NULL
+			   AND COALESCE(p.archived_at, '') = ''`, announcementID)
 	}
 	if err != nil {
 		return nil

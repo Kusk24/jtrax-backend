@@ -57,15 +57,17 @@ func DeleteSession(d *sql.DB, token string) error {
 
 var ErrNoSession = errors.New("no valid session")
 
-// ErrArchived is a student who has left the academy: their account stays,
-// but it no longer signs in.
+// ErrArchived is a student, or a guardian, who has left the academy: their
+// account stays, but it no longer signs in.
 var ErrArchived = errors.New("this account is archived")
 
-// IsArchivedStudent says whether the account belongs to an archived student.
-func IsArchivedStudent(d *sql.DB, userAccountID string) bool {
+// IsArchived says whether the account belongs to an archived student or an
+// archived guardian.
+func IsArchived(d *sql.DB, userAccountID string) bool {
 	var archived bool
-	d.QueryRow(`SELECT COALESCE(archived_at, '') <> '' FROM student WHERE user_account_id = ?`,
-		userAccountID).Scan(&archived)
+	d.QueryRow(`SELECT EXISTS (SELECT 1 FROM student WHERE user_account_id = ? AND COALESCE(archived_at, '') <> '')
+	                OR EXISTS (SELECT 1 FROM parent WHERE user_account_id = ? AND COALESCE(archived_at, '') <> '')`,
+		userAccountID, userAccountID).Scan(&archived)
 	return archived
 }
 
@@ -92,7 +94,7 @@ func Lookup(d *sql.DB, token string) (*Identity, error) {
 		return nil, ErrNoSession
 	}
 	// Archived after signing in: the session ends with the archive.
-	if id.Role == "Student" && IsArchivedStudent(d, id.UserAccountID) {
+	if (id.Role == "Student" || id.Role == "Parent") && IsArchived(d, id.UserAccountID) {
 		return nil, ErrNoSession
 	}
 	// Attach the role-row id; each query misses harmlessly for other roles.
