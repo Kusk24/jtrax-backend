@@ -169,9 +169,11 @@ func Registry() []*Resource {
 				{Name: "contact_type", Kind: "text", Enum: contactTypes, Required: true},
 				{Name: "value", Kind: "text", Required: true},
 			},
-			ReadRoles: []string{"Parent"}, WriteRoles: []string{"Parent"},
-			Scope: map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
-			Own:   ownParentRow,
+			// A parent reads their own; only the office changes them — the
+			// profile in the portal is read-only.
+			ReadRoles: []string{"Parent"},
+			Scope:     map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
+			Own:       ownParentRow,
 		},
 		{
 			Name: "student-parents", Table: "student_parent", IDCol: "student_id", IDPrefix: "",

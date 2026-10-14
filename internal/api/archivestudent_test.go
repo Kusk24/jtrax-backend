@@ -102,3 +102,39 @@ func TestArchivedParentIsOutOfDayToDay(t *testing.T) {
 		t.Fatalf("restored, she should get the next announcement: %d", got)
 	}
 }
+
+// A parent's profile is read-only to them: the office keeps their name and
+// contacts. A student still names themselves.
+func TestAParentCannotEditTheirProfile(t *testing.T) {
+	srv := newServer(t)
+	sandy := &client{t: t, srv: srv}
+	sandy.login("sandy01234@gmail.com")
+
+	if status, _, _ := sandy.do("POST", "/api/v1/parent-contacts", map[string]any{
+		"parent_id": "par_sandy", "contact_type": "phone", "value": "0800000000",
+	}); status != 403 {
+		t.Fatalf("parent adding a contact: want 403, got %d", status)
+	}
+	_, _, contacts := sandy.do("GET", "/api/v1/parent-contacts", nil)
+	if len(contacts) == 0 {
+		t.Fatal("a parent should still read their own contacts")
+	}
+	if status, _, _ := sandy.do("PATCH", "/api/v1/parent-contacts/"+contacts[0]["parent_contact_id"].(string), map[string]any{
+		"value": "changed",
+	}); status != 403 {
+		t.Fatalf("parent changing a contact: want 403, got %d", status)
+	}
+	if status, _, _ := sandy.do("PATCH", "/api/v1/auth/me", map[string]any{"displayName": "Someone Else"}); status != 403 {
+		t.Fatalf("parent renaming themselves: want 403, got %d", status)
+	}
+	// Their preferences are still theirs.
+	if status, _, _ := sandy.do("PATCH", "/api/v1/auth/me", map[string]any{"languagePreference": "TH"}); status != 200 {
+		t.Fatalf("parent changing language: want 200, got %d", status)
+	}
+
+	penny := &client{t: t, srv: srv}
+	penny.login("penny@jca.ac.th")
+	if status, _, _ := penny.do("PATCH", "/api/v1/auth/me", map[string]any{"displayName": "Pen"}); status != 200 {
+		t.Fatalf("student renaming themselves: want 200, got %d", status)
+	}
+}
