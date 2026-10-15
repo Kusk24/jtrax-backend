@@ -4,6 +4,7 @@ package api_test
    erasure request reaches the office and is closed by an admin. */
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -120,5 +121,65 @@ func TestTheExportIncludesWhatTheFamilyAgreedTo(t *testing.T) {
 	}
 	if consents[0].(map[string]any)["purpose"] != "privacy_notice" {
 		t.Errorf("consent: %v", consents[0])
+	}
+}
+
+/* Erasing a family whose child has a history — a Lichess link, games against
+   the engine, an ID card read, and a tournament game and fee — used to fail
+   on the first reference the delete did not know about. */
+func TestErasingAFamilyWithAHistoryGoesThrough(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	status, entry, _ := parent.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, parent, map[string]any{
+		"student_id": "stu_penny", "privacy_notice": true,
+	}))
+	if status != 201 {
+		t.Fatalf("enter: %d (%v)", status, entry)
+	}
+	regID := entry["tournament_registration_id"].(string)
+	v, _ := serverDBs.Load(srv.URL)
+	d := v.(*sql.DB)
+	for _, q := range []string{
+		`INSERT INTO id_card_check (id_card_check_id, tournament_id, student_id, date_of_birth) VALUES ('chk_hist', 'trn_wellington', 'stu_penny', '2018-02-14')`,
+		`INSERT INTO student_lichess (student_id, username, lichess_id) VALUES ('stu_penny', 'penny', 'penny')`,
+		`INSERT INTO lichess_rating (student_id, perf, rating) VALUES ('stu_penny', 'blitz', 1200)`,
+		`INSERT INTO solo_game (solo_game_id, student_id, opponent) VALUES ('sg_1', 'stu_penny', 'stockfish')`,
+		`INSERT INTO tournament_registration (tournament_registration_id, tournament_id, participant_name) VALUES ('r_opp', 'trn_wellington', 'Opponent')`,
+		`INSERT INTO tournament_round (tournament_round_id, tournament_id, round_no, status) VALUES ('rd_h', 'trn_wellington', 1, 'Completed')`,
+		`INSERT INTO tournament_pairing (tournament_pairing_id, tournament_round_id, board_no, white_registration_id, black_registration_id, result) VALUES ('p_h', 'rd_h', 1, '` + regID + `', 'r_opp', '1-0')`,
+	} {
+		if _, err := d.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	if status, out, _ := admin.do("DELETE", "/api/v1/parents/par_sandy/cascade?children=delete", nil); status != 200 && status != 204 {
+		t.Fatalf("erase family: %d (%v)", status, out)
+	}
+
+	var name string
+	var student sql.NullString
+	if err := d.QueryRow(`SELECT participant_name, student_id FROM tournament_registration WHERE tournament_registration_id = ?`, regID).
+		Scan(&name, &student); err != nil {
+		t.Fatalf("the opponent's game lost its entry: %v", err)
+	}
+	if name != "Former player" || student.Valid {
+		t.Errorf("kept entry still says who played: %q %v", name, student)
+	}
+	if n := count(t, d, `SELECT COUNT(*) FROM consent_record WHERE given_by_name <> '' AND tournament_registration_id = ?`, regID); n != 0 {
+		t.Errorf("consent still names the guardian")
+	}
+	for _, q := range []string{
+		`SELECT COUNT(*) FROM student WHERE student_id = 'stu_penny'`,
+		`SELECT COUNT(*) FROM solo_game WHERE student_id = 'stu_penny'`,
+		`SELECT COUNT(*) FROM student_lichess WHERE student_id = 'stu_penny'`,
+		`SELECT COUNT(*) FROM id_card_check WHERE student_id = 'stu_penny'`,
+	} {
+		if n := count(t, d, q); n != 0 {
+			t.Errorf("%s: %d left", q, n)
+		}
 	}
 }

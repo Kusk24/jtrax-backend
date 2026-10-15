@@ -128,6 +128,34 @@ func removeStudent(tx *sql.Tx, studentID string, res *deleteResult) error {
 		`DELETE FROM practice_settings WHERE student_id = ?`,
 		`DELETE FROM puzzle_attempt WHERE student_id = ?`,
 		`DELETE FROM puzzle_list WHERE student_id = ?`,
+		/* What only ever described this child: an ID card read waiting for an
+		   entry, their Lichess link and ratings, their games against the
+		   engine. Each of these blocked the delete outright. */
+		`DELETE FROM id_card_check WHERE student_id = ?`,
+		`DELETE FROM lichess_oauth_state WHERE student_id = ?`,
+		`DELETE FROM lichess_rating_day WHERE student_id = ?`,
+		`DELETE FROM lichess_rating WHERE student_id = ?`,
+		`DELETE FROM student_lichess WHERE student_id = ?`,
+		`DELETE FROM solo_game WHERE student_id = ?`,
+		/* Results the arbiter published elsewhere stay as they are; they only
+		   stop pointing at a record the academy no longer has. */
+		`UPDATE external_pairing SET white_student_id = NULL WHERE white_student_id = ?`,
+		`UPDATE external_pairing SET black_student_id = NULL WHERE black_student_id = ?`,
+		`UPDATE external_standing SET student_id = NULL WHERE student_id = ?`,
+		/* An entry other rows still lean on — a game in the event's pairings,
+		   or the payment kept for the accounts — cannot go without taking
+		   another player's result or the money's record with it. It stays,
+		   detached and with nothing left that says who played. */
+		`UPDATE tournament_registration SET student_id = NULL,
+		        participant_name = 'Former player', participant_name_th = NULL, nickname = '',
+		        participant_contact = NULL, contact_email = '', contact_phone = '',
+		        participant_date_of_birth = NULL, participant_age = NULL,
+		        medical_notes = '', remarks = '', ocr_name = NULL, ocr_date_of_birth = NULL,
+		        id_document_type = NULL, results_player_name = NULL
+		  WHERE student_id = ? AND (
+		        tournament_registration_id IN (SELECT white_registration_id FROM tournament_pairing)
+		     OR tournament_registration_id IN (SELECT black_registration_id FROM tournament_pairing WHERE black_registration_id IS NOT NULL)
+		     OR tournament_registration_id IN (SELECT tournament_registration_id FROM payment WHERE tournament_registration_id IS NOT NULL))`,
 		`DELETE FROM tournament_registration WHERE student_id = ?`,
 		`DELETE FROM student_parent WHERE student_id = ?`,
 		/* The LINE chat stays; it is only no longer theirs. */
@@ -152,6 +180,12 @@ func removeParent(tx *sql.Tx, parentID string, res *deleteResult) error {
 	var accountID sql.NullString
 	if err := tx.QueryRow(`SELECT user_account_id FROM parent WHERE parent_id = ?`,
 		parentID).Scan(&accountID); err != nil {
+		return err
+	}
+	/* What they agreed to stays on record — that is the record's purpose —
+	   but no longer says who they were. */
+	if _, err := tx.Exec(`UPDATE consent_record SET given_by_name = ''
+		WHERE user_account_id = ?`, accountID.String); err != nil {
 		return err
 	}
 	for _, q := range []string{
