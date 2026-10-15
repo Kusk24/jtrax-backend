@@ -9,7 +9,23 @@ import (
 	"time"
 )
 
-const sessionTTL = 30 * 24 * time.Hour
+// A session ends after SessionIdle without use, and never outlives SessionMax
+// from sign-in however busy it is. expires_at holds the idle deadline and
+// slides forward on use; created_at anchors the cap.
+//
+// The idle window is what limits a token left on a shared or lost device; the
+// cap is what limits a token that was copied and is being kept alive.
+const (
+	SessionIdle = 14 * 24 * time.Hour
+	SessionMax  = 90 * 24 * time.Hour
+)
+
+// sessionSlideEvery throttles the slide to one write per session per hour, so
+// a busy portal does not turn every read into a database write.
+const sessionSlideEvery = time.Hour
+
+// sqliteTime is the layout of datetime('now'), which fills created_at.
+const sqliteTime = "2006-01-02 15:04:05"
 
 // Identity is the resolved caller: the account plus its role-specific row id.
 type Identity struct {
@@ -43,7 +59,7 @@ func CreateSession(d *sql.DB, userAccountID string) (string, error) {
 		return "", err
 	}
 	token := hex.EncodeToString(raw)
-	expires := time.Now().UTC().Add(sessionTTL).Format(time.RFC3339)
+	expires := time.Now().UTC().Add(SessionIdle).Format(time.RFC3339)
 	_, err := d.Exec(`INSERT INTO auth_session (token_hash, user_account_id, expires_at) VALUES (?,?,?)`,
 		hashSessionToken(token), userAccountID, expires)
 	return token, err
@@ -77,22 +93,30 @@ func Lookup(d *sql.DB, token string) (*Identity, error) {
 		return nil, ErrNoSession
 	}
 	var id Identity
-	var expires string
+	var created, expires string
+	tokenHash := hashSessionToken(token)
 	err := d.QueryRow(`
 		SELECT u.user_account_id, u.email, u.role, u.display_name,
-		       u.language_preference, u.theme_preference, s.expires_at
+		       u.language_preference, u.theme_preference, s.created_at, s.expires_at
 		FROM auth_session s JOIN user_account u ON u.user_account_id = s.user_account_id
-		WHERE s.token_hash = ?`, hashSessionToken(token)).
-		Scan(&id.UserAccountID, &id.Email, &id.Role, &id.DisplayName, &id.Language, &id.Theme, &expires)
+		WHERE s.token_hash = ?`, tokenHash).
+		Scan(&id.UserAccountID, &id.Email, &id.Role, &id.DisplayName, &id.Language, &id.Theme, &created, &expires)
 	if err == sql.ErrNoRows {
 		return nil, ErrNoSession
 	}
 	if err != nil {
 		return nil, err
 	}
-	if exp, err := time.Parse(time.RFC3339, expires); err != nil || time.Now().After(exp) {
+	now := time.Now().UTC()
+	exp, err := time.Parse(time.RFC3339, expires)
+	if err != nil || now.After(exp) {
 		return nil, ErrNoSession
 	}
+	born, err := time.Parse(sqliteTime, created)
+	if err != nil || now.After(born.Add(SessionMax)) {
+		return nil, ErrNoSession
+	}
+	slideSession(d, tokenHash, now, exp, born)
 	// Archived after signing in: the session ends with the archive.
 	if (id.Role == "Student" || id.Role == "Parent") && IsArchived(d, id.UserAccountID) {
 		return nil, ErrNoSession
@@ -103,4 +127,19 @@ func Lookup(d *sql.DB, token string) (*Identity, error) {
 	d.QueryRow(`SELECT student_id FROM student WHERE user_account_id = ?`, id.UserAccountID).Scan(&id.StudentID)
 	d.QueryRow(`SELECT admin_id FROM admin WHERE user_account_id = ?`, id.UserAccountID).Scan(&id.AdminID)
 	return &id, nil
+}
+
+// slideSession moves the idle deadline to now+SessionIdle, clamped to the cap,
+// once at least sessionSlideEvery has passed since the last move. A failed
+// write is ignored: the session is still valid now, and the next request
+// tries again.
+func slideSession(d *sql.DB, tokenHash string, now, exp, born time.Time) {
+	next := now.Add(SessionIdle)
+	if limit := born.Add(SessionMax); next.After(limit) {
+		next = limit
+	}
+	if next.Sub(exp) < sessionSlideEvery {
+		return
+	}
+	d.Exec(`UPDATE auth_session SET expires_at = ? WHERE token_hash = ?`, next.Format(time.RFC3339), tokenHash)
 }
