@@ -400,8 +400,9 @@ func TestRegistrationKeepsWhatTheFamilyWrote(t *testing.T) {
 
 	status, obj, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
 		"student_id":    "stu_penny",
-		"medical_notes": "Asthma — inhaler in her bag.",
-		"remarks":       "Please seat her near the door.",
+		"medical_notes":  "Asthma — inhaler in her bag.",
+		"remarks":        "Please seat her near the door.",
+		"health_consent": true,
 	}))
 	if status != 201 {
 		t.Fatalf("registering with notes: %d (%v)", status, obj)

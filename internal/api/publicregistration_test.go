@@ -45,7 +45,7 @@ func entry(over map[string]any) map[string]any {
 		"name": "Somchai Niran", "email": "somchai@example.com", "phone": "081-000-0000",
 		// Required of every entry now, so it belongs in the baseline rather
 		// than in each case — the cases that care set it false explicitly.
-		"acceptTerms": true,
+		"acceptTerms": true, "privacyNotice": true,
 	}
 	for k, v := range over {
 		body[k] = v

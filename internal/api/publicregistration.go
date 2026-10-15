@@ -267,6 +267,10 @@ type registerInput struct {
 	   rather than assumed: "did this person agree not to be refunded" is
 	   exactly the question somebody asks three weeks later. */
 	AcceptTerms bool `json:"acceptTerms"`
+	/* The privacy notice (PDPA s.23): the person filling in the form — the
+	   player's parent or guardian, or the player if 20 or over — says they
+	   have read it. Required, and recorded with the notice's version. */
+	PrivacyNotice bool `json:"privacyNotice"`
 
 	/* The player's name in Thai script, as a Thai ID card prints it. Optional:
 	   a player entering on a passport has none. */
@@ -353,6 +357,9 @@ func (in *registerInput) validate() string {
 	if !in.AcceptTerms {
 		return "please accept the terms and conditions to enter"
 	}
+	if !in.PrivacyNotice {
+		return "please confirm you have read the privacy notice"
+	}
 	/* 0 is "not given", which is allowed — the age limit below is enforced on
 	   the date of birth. A negative or implausible age is a typo worth
 	   catching here, where the message can say so. */
@@ -416,6 +423,7 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			Nickname:           r.FormValue("nickname"),
 			Age:                age,
 			AcceptTerms:        r.FormValue("acceptTerms") == "true",
+			PrivacyNotice:      r.FormValue("privacyNotice") == "true",
 			NameTh:             r.FormValue("nameTh"),
 			DocumentType:       r.FormValue("documentType"),
 			ScannedName:        r.FormValue("scannedName"),
@@ -590,6 +598,13 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 					"this player is already registered for this tournament", nil)
 				return
 			}
+			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			return
+		}
+		/* No account behind a public entry, and no second copy of the
+		   family's email either — the entry it belongs to already says who,
+		   and the retention sweep blanks that when its time comes. */
+		if err := recordConsent(tx, "privacy_notice", regID, "", "public form"); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
 		}
