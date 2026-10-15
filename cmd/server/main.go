@@ -57,6 +57,9 @@ func main() {
 	// An unpaid entry's early-bird price and place lapse on their dates
 	// (internal/api/entryrules.go); this applies them through the day.
 	api.StartEntrySweeper(context.Background(), d)
+	// Personal data nothing needs any more is deleted on a timer; the
+	// academy's own periods come from JTRAX_RETAIN_* (internal/api/retention.go).
+	api.StartRetention(context.Background(), d, api.RetentionFromEnv())
 	mailCfg := mail.FromEnv()
 	// Every email's footer gives the contact details the office saved in
 	// Settings → Academy Contact.
