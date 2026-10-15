@@ -85,3 +85,22 @@ func TestAnErasureRequestReachesTheOfficeOnce(t *testing.T) {
 		t.Errorf("resolving twice: want 404, got %d", status)
 	}
 }
+
+func TestDeletingTheGuardianCompletesTheirRequest(t *testing.T) {
+	srv := newServer(t)
+	parent := &client{t: t, srv: srv}
+	parent.login("sandy01234@gmail.com")
+	_, req, _ := parent.do("POST", "/api/v1/me/erasure-request", map[string]any{})
+	admin := &client{t: t, srv: srv}
+	admin.login("admin@jca.ac.th")
+	if status, out, _ := admin.do("DELETE", "/api/v1/parents/par_sandy/cascade?children=delete", nil); status != 200 && status != 204 {
+		t.Fatalf("delete family: %d (%v)", status, out)
+	}
+	_, _, list := admin.do("GET", "/api/v1/data-requests", nil)
+	if len(list) != 1 || list[0]["data_request_id"] != req["data_request_id"] || list[0]["status"] != "Done" {
+		t.Fatalf("after the delete: %v", list)
+	}
+	if list[0]["requested_by_name"] != "Sandy Jones" {
+		t.Errorf("the record of who asked was lost: %v", list[0])
+	}
+}
