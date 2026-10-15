@@ -228,12 +228,18 @@ func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
 				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
-			hash, err := auth.HashPassword(*in.Password)
-			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not hash password", err)
+			/* A new password ends every session the account holds — handing an
+			   account back is pointless if a phone somewhere stays signed in.
+			   Only the admin's own console session survives a change to their
+			   own password. */
+			keep := ""
+			if caller.UserAccountID == id {
+				keep = bearerToken(r)
+			}
+			if err := auth.SetPasswordKeeping(d, id, *in.Password, keep); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not set password", err)
 				return
 			}
-			d.Exec(`UPDATE user_account SET password_hash = ? WHERE user_account_id = ?`, hash, id)
 		}
 		row, err := accountRow(d, id)
 		if err != nil {
