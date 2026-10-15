@@ -182,6 +182,12 @@ func removeParent(tx *sql.Tx, parentID string, res *deleteResult) error {
 		parentID).Scan(&accountID); err != nil {
 		return err
 	}
+	/* What they agreed to stays on record — that is the record's purpose —
+	   but no longer says who they were. */
+	if _, err := tx.Exec(`UPDATE consent_record SET given_by_name = ''
+		WHERE user_account_id = ?`, accountID.String); err != nil {
+		return err
+	}
 	for _, q := range []string{
 		/* Deleting the guardian is how an erasure request is carried out
 		   (mydata.go), so it closes theirs — before the parent row goes and

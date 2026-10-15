@@ -169,6 +169,9 @@ func TestErasingAFamilyWithAHistoryGoesThrough(t *testing.T) {
 	if name != "Former player" || student.Valid {
 		t.Errorf("kept entry still says who played: %q %v", name, student)
 	}
+	if n := count(t, d, `SELECT COUNT(*) FROM consent_record WHERE given_by_name <> '' AND tournament_registration_id = ?`, regID); n != 0 {
+		t.Errorf("consent still names the guardian")
+	}
 	for _, q := range []string{
 		`SELECT COUNT(*) FROM student WHERE student_id = 'stu_penny'`,
 		`SELECT COUNT(*) FROM solo_game WHERE student_id = 'stu_penny'`,
