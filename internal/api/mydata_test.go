@@ -104,3 +104,21 @@ func TestDeletingTheGuardianCompletesTheirRequest(t *testing.T) {
 		t.Errorf("the record of who asked was lost: %v", list[0])
 	}
 }
+
+func TestTheExportIncludesWhatTheFamilyAgreedTo(t *testing.T) {
+	c := &client{t: t, srv: newServer(t)}
+	c.login("sandy01234@gmail.com")
+	if status, row, _ := c.do("POST", "/api/v1/tournaments/trn_wellington/entries", verifiedEntry(t, c, map[string]any{
+		"student_id": "stu_penny", "privacy_notice": true,
+	})); status != 201 {
+		t.Fatalf("enter: %d (%v)", status, row)
+	}
+	_, out, _ := c.do("GET", "/api/v1/me/export", nil)
+	consents, _ := out["consents"].([]any)
+	if len(consents) != 1 || out["notice_version"] == nil {
+		t.Fatalf("export consents: %v, version %v", out["consents"], out["notice_version"])
+	}
+	if consents[0].(map[string]any)["purpose"] != "privacy_notice" {
+		t.Errorf("consent: %v", consents[0])
+	}
+}

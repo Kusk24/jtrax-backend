@@ -83,13 +83,16 @@ type section struct {
 // parameter: the only family it can read is the caller's.
 func exportFor(d *sql.DB, id *auth.Identity) (map[string]any, error) {
 	out := map[string]any{
-		"exported_at": time.Now().UTC().Format(time.RFC3339),
+		"exported_at":    time.Now().UTC().Format(time.RFC3339),
+		"notice_version": PrivacyNoticeVersion,
 	}
 	sections := []section{
 		{"account", `SELECT email, role, display_name, language_preference, theme_preference
 			FROM user_account WHERE user_account_id = ?`, []any{id.UserAccountID}},
 		{"notifications", `SELECT type, title, body, created_at, read_at
 			FROM notification WHERE user_account_id = ? ORDER BY created_at`, []any{id.UserAccountID}},
+		{"consents", `SELECT purpose, notice_version, tournament_registration_id, given_at, withdrawn_at
+			FROM consent_record WHERE user_account_id = ? ORDER BY given_at`, []any{id.UserAccountID}},
 	}
 	var students []string
 	switch id.Role {
