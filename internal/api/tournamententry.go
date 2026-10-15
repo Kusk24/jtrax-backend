@@ -32,6 +32,14 @@ type entryRequest struct {
 	Nickname    string `json:"nickname"`
 	NameTh      string `json:"participant_name_th"`
 	AcceptTerms bool   `json:"accept_terms"`
+	/* The privacy notice (PDPA s.23), recorded when the app says the parent
+	   saw it. Not refused when absent: phones still on an older build send
+	   no such field, and the parent is entering their own child under the
+	   academy's contract with them. */
+	PrivacyNotice bool `json:"privacy_notice"`
+	/* Explicit consent for medical notes, which are health data (PDPA s.26).
+	   Required whenever any are given. */
+	HealthConsent bool `json:"health_consent"`
 }
 
 // handleEnterTournament registers one of the caller's children for the
@@ -77,6 +85,10 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		// agreement nobody gave is worse than none.
 		if !in.AcceptTerms {
 			httpx.Error(w, http.StatusBadRequest, "please accept the terms and conditions to enter", nil)
+			return
+		}
+		if strings.TrimSpace(in.MedicalNotes) != "" && !in.HealthConsent {
+			httpx.Error(w, http.StatusBadRequest, "please agree to the academy keeping the medical notes, or leave them empty", nil)
 			return
 		}
 		if len(in.Contact) > maxPhoneLen {
@@ -220,6 +232,18 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
 			return
+		}
+		if in.PrivacyNotice {
+			if err := recordConsent(tx, "privacy_notice", regID, id.UserAccountID, id.DisplayName); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				return
+			}
+		}
+		if strings.TrimSpace(in.MedicalNotes) != "" {
+			if err := recordConsent(tx, "health_data", regID, id.UserAccountID, id.DisplayName); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				return
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
