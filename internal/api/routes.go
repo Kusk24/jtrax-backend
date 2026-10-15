@@ -115,6 +115,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	// than `/students/{id}`, so the two coexist either way, but keeping the
 	// bespoke mounts together says which is which.
 	mountPeopleCascade(mux, d)
+	mountMyData(mux, d)
 	// Reads a photographed paper form and hands the fields back for staff to
 	// confirm. Writes nothing, so it sits outside the registry.
 	mountRegistrationScan(mux, d, scanner)
