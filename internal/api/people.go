@@ -155,6 +155,12 @@ func removeParent(tx *sql.Tx, parentID string, res *deleteResult) error {
 		return err
 	}
 	for _, q := range []string{
+		/* Deleting the guardian is how an erasure request is carried out
+		   (mydata.go), so it closes theirs — before the parent row goes and
+		   the request's link to it is cleared. */
+		`UPDATE data_request SET status = 'Done', resolved_at = datetime('now'),
+		        resolution_note = 'Erased: the guardian was deleted.'
+		  WHERE parent_id = ? AND status = 'Open'`,
 		`DELETE FROM parent_contact WHERE parent_id = ?`,
 		`DELETE FROM notification_preference WHERE parent_id = ?`,
 		`DELETE FROM student_parent WHERE parent_id = ?`,
