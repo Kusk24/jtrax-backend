@@ -10,12 +10,14 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
-func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
+func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) gin.HandlerFunc {
 	// Budgets reset requests per address, for the same reason sign-in is
 	// budgeted per account: the callers all arrive from one server, so an IP
 	// budget of three a minute was three for the whole academy. Three per
@@ -23,12 +25,12 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 	// a third party, which is what this limit is actually for.
 	resetLimiter := httpx.NewLimiter(3)
 
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(ctx *gin.Context) {
 		var in struct {
 			Email string `json:"email"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "email is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "email is required", err)
 			return
 		}
 		email := auth.NormalizeEmail(in.Email)
@@ -36,7 +38,7 @@ func handleForgotPassword(d *sql.DB, cfg mail.Config, sender mail.Sender) http.H
 		// The response is identical whether or not the address is registered.
 		// Anything else turns this endpoint into a way to enumerate the
 		// academy's parents and students by trying addresses.
-		defer httpx.JSON(w, http.StatusAccepted, map[string]string{
+		defer httpx.JSON(ctx, http.StatusAccepted, map[string]string{
 			"status": "if that email has an account, a reset link is on its way",
 		})
 		// Over budget is treated exactly like an unknown address — the same
@@ -109,29 +111,29 @@ func resetLink(appURL, token string) string {
 	return strings.TrimSuffix(appURL, "/") + "/reset-password?token=" + url.QueryEscape(token)
 }
 
-func handleResetPassword(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handleResetPassword(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		var in struct {
 			Token    string `json:"token"`
 			Password string `json:"password"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || in.Token == "" {
-			httpx.Error(w, http.StatusBadRequest, "token and password are required", err)
+		if err := httpx.Decode(ctx, &in); err != nil || in.Token == "" {
+			httpx.Error(ctx, http.StatusBadRequest, "token and password are required", err)
 			return
 		}
 		if err := auth.ValidatePassword(in.Password); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		if err := auth.ConsumeReset(d, in.Token, in.Password); err != nil {
 			if errors.Is(err, auth.ErrResetInvalid) {
-				httpx.Error(w, http.StatusBadRequest, "that reset link is invalid or has expired", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "that reset link is invalid or has expired", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not reset the password", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not reset the password", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "password updated"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "password updated"})
 	}
 }
 
@@ -199,11 +201,11 @@ func sendChildReset(d *sql.DB, cfg mail.Config, sender mail.Sender, loginID stri
 }
 
 // handleChangePassword lets a signed-in person replace their own password.
-func handleChangePassword(d *sql.DB) http.HandlerFunc {
+func handleChangePassword(d *sql.DB) gin.HandlerFunc {
 	// Per account, so the current-password check cannot be used to guess it.
 	limiter := httpx.NewLimiter(5)
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := RequireIdentity(d, w, r)
+	return func(ctx *gin.Context) {
+		id := RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -211,27 +213,27 @@ func handleChangePassword(d *sql.DB) http.HandlerFunc {
 			CurrentPassword string `json:"currentPassword"`
 			NewPassword     string `json:"newPassword"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || in.CurrentPassword == "" || in.NewPassword == "" {
-			httpx.Error(w, http.StatusBadRequest, "current and new password are required", err)
+		if err := httpx.Decode(ctx, &in); err != nil || in.CurrentPassword == "" || in.NewPassword == "" {
+			httpx.Error(ctx, http.StatusBadRequest, "current and new password are required", err)
 			return
 		}
 		if !limiter.Allow(id.UserAccountID) {
-			httpx.Error(w, http.StatusTooManyRequests, "too many attempts — wait a minute and try again", nil)
+			httpx.Error(ctx, http.StatusTooManyRequests, "too many attempts — wait a minute and try again", nil)
 			return
 		}
 		if err := auth.ValidatePassword(in.NewPassword); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
-		if err := auth.ChangePassword(d, id.UserAccountID, in.CurrentPassword, in.NewPassword, BearerToken(r)); err != nil {
+		if err := auth.ChangePassword(d, id.UserAccountID, in.CurrentPassword, in.NewPassword, BearerToken(ctx.Request)); err != nil {
 			if errors.Is(err, auth.ErrWrongPassword) {
-				httpx.Error(w, http.StatusBadRequest, "your current password is not right", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "your current password is not right", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not change the password", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not change the password", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "password changed"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "password changed"})
 	}
 }
 

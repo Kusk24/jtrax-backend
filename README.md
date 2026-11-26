@@ -66,10 +66,13 @@ their transaction in the owning feature. The registry in
 External capabilities such as Stripe checkout, mail delivery, OCR, Lichess
 puzzles and tournament results have interfaces at their integration boundaries.
 
-Each route is declared once. Gin dispatches ordinary requests. A compatibility
-mux preserves the existing behavior for HEAD, escaped or noncanonical paths,
-and method errors. The HTTP integration suite in `internal/api` exercises the
-features through the full server handler with a temporary database.
+Features register routes with Gin and receive a `*gin.Context`. CORS and
+per-route rate limits run as Gin middleware. Use `internal/httpx` for the
+school API’s JSON format and strict request decoding. Gin dispatches HEAD
+requests and escaped paths to the same handlers as GET and ordinary paths.
+The router uses Go’s standard HTTP errors and canonical redirects to preserve
+existing client behavior. The integration suite in `internal/api` exercises
+the full handler with a temporary database.
 
 ## Deploy
 

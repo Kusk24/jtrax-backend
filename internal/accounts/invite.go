@@ -15,19 +15,21 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
-func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := RequireIdentity(d, w, r)
+func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		// Optionally, the logins of children registered with this parent a
@@ -37,33 +39,33 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 		var in struct {
 			StudentLogins []studentLogin `json:"studentLogins"`
 		}
-		if err := httpx.Decode(r, &in); err != nil && !errors.Is(err, io.EOF) {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil && !errors.Is(err, io.EOF) {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
-		accountID := r.PathValue("id")
+		accountID := ctx.Param("id")
 		var email, displayName, role string
 		if err := d.QueryRow(`SELECT email, display_name, role FROM user_account WHERE user_account_id = ?`,
 			accountID).Scan(&email, &displayName, &role); err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 		// A child's login ID is not a mailbox; the office sets their password.
 		if !auth.LooksLikeEmail(email) {
-			httpx.Error(w, http.StatusUnprocessableEntity, "this account has no email address to send an invite to", nil)
+			httpx.Error(ctx, http.StatusUnprocessableEntity, "this account has no email address to send an invite to", nil)
 			return
 		}
 
 		for _, l := range in.StudentLogins {
 			if !isChildLogin(d, accountID, l) {
-				httpx.Error(w, http.StatusUnprocessableEntity, "that student login does not belong to this parent's child", nil)
+				httpx.Error(ctx, http.StatusUnprocessableEntity, "that student login does not belong to this parent's child", nil)
 				return
 			}
 		}
 
 		token, err := auth.CreateResetFor(d, accountID, auth.InviteTTL)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not create the invite", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not create the invite", err)
 			return
 		}
 		link := resetLink(cfg.PortalFor(role), token)
@@ -73,7 +75,7 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 			// account can still be set up, and the console is told nothing
 			// was delivered.
 			log.Printf("invite: SMTP not configured — link for %s (SENSITIVE): %s", email, link)
-			httpx.JSON(w, http.StatusAccepted, map[string]any{"email": email, "delivered": false})
+			httpx.JSON(ctx, http.StatusAccepted, map[string]any{"email": email, "delivered": false})
 			return
 		}
 		subject, body := "Welcome to JCA Chess School! ♟️",
@@ -84,10 +86,10 @@ func handleInvite(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFu
 			subject, body = "JCA Chess School: Set Your JTrax Password", studentPasswordEmail(displayName, email, link)
 		}
 		if err := mail.Deliver(sender, email, subject, body); err != nil {
-			httpx.Error(w, http.StatusBadGateway, "the invite email could not be sent", err)
+			httpx.Error(ctx, http.StatusBadGateway, "the invite email could not be sent", err)
 			return
 		}
-		httpx.JSON(w, http.StatusAccepted, map[string]any{"email": email, "delivered": true})
+		httpx.JSON(ctx, http.StatusAccepted, map[string]any{"email": email, "delivered": true})
 	}
 }
 

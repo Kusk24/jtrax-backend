@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/entrylinks"
@@ -211,14 +213,14 @@ func mailArrival(d *sql.DB, cfg mail.Config, sender mail.Sender, r dueReminder, 
 // handleResendArrival sends one entrant's reminder again, from the
 // Participants table. Only while they have not answered and the tournament
 // has not started; the new link replaces the old one.
-func handleResendArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleResendArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
 		var due dueReminder
 		var answer, status string
-		due.regID = r.PathValue("id")
+		due.regID = ctx.Param("id")
 		err := d.QueryRow(`
 			SELECT t.tournament_id, t.name, r.participant_name, r.contact_email,
 			       COALESCE(r.student_id, ''), COALESCE(t.start_date, ''), COALESCE(t.venue_name, ''),
@@ -229,62 +231,62 @@ func handleResendArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.Ha
 			Scan(&due.tournamentID, &due.tournament, &due.participant, &due.email,
 				&due.studentID, &due.start, &due.venue, &answer, &status)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such entry", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such entry", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entry", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entry", err)
 			return
 		}
 		if answer != "Pending" {
-			httpx.Error(w, http.StatusConflict, "this entrant has already answered", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entrant has already answered", nil)
 			return
 		}
 		if status != "Approved" || (due.start != "" && due.start < academytime.Today()) {
-			httpx.Error(w, http.StatusConflict, "this entry can no longer be asked", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry can no longer be asked", nil)
 			return
 		}
 		if len(arrivalRecipients(d, due)) == 0 {
-			httpx.Error(w, http.StatusConflict, "this entry has no email to send to", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry has no email to send to", nil)
 			return
 		}
 		code, hash, err := entrylinks.NewPayCode()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not send", err)
 			return
 		}
 		sentAt := time.Now().UTC().Format(time.RFC3339)
 		if _, err := d.Exec(`UPDATE tournament_registration
 		                        SET arrival_reminded_at = ?, arrival_code_hash = ?
 		                      WHERE tournament_registration_id = ?`, sentAt, hash, due.regID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not send", err)
 			return
 		}
 		sent := mailArrival(d, cfg, sender, due, code)
-		httpx.JSON(w, http.StatusOK, map[string]any{"sent": sent, "arrival_reminded_at": sentAt})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"sent": sent, "arrival_reminded_at": sentAt})
 	}
 }
 
 // handleBatchArrival asks the chosen entrants of one tournament in one go,
 // one email per family. Entries that have answered, are not approved, or
 // whose tournament has started are skipped rather than refused.
-func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
 		var body struct {
 			IDs []string `json:"registration_ids"`
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || len(body.IDs) == 0 {
-			httpx.Error(w, http.StatusBadRequest, "choose who to ask", nil)
+		if err := json.NewDecoder(io.LimitReader(ctx.Request.Body, 1<<20)).Decode(&body); err != nil || len(body.IDs) == 0 {
+			httpx.Error(ctx, http.StatusBadRequest, "choose who to ask", nil)
 			return
 		}
 		if len(body.IDs) > 1000 {
-			httpx.Error(w, http.StatusBadRequest, "too many entries at once", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "too many entries at once", nil)
 			return
 		}
-		args := []any{r.PathValue("id"), academytime.Today()}
+		args := []any{ctx.Param("id"), academytime.Today()}
 		marks := make([]string, len(body.IDs))
 		for i, id := range body.IDs {
 			marks[i] = "?"
@@ -301,7 +303,7 @@ func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.Han
 			   AND (COALESCE(t.start_date, '') = '' OR t.start_date >= ?)
 			   AND r.tournament_registration_id IN (`+strings.Join(marks, ",")+`)`, args...)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entries", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entries", err)
 			return
 		}
 		var due []dueReminder
@@ -310,7 +312,7 @@ func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.Han
 			if err := rows.Scan(&e.regID, &e.tournamentID, &e.tournament, &e.participant,
 				&e.email, &e.studentID, &e.start, &e.venue); err != nil {
 				rows.Close()
-				httpx.Error(w, http.StatusInternalServerError, "could not read the entries", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not read the entries", err)
 				return
 			}
 			due = append(due, e)
@@ -326,10 +328,10 @@ func handleBatchArrival(d *sql.DB, cfg mail.Config, sender mail.Sender) http.Han
 		due = reachable
 		asked, err := askFamilies(d, cfg, sender, due, "arrival_status = 'Pending'")
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not send", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"asked": asked, "skipped": len(body.IDs) - asked})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"asked": asked, "skipped": len(body.IDs) - asked})
 	}
 }
 
@@ -465,105 +467,105 @@ func findArrival(d *sql.DB, regID, code string) (*arrivalEntry, error) {
 // handleArrivalBanner sends the tournament's banner to the holder of a
 // reminder link. POST, like the page itself, so the code stays out of
 // addresses and logs; the page turns the bytes into the picture.
-func handleArrivalBanner(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code, ok := readCode(w, r)
+func handleArrivalBanner(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		code, ok := readCode(ctx)
 		if !ok {
 			return
 		}
-		e, err := findArrival(d, r.PathValue("id"), code)
+		e, err := findArrival(d, ctx.Param("id"), code)
 		if errors.Is(err, errNoArrival) || (err == nil && !e.HasBanner) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load banner", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load banner", err)
 			return
 		}
 		var mime string
 		var data []byte
 		if err := d.QueryRow(`SELECT content_type, bytes FROM tournament_banner WHERE tournament_id = ?`,
 			e.tournamentID).Scan(&mime, &data); err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
-		w.Header().Set("Content-Type", mime)
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(data)
+		ctx.Header("Content-Type", mime)
+		ctx.Header("Cache-Control", "no-store")
+		_, _ = ctx.Writer.Write(data)
 	}
 }
 
 // handleArrival shows the holder of a reminder link what they are answering.
-func handleArrival(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code, ok := readCode(w, r)
+func handleArrival(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		code, ok := readCode(ctx)
 		if !ok {
 			return
 		}
-		e, err := findArrival(d, r.PathValue("id"), code)
+		e, err := findArrival(d, ctx.Param("id"), code)
 		if errors.Is(err, errNoArrival) {
-			httpx.Error(w, http.StatusNotFound, "this link does not work", nil)
+			httpx.Error(ctx, http.StatusNotFound, "this link does not work", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entry", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entry", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, e)
+		httpx.JSON(ctx, http.StatusOK, e)
 	}
 }
 
 // handleArrivalAnswer records Confirmed or NotAttending. Answering again
 // changes the answer, until the tournament starts.
-func handleArrivalAnswer(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handleArrivalAnswer(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		var in struct {
 			Code   string `json:"code"`
 			Answer string `json:"answer"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
 		if in.Answer != "Confirmed" && in.Answer != "NotAttending" {
-			httpx.Error(w, http.StatusBadRequest, "answer must be Confirmed or NotAttending", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "answer must be Confirmed or NotAttending", nil)
 			return
 		}
-		regID := r.PathValue("id")
+		regID := ctx.Param("id")
 		e, err := findArrival(d, regID, strings.TrimSpace(in.Code))
 		if errors.Is(err, errNoArrival) {
-			httpx.Error(w, http.StatusNotFound, "this link does not work", nil)
+			httpx.Error(ctx, http.StatusNotFound, "this link does not work", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entry", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entry", err)
 			return
 		}
 		if !e.Open {
-			httpx.Error(w, http.StatusConflict, "this tournament can no longer be answered", nil)
+			httpx.Error(ctx, http.StatusConflict, "this tournament can no longer be answered", nil)
 			return
 		}
 		if _, err := d.Exec(`UPDATE tournament_registration
 		                        SET arrival_status = ?, arrival_answered_at = ?
 		                      WHERE tournament_registration_id = ?`,
 			in.Answer, time.Now().UTC().Format(time.RFC3339), regID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the answer", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the answer", err)
 			return
 		}
 		e.Status = in.Answer
-		httpx.JSON(w, http.StatusOK, e)
+		httpx.JSON(ctx, http.StatusOK, e)
 	}
 }
 
-func mountArrival(mux httpx.RouteRegistrar, d *sql.DB, cfg mail.Config, sender mail.Sender) {
-	const a = "/api/v1/public/arrival/{id}"
-	mux.HandleFunc("POST "+a, httpx.RateLimit(30, handleArrival(d)))
-	mux.HandleFunc("POST "+a+"/answer", httpx.RateLimit(20, handleArrivalAnswer(d)))
-	mux.HandleFunc("POST "+a+"/banner", httpx.RateLimit(30, handleArrivalBanner(d)))
-	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/arrival-reminder",
-		httpx.RateLimit(30, handleResendArrival(d, cfg, sender)))
-	mux.HandleFunc("POST /api/v1/tournaments/{id}/arrival-reminders",
-		httpx.RateLimit(10, handleBatchArrival(d, cfg, sender)))
+func mountArrival(mux gin.IRoutes, d *sql.DB, cfg mail.Config, sender mail.Sender) {
+	const a = "/api/v1/public/arrival/:id"
+	mux.POST(a, httpx.RateLimit(30), handleArrival(d))
+	mux.POST(a+"/answer", httpx.RateLimit(20), handleArrivalAnswer(d))
+	mux.POST(a+"/banner", httpx.RateLimit(30), handleArrivalBanner(d))
+	mux.POST("/api/v1/tournament-registrations/:id/arrival-reminder",
+		httpx.RateLimit(30), handleResendArrival(d, cfg, sender))
+	mux.POST("/api/v1/tournaments/:id/arrival-reminders",
+		httpx.RateLimit(10), handleBatchArrival(d, cfg, sender))
 }
 
 // SendArrivalReminders runs one reminder pass as of `day`. Exported for tests,

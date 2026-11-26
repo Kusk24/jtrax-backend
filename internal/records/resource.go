@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -214,14 +216,14 @@ func (rs *Resource) scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-func (rs *Resource) handleList(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func (rs *Resource) handleList(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !rs.canRead(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		where := []string{}
@@ -230,7 +232,7 @@ func (rs *Resource) handleList(d *sql.DB) http.HandlerFunc {
 			where = append(where, frag)
 			args = append(args, a...)
 		}
-		for name, vals := range r.URL.Query() {
+		for name, vals := range ctx.Request.URL.Query() {
 			if rs.col(name) == nil && name != rs.IDCol {
 				continue // ignore unknown query params (e.g. cache busters)
 			}
@@ -244,16 +246,16 @@ func (rs *Resource) handleList(d *sql.DB) http.HandlerFunc {
 		q += " ORDER BY " + rs.IDCol
 		rows, err := d.Query(q, args...)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		defer rows.Close()
 		list, err := rs.scanRows(rows)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, list)
+		httpx.JSON(ctx, http.StatusOK, list)
 	}
 }
 
@@ -279,38 +281,38 @@ func (rs *Resource) fetch(d *sql.DB, id *auth.Identity, rowID string) (map[strin
 	return list[0], http.StatusOK, nil
 }
 
-func (rs *Resource) handleGet(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func (rs *Resource) handleGet(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !rs.canRead(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		row, status, err := rs.fetch(d, id, r.PathValue("id"))
+		row, status, err := rs.fetch(d, id, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, status, "not found", err)
+			httpx.Error(ctx, status, "not found", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, row)
+		httpx.JSON(ctx, http.StatusOK, row)
 	}
 }
 
-func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func (rs *Resource) handleCreate(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !rs.canWrite(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		row := map[string]any{}
-		if err := httpx.Decode(r, &row); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &row); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		rowID, _ := row[rs.IDCol].(string)
@@ -326,18 +328,18 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 			}
 		}
 		if err := rs.validate(row, true); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		if rs.Check != nil {
 			if err := rs.Check(row); err != nil {
-				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+				httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
 		}
 		if rowID == "" {
 			if rs.IDPrefix == "" {
-				httpx.Error(w, http.StatusBadRequest, rs.IDCol+" is required", nil)
+				httpx.Error(ctx, http.StatusBadRequest, rs.IDCol+" is required", nil)
 				return
 			}
 			rowID = db.NewID(rs.IDPrefix)
@@ -350,7 +352,7 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 				ownRow[k] = v
 			}
 			if !rs.Own(d, id, ownRow) {
-				httpx.Error(w, http.StatusForbidden, "not allowed for this record", nil)
+				httpx.Error(ctx, http.StatusForbidden, "not allowed for this record", nil)
 				return
 			}
 		}
@@ -385,61 +387,61 @@ func (rs *Resource) handleCreate(d *sql.DB) http.HandlerFunc {
 		if err != nil {
 			var ce *ClientError
 			if errors.As(err, &ce) {
-				httpx.Error(w, ce.Status, ce.Message, err)
+				httpx.Error(ctx, ce.Status, ce.Message, err)
 				return
 			}
 			if rs.Duplicate != nil {
 				if msg := rs.Duplicate(err); msg != "" {
-					httpx.Error(w, http.StatusConflict, msg, err)
+					httpx.Error(ctx, http.StatusConflict, msg, err)
 					return
 				}
 			}
-			httpx.Error(w, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
+			httpx.Error(ctx, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
 			return
 		}
 		created, _, err := rs.fetch(d, id, rowID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "created but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "created but could not reload", err)
 			return
 		}
 		if rs.AfterCommit != nil {
 			rs.AfterCommit(d, id, created, true)
 		}
-		httpx.JSON(w, http.StatusCreated, created)
+		httpx.JSON(ctx, http.StatusCreated, created)
 	}
 }
 
-func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func (rs *Resource) handleUpdate(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !rs.canWrite(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		existing, status, err := rs.fetch(d, id, r.PathValue("id"))
+		existing, status, err := rs.fetch(d, id, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, status, "not found", err)
+			httpx.Error(ctx, status, "not found", err)
 			return
 		}
 		if !accounts.IsStaff(id.Role) && rs.Own != nil && !rs.Own(d, id, existing) {
-			httpx.Error(w, http.StatusForbidden, "not allowed for this record", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed for this record", nil)
 			return
 		}
 		patch := map[string]any{}
-		if err := httpx.Decode(r, &patch); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &patch); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		delete(patch, rs.IDCol)
 		if err := rs.validate(patch, false); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		if len(patch) == 0 {
-			httpx.JSON(w, http.StatusOK, existing)
+			httpx.JSON(ctx, http.StatusOK, existing)
 			return
 		}
 		if rs.Check != nil {
@@ -451,7 +453,7 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 				merged[k] = v
 			}
 			if err := rs.Check(merged); err != nil {
-				httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+				httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
 		}
@@ -461,7 +463,7 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			sets = append(sets, name+" = ?")
 			args = append(args, v)
 		}
-		args = append(args, r.PathValue("id"))
+		args = append(args, ctx.Param("id"))
 		query := "UPDATE " + rs.Table + " SET " + strings.Join(sets, ", ") + " WHERE " + rs.IDCol + " = ?"
 		if rs.AfterWrite == nil && rs.BeforeUpdate == nil {
 			_, err = d.Exec(query, args...)
@@ -471,7 +473,7 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 			   from the row as it now stands. */
 			err = db.InTransaction(d, func(tx *sql.Tx) error {
 				if rs.BeforeUpdate != nil {
-					if e := rs.BeforeUpdate(tx, id, r.PathValue("id"), existing, patch); e != nil {
+					if e := rs.BeforeUpdate(tx, id, ctx.Param("id"), existing, patch); e != nil {
 						return e
 					}
 				}
@@ -481,49 +483,49 @@ func (rs *Resource) handleUpdate(d *sql.DB) http.HandlerFunc {
 				if rs.AfterWrite == nil {
 					return nil
 				}
-				return rs.AfterWrite(tx, r.PathValue("id"))
+				return rs.AfterWrite(tx, ctx.Param("id"))
 			})
 		}
 		if err != nil {
 			var ce *ClientError
 			if errors.As(err, &ce) {
-				httpx.Error(w, ce.Status, ce.Message, err)
+				httpx.Error(ctx, ce.Status, ce.Message, err)
 				return
 			}
 			if rs.Duplicate != nil {
 				if msg := rs.Duplicate(err); msg != "" {
-					httpx.Error(w, http.StatusConflict, msg, err)
+					httpx.Error(ctx, http.StatusConflict, msg, err)
 					return
 				}
 			}
-			httpx.Error(w, http.StatusBadRequest, "could not update record", err)
+			httpx.Error(ctx, http.StatusBadRequest, "could not update record", err)
 			return
 		}
-		updated, _, err := rs.fetch(d, id, r.PathValue("id"))
+		updated, _, err := rs.fetch(d, id, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "updated but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "updated but could not reload", err)
 			return
 		}
 		if rs.AfterCommit != nil {
 			rs.AfterCommit(d, id, updated, false)
 		}
-		httpx.JSON(w, http.StatusOK, updated)
+		httpx.JSON(ctx, http.StatusOK, updated)
 	}
 }
 
 // Deletes are staff-only across the board.
-func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func (rs *Resource) handleDelete(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		if rs.NoDelete != "" {
-			httpx.Error(w, http.StatusMethodNotAllowed, rs.NoDelete, nil)
+			httpx.Error(ctx, http.StatusMethodNotAllowed, rs.NoDelete, nil)
 			return
 		}
 		del := "DELETE FROM " + rs.Table + " WHERE " + rs.IDCol + " = ?"
@@ -531,7 +533,7 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 		var err error
 		if rs.BeforeDelete == nil {
 			var res sql.Result
-			if res, err = d.Exec(del, r.PathValue("id")); err == nil {
+			if res, err = d.Exec(del, ctx.Param("id")); err == nil {
 				affected, _ = res.RowsAffected()
 			}
 		} else {
@@ -539,10 +541,10 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 			   credits refunded but the attendance still standing would be worse
 			   than either alone. */
 			err = db.InTransaction(d, func(tx *sql.Tx) error {
-				if e := rs.BeforeDelete(tx, r.PathValue("id")); e != nil {
+				if e := rs.BeforeDelete(tx, ctx.Param("id")); e != nil {
 					return e
 				}
-				res, e := tx.Exec(del, r.PathValue("id"))
+				res, e := tx.Exec(del, ctx.Param("id"))
 				if e != nil {
 					return e
 				}
@@ -551,27 +553,23 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 			})
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusConflict, "cannot delete: record is referenced by other data", err)
+			httpx.Error(ctx, http.StatusConflict, "cannot delete: record is referenced by other data", err)
 			return
 		}
 		if affected == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "deleted"})
 	}
 }
 
-// Mount registers the five routes for a resource on the mux.
-func (rs *Resource) Mount(mux *http.ServeMux, d *sql.DB) {
-	rs.Register(mux, d)
-}
-
-func (rs *Resource) Register(mux httpx.RouteRegistrar, d *sql.DB) {
+// Register mounts the five CRUD routes for this resource.
+func (rs *Resource) Register(mux gin.IRoutes, d *sql.DB) {
 	base := "/api/v1/" + rs.Name
-	mux.HandleFunc("GET "+base, rs.handleList(d))
-	mux.HandleFunc("POST "+base, rs.handleCreate(d))
-	mux.HandleFunc("GET "+base+"/{id}", rs.handleGet(d))
-	mux.HandleFunc("PATCH "+base+"/{id}", rs.handleUpdate(d))
-	mux.HandleFunc("DELETE "+base+"/{id}", rs.handleDelete(d))
+	mux.GET(base, rs.handleList(d))
+	mux.POST(base, rs.handleCreate(d))
+	mux.GET(base+"/:id", rs.handleGet(d))
+	mux.PATCH(base+"/:id", rs.handleUpdate(d))
+	mux.DELETE(base+"/:id", rs.handleDelete(d))
 }

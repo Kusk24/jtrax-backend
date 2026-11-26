@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
 )
@@ -76,7 +78,7 @@ func providerFailureSentence(reason string, status int) string {
 
 // ScanFailed writes a failed scan's reply: the sentence, the reason code, and
 // the provider's status when there is one. The full error goes to the log only.
-func ScanFailed(w http.ResponseWriter, code int, msg, reason string, status int, internal error) {
+func ScanFailed(ctx *gin.Context, code int, msg, reason string, status int, internal error) {
 	if internal != nil {
 		// The same line httpx.Error logs.
 		log.Printf("http %d: %s: %v", code, msg, internal)
@@ -85,13 +87,13 @@ func ScanFailed(w http.ResponseWriter, code int, msg, reason string, status int,
 	if status != 0 {
 		out["status"] = status
 	}
-	httpx.JSON(w, code, out)
+	httpx.JSON(ctx, code, out)
 }
 
 // ProviderFailed is scanFailed for an error from the provider itself. what is
 // the thing that was being read: "card" or "form".
-func ProviderFailed(w http.ResponseWriter, what string, err error) {
+func ProviderFailed(ctx *gin.Context, what string, err error) {
 	reason, status := providerFailure(err)
-	ScanFailed(w, http.StatusBadGateway,
+	ScanFailed(ctx, http.StatusBadGateway,
 		"could not read the "+what+": "+providerFailureSentence(reason, status), reason, status, err)
 }

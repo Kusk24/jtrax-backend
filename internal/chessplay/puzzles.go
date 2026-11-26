@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
@@ -61,9 +63,9 @@ type puzzleView struct {
 }
 
 // studentOf resolves the caller's student row, or writes the error itself.
-func studentOf(w http.ResponseWriter, id *auth.Identity) (string, bool) {
+func studentOf(ctx *gin.Context, id *auth.Identity) (string, bool) {
 	if id.Role != "Student" || id.StudentID == "" {
-		httpx.Error(w, http.StatusForbidden, "only students are set puzzles", nil)
+		httpx.Error(ctx, http.StatusForbidden, "only students are set puzzles", nil)
 		return "", false
 	}
 	return id.StudentID, true
@@ -75,20 +77,20 @@ func studentOf(w http.ResponseWriter, id *auth.Identity) (string, bool) {
 // The set is materialised as puzzle_attempt rows rather than recomputed, which
 // is what makes it stable: refreshing the page cannot reroll a puzzle the pupil
 // has just failed.
-func handleDailyPuzzles(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleDailyPuzzles(d *sql.DB, lc puzzleProvider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
 		day := academytime.Today()
 
 		if err := assignDaily(d, lc, studentID, day); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not prepare today's puzzles", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not prepare today's puzzles", err)
 			return
 		}
 		rows, err := d.Query(`
@@ -97,7 +99,7 @@ func handleDailyPuzzles(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 			WHERE a.student_id = ? AND a.assigned_on = ? AND a.source = 'daily'
 			ORDER BY p.rating, p.puzzle_id`, studentID, day)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		defer rows.Close()
@@ -108,7 +110,7 @@ func handleDailyPuzzles(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 			var moves string
 			var solved, wrong int
 			if err := rows.Scan(&v.PuzzleID, &v.FEN, &v.Rating, &v.Themes, &moves, &solved, &wrong); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 				return
 			}
 			// `moves` is read only to derive these two; it never leaves here.
@@ -129,11 +131,11 @@ func handleDailyPuzzles(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 		                      WHERE puzzle_id NOT IN
 		                        (SELECT puzzle_id FROM puzzle_attempt WHERE student_id = ?)`,
 			studentID).Scan(&unseen); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"puzzles": out,
 			// True only when there is nothing left to give, not merely when
 			// today's set is short for some other reason.
@@ -274,13 +276,13 @@ func assignDaily(d *sql.DB, lc puzzleProvider, studentID, day string) error {
 // The client sends only its own moves so far; the opponent's replies come from
 // the stored solution, so the server rebuilds the position rather than trusting
 // the client to report it.
-func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handlePuzzleAttempt(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
@@ -288,16 +290,16 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 			Played []string `json:"played"`
 			Move   string   `json:"move"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || strings.TrimSpace(in.Move) == "" {
-			httpx.Error(w, http.StatusBadRequest, "a move is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil || strings.TrimSpace(in.Move) == "" {
+			httpx.Error(ctx, http.StatusBadRequest, "a move is required", err)
 			return
 		}
 		if len(in.Move) > 6 || len(in.Played) > 32 {
-			httpx.Error(w, http.StatusBadRequest, "that is not a move", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that is not a move", nil)
 			return
 		}
 
-		puzzleID := r.PathValue("id")
+		puzzleID := ctx.Param("id")
 		var fen, solution string
 		// Joined against the assignment so a pupil can only submit against a
 		// puzzle they were actually set — otherwise the endpoint is a way to
@@ -308,17 +310,17 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 			WHERE p.puzzle_id = ? AND a.student_id = ? AND a.assigned_on = ?`,
 			puzzleID, studentID, academytime.Today()).Scan(&fen, &solution)
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "that puzzle is not in today's set", nil)
+			httpx.Error(ctx, http.StatusNotFound, "that puzzle is not in today's set", nil)
 			return
 		}
 
 		verdict, err := puzzle.Grade(fen, solution, in.Played, in.Move)
 		if err != nil {
 			if errors.Is(err, puzzle.ErrBadPuzzle) {
-				httpx.Error(w, http.StatusConflict, "that puzzle could not be graded", err)
+				httpx.Error(ctx, http.StatusConflict, "that puzzle could not be graded", err)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not grade the attempt", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not grade the attempt", err)
 			return
 		}
 
@@ -349,7 +351,7 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 				studentID, puzzleID, academytime.Today())
 		}
 
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"correct": verdict.Correct,
 			"solved":  verdict.Solved,
 			"reply":   verdict.Reply,
@@ -363,13 +365,13 @@ func handlePuzzleAttempt(d *sql.DB) http.HandlerFunc {
 // The server writes its own clock, so the pupil supplies the moment but not
 // the time. Only the first open counts: coming back to a puzzle after a wrong
 // answer continues the same sitting rather than starting a new one.
-func handlePuzzleOpen(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handlePuzzleOpen(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
@@ -378,13 +380,13 @@ func handlePuzzleOpen(d *sql.DB) http.HandlerFunc {
 		res, err := d.Exec(`UPDATE puzzle_attempt SET opened_at = datetime('now')
 		                    WHERE student_id = ? AND puzzle_id = ? AND assigned_on = ?
 		                      AND opened_at IS NULL`,
-			studentID, r.PathValue("id"), academytime.Today())
+			studentID, ctx.Param("id"), academytime.Today())
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record", err)
 			return
 		}
 		n, _ := res.RowsAffected()
-		httpx.JSON(w, http.StatusOK, map[string]any{"started": n > 0})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"started": n > 0})
 	}
 }
 
@@ -411,10 +413,10 @@ func minutesOnPuzzle(d *sql.DB, studentID, puzzleID string) int {
 	return mins
 }
 
-func mountPuzzles(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d, newPuzzleClient()))
-	mux.HandleFunc("POST /api/v1/puzzles/{id}/open", handlePuzzleOpen(d))
-	mux.HandleFunc("POST /api/v1/puzzles/{id}/attempt", handlePuzzleAttempt(d))
+func mountPuzzles(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/puzzles/daily", handleDailyPuzzles(d, newPuzzleClient()))
+	mux.POST("/api/v1/puzzles/:id/open", handlePuzzleOpen(d))
+	mux.POST("/api/v1/puzzles/:id/attempt", handlePuzzleAttempt(d))
 }
 
 // puzzleSources are the two ways a puzzle gets here: bulk-imported from the

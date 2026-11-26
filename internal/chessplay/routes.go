@@ -3,11 +3,10 @@ package chessplay
 
 import (
 	"database/sql"
-
-	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(mux httpx.RouteRegistrar, d *sql.DB) {
+func RegisterRoutes(mux gin.IRoutes, d *sql.DB) {
 	relay := mountGameRooms(mux, d)
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)

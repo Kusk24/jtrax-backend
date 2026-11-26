@@ -37,6 +37,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -148,14 +150,14 @@ func (o *lichessOAuth) playToken(studentID string) (username, token string, err 
 // Returns the URL rather than redirecting: the caller is a fetch from the
 // portal, and a 302 to lichess.org would be followed by the fetch instead of
 // the browser, which is not what anybody wants.
-func handleLichessOAuthStart(o *lichessOAuth) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(o.db, w, r)
+func handleLichessOAuthStart(o *lichessOAuth) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(o.db, ctx)
 		if id == nil {
 			return
 		}
 		if !o.configured() {
-			httpx.Error(w, http.StatusServiceUnavailable, "Lichess play is not configured on this server", nil)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "Lichess play is not configured on this server", nil)
 			return
 		}
 
@@ -164,22 +166,22 @@ func handleLichessOAuthStart(o *lichessOAuth) http.HandlerFunc {
 			ReturnTo  string `json:"returnTo"`
 		}
 		// A body is optional: a student starting their own flow sends nothing.
-		_ = httpx.Decode(r, &in)
+		_ = httpx.Decode(ctx, &in)
 
 		studentID, err := o.authorizeFor(id, in.StudentID)
 		if err != nil {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 
 		verifier, err := lichess.NewVerifier()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not start", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not start", err)
 			return
 		}
 		state, err := newState()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not start", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not start", err)
 			return
 		}
 
@@ -196,7 +198,7 @@ func handleLichessOAuthStart(o *lichessOAuth) http.HandlerFunc {
 			INSERT INTO lichess_oauth_state (state, code_verifier, student_id, started_by, return_to)
 			VALUES (?, ?, ?, ?, ?)`,
 			state, verifier, studentID, id.UserAccountID, returnTo); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not start", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not start", err)
 			return
 		}
 		// Old rows are cleared here rather than on a timer: this is the only
@@ -210,7 +212,7 @@ func handleLichessOAuthStart(o *lichessOAuth) http.HandlerFunc {
 
 		url := o.client.AuthorizeURL(o.clientID, o.redirectURI, state,
 			lichess.CodeChallenge(verifier), lichess.PlayScopes)
-		httpx.JSON(w, http.StatusOK, map[string]any{"authorizeUrl": url})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"authorizeUrl": url})
 	}
 }
 
@@ -292,12 +294,12 @@ func (o *lichessOAuth) safeReturn(want string) string {
 // Ends in a redirect back to the portal, because a person is looking at this
 // URL in their address bar. The outcome travels as a query parameter the portal
 // turns into a message; nothing sensitive goes in it.
-func handleLichessOAuthCallback(o *lichessOAuth) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
+func handleLichessOAuthCallback(o *lichessOAuth) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		q := ctx.Request.URL.Query()
 		state := q.Get("state")
 		if state == "" {
-			httpx.Error(w, http.StatusBadRequest, "missing state", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "missing state", nil)
 			return
 		}
 
@@ -306,7 +308,7 @@ func handleLichessOAuthCallback(o *lichessOAuth) http.HandlerFunc {
 		// them.
 		tx, err := o.db.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not complete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not complete", err)
 			return
 		}
 		defer tx.Rollback()
@@ -319,67 +321,67 @@ func handleLichessOAuthCallback(o *lichessOAuth) http.HandlerFunc {
 		                   FROM lichess_oauth_state WHERE state = ?`, state).
 			Scan(&verifier, &studentID, &startedBy, &returnTo, &usedAt, &createdAt)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusBadRequest, "that link is no longer valid", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that link is no longer valid", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not complete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not complete", err)
 			return
 		}
 		if usedAt.Valid && usedAt.String != "" {
 			log.Printf("lichess: oauth state replayed for student %s", studentID)
-			httpx.Error(w, http.StatusBadRequest, "that link has already been used", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that link has already been used", nil)
 			return
 		}
 		if t, perr := time.Parse(db.SQLiteTimeLayout, createdAt); perr == nil && time.Since(t) > oauthStateTTL {
-			httpx.Error(w, http.StatusBadRequest, "that link has expired, please try again", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that link has expired, please try again", nil)
 			return
 		}
 		if _, err := tx.Exec(`UPDATE lichess_oauth_state SET used_at = datetime('now') WHERE state = ?`, state); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not complete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not complete", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not complete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not complete", err)
 			return
 		}
 
 		// The student declining is a normal outcome, not an error.
 		if e := q.Get("error"); e != "" {
-			o.finish(w, r, returnTo.String, "declined")
+			o.finish(ctx, returnTo.String, "declined")
 			return
 		}
 		code := q.Get("code")
 		if code == "" {
-			o.finish(w, r, returnTo.String, "failed")
+			o.finish(ctx, returnTo.String, "failed")
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		callCtx, cancel := context.WithTimeout(ctx.Request.Context(), 20*time.Second)
 		defer cancel()
 
-		tok, err := o.client.Exchange(ctx, o.clientID, o.redirectURI, code, verifier)
+		tok, err := o.client.Exchange(callCtx, o.clientID, o.redirectURI, code, verifier)
 		if err != nil {
 			log.Printf("lichess: token exchange for %s: %v", studentID, err)
-			o.finish(w, r, returnTo.String, "failed")
+			o.finish(ctx, returnTo.String, "failed")
 			return
 		}
 		// Whose token is it? Lichess is the only authority on that, and asking
 		// is what makes the grant proof of ownership.
-		acct, err := o.client.Account(ctx, tok.AccessToken)
+		acct, err := o.client.Account(callCtx, tok.AccessToken)
 		if err != nil {
 			log.Printf("lichess: account lookup for %s: %v", studentID, err)
-			o.finish(w, r, returnTo.String, "failed")
+			o.finish(ctx, returnTo.String, "failed")
 			return
 		}
 
 		if err := o.storeGrant(studentID, startedBy, acct, tok); err != nil {
 			if errors.Is(err, errAccountTaken) {
-				o.finish(w, r, returnTo.String, "taken")
+				o.finish(ctx, returnTo.String, "taken")
 				return
 			}
 			log.Printf("lichess: storing grant for %s: %v", studentID, err)
-			o.finish(w, r, returnTo.String, "failed")
+			o.finish(ctx, returnTo.String, "failed")
 			return
 		}
 		// Ratings straight away, as the bio-code path already does. Otherwise a
@@ -387,7 +389,7 @@ func handleLichessOAuthCallback(o *lichessOAuth) http.HandlerFunc {
 		// games yet" until the next scheduled sync, which is not true and reads
 		// like the connection failed.
 		o.storeInitialRatings(studentID, acct.Username)
-		o.finish(w, r, returnTo.String, "connected")
+		o.finish(ctx, returnTo.String, "connected")
 	}
 }
 
@@ -504,25 +506,25 @@ var outcomeText = map[string]struct{ en, th string }{
 // answer `{"lichess":"taken"}`, which is a developer's output shown to a
 // twelve-year-old. It renders a plain page instead, and still refuses to
 // redirect anywhere unvalidated.
-func (o *lichessOAuth) finish(w http.ResponseWriter, r *http.Request, returnTo, outcome string) {
+func (o *lichessOAuth) finish(ctx *gin.Context, returnTo, outcome string) {
 	target := o.safeReturn(returnTo)
 	if target == "" {
 		log.Printf("lichess: no safe return for outcome %q (returnTo=%q, allowed=%v) — "+
 			"set APP_URL to the portal's own origin so pupils land back in the app",
 			outcome, returnTo, o.returnAllowed)
-		o.outcomePage(w, outcome)
+		o.outcomePage(ctx, outcome)
 		return
 	}
 	sep := "?"
 	if strings.Contains(target, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, target+sep+"lichess="+url.QueryEscape(outcome), http.StatusSeeOther)
+	http.Redirect(ctx.Writer, ctx.Request, target+sep+"lichess="+url.QueryEscape(outcome), http.StatusSeeOther)
 }
 
 // outcomePage is the fallback: one sentence, in both of the academy's
 // languages, plus a way back if we know of one.
-func (o *lichessOAuth) outcomePage(w http.ResponseWriter, outcome string) {
+func (o *lichessOAuth) outcomePage(ctx *gin.Context, outcome string) {
 	text, ok := outcomeText[outcome]
 	if !ok {
 		text = outcomeText["failed"]
@@ -532,11 +534,11 @@ func (o *lichessOAuth) outcomePage(w http.ResponseWriter, outcome string) {
 		home = `<p style="margin-top:22px"><a href="` + html.EscapeString(o.returnAllowed[0]) +
 			`" style="color:#1b4fa0">Back to JTrax · กลับไปที่ JTrax</a></p>`
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	ctx.Header("Content-Type", "text/html; charset=utf-8")
 	// 200, not an error status: the grant itself resolved. What failed is only
 	// our ability to hand the pupil back to the page they came from.
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8">` +
+	ctx.Status(http.StatusOK)
+	_, _ = ctx.Writer.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
 		`<title>JCA Chess Academy · Lichess</title>` +
 		`<body style="font-family:system-ui,sans-serif;display:flex;min-height:90vh;align-items:center;` +
@@ -598,27 +600,27 @@ func (o *lichessOAuth) playStatusFor(studentID string) lichessPlayStatus {
 	return st
 }
 
-func handleLichessPlayStatus(o *lichessOAuth) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(o.db, w, r)
+func handleLichessPlayStatus(o *lichessOAuth) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(o.db, ctx)
 		if id == nil {
 			return
 		}
-		studentID := r.URL.Query().Get("studentId")
+		studentID := ctx.Query("studentId")
 		if studentID == "" {
 			studentID = id.StudentID
 		}
 		// Reuse the scoped read as the authorization check.
 		links, err := loadLinks(o.db, id, studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if len(links) == 0 {
-			httpx.JSON(w, http.StatusOK, lichessPlayStatus{})
+			httpx.JSON(ctx, http.StatusOK, lichessPlayStatus{})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, o.playStatusFor(studentID))
+		httpx.JSON(ctx, http.StatusOK, o.playStatusFor(studentID))
 	}
 }
 

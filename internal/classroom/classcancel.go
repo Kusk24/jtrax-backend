@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/families"
@@ -27,34 +29,34 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/payments"
 )
 
-func MountClassCancel(mux httpx.RouteRegistrar, d *sql.DB, svc *notify.Service) {
-	mux.HandleFunc("POST /api/v1/class-sessions/{id}/cancel", handleCancelClass(d, svc))
+func MountClassCancel(mux gin.IRoutes, d *sql.DB, svc *notify.Service) {
+	mux.POST("/api/v1/class-sessions/:id/cancel", handleCancelClass(d, svc))
 }
 
 // handleCancelClass refunds, deletes and announces one session. Staff only:
 // a teacher can run a class, but calling one off for every family is the
 // office's decision.
-func handleCancelClass(d *sql.DB, svc *notify.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleCancelClass(d *sql.DB, svc *notify.Service) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only admin or reception may cancel a class", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only admin or reception may cancel a class", nil)
 			return
 		}
-		result, err := cancelSession(d, svc, r.PathValue("id"))
+		result, err := cancelSession(d, svc, ctx.Param("id"))
 		var refund refundError
 		switch {
 		case errors.Is(err, errClassMissing):
-			httpx.Error(w, http.StatusNotFound, "no such class", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such class", nil)
 		case errors.As(err, &refund):
-			httpx.Error(w, http.StatusInternalServerError, "could not refund the class", refund.error)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not refund the class", refund.error)
 		case err != nil:
-			httpx.Error(w, http.StatusInternalServerError, "could not cancel the class", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not cancel the class", err)
 		default:
-			httpx.JSON(w, http.StatusOK, result)
+			httpx.JSON(ctx, http.StatusOK, result)
 		}
 	}
 }

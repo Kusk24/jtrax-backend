@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/entrylinks"
 	"github.com/Kusk24/jtrax-backend/internal/entrymail"
@@ -144,12 +146,12 @@ func findPublicEntry(d *sql.DB, regID, code string) (*publicEntry, error) {
 
 // readCode takes the code from the request body. It is never read from the
 // URL, where it would be written into every log the request passes through.
-func readCode(w http.ResponseWriter, r *http.Request) (string, bool) {
+func readCode(ctx *gin.Context) (string, bool) {
 	var in struct {
 		Code string `json:"code"`
 	}
-	if err := httpx.Decode(r, &in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+	if err := httpx.Decode(ctx, &in); err != nil {
+		httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 		return "", false
 	}
 	return strings.TrimSpace(in.Code), true
@@ -157,9 +159,9 @@ func readCode(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 // handlePublicEntry shows the holder of a pay link what they are paying for.
 // POST rather than GET only so the code travels in a body.
-func handlePublicEntry(deps *publicEntryDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code, ok := readCode(w, r)
+func handlePublicEntry(deps *publicEntryDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		code, ok := readCode(ctx)
 		if !ok {
 			return
 		}
@@ -168,17 +170,17 @@ func handlePublicEntry(deps *publicEntryDeps) http.HandlerFunc {
 		if err := sweepUnpaidEntries(deps.db, academytime.Today()); err != nil {
 			log.Printf("entry rules: %v", err)
 		}
-		e, err := findPublicEntry(deps.db, r.PathValue("id"), code)
+		e, err := findPublicEntry(deps.db, ctx.Param("id"), code)
 		if errors.Is(err, errNoEntry) {
-			httpx.Error(w, http.StatusNotFound, "this payment link does not work", nil)
+			httpx.Error(ctx, http.StatusNotFound, "this payment link does not work", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entry", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entry", err)
 			return
 		}
 		e.CardPayments = deps.stripe != nil
-		httpx.JSON(w, http.StatusOK, e)
+		httpx.JSON(ctx, http.StatusOK, e)
 	}
 }
 
@@ -186,14 +188,14 @@ func handlePublicEntry(deps *publicEntryDeps) http.HandlerFunc {
 // opens, creating the payment behind it the first time. The same payment row
 // and the same link come back on every later ask, so opening the email twice
 // cannot charge twice.
-func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code, ok := readCode(w, r)
+func handlePublicEntryPay(deps *publicEntryDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		code, ok := readCode(ctx)
 		if !ok {
 			return
 		}
 		if deps.stripe == nil {
-			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not switched on", nil)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "card payments are not switched on", nil)
 			return
 		}
 		/* The early-bird and closing-date rules, applied before a price is
@@ -201,27 +203,27 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 		if err := sweepUnpaidEntries(deps.db, academytime.Today()); err != nil {
 			log.Printf("entry rules: %v", err)
 		}
-		e, err := findPublicEntry(deps.db, r.PathValue("id"), code)
+		e, err := findPublicEntry(deps.db, ctx.Param("id"), code)
 		if errors.Is(err, errNoEntry) {
-			httpx.Error(w, http.StatusNotFound, "this payment link does not work", nil)
+			httpx.Error(ctx, http.StatusNotFound, "this payment link does not work", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the entry", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the entry", err)
 			return
 		}
 		switch e.State {
 		case "paid":
-			httpx.Error(w, http.StatusConflict, "this entry is already paid", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry is already paid", nil)
 			return
 		case "free":
-			httpx.Error(w, http.StatusConflict, "this entry has nothing to pay", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry has nothing to pay", nil)
 			return
 		case "closed":
-			httpx.Error(w, http.StatusConflict, "this entry is no longer open for payment", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry is no longer open for payment", nil)
 			return
 		case "cancelled":
-			httpx.Error(w, http.StatusConflict, "registration has closed and this place was released", nil)
+			httpx.Error(ctx, http.StatusConflict, "registration has closed and this place was released", nil)
 			return
 		}
 		paymentID := e.paymentID.String
@@ -229,10 +231,10 @@ func handlePublicEntryPay(deps *publicEntryDeps) http.HandlerFunc {
 			paymentID, err = createTournamentPayment(deps.db, e.regID, e.studentID,
 				e.ParticipantName, e.TournamentName, e.Fee)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not open the payment", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not open the payment", err)
 				return
 			}
 		}
-		payments.CheckoutLink(w, r, deps.db, deps.stripe, deps.stripeCfg, paymentID)
+		payments.CheckoutLink(ctx, deps.db, deps.stripe, deps.stripeCfg, paymentID)
 	}
 }

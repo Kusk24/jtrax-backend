@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
@@ -308,9 +310,9 @@ func storeLichessRatings(db *sql.DB, studentID string, u lichess.User) error {
 	return tx.Commit()
 }
 
-func handleLichessList(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessList(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
@@ -319,25 +321,25 @@ func handleLichessList(l *lichessDeps) http.HandlerFunc {
 			// still the truth as of the last successful sync.
 			log.Printf("lichess: background sync: %v", err)
 		}
-		links, err := loadLinks(l.db, id, r.URL.Query().Get("studentId"))
+		links, err := loadLinks(l.db, id, ctx.Query("studentId"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load links", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load links", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, links)
+		httpx.JSON(ctx, http.StatusOK, links)
 	}
 }
 
 // handleLichessMine returns the caller's own link, with the verification code
 // while one is outstanding.
-func handleLichessMine(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessMine(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Student" || id.StudentID == "" {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		if _, err := l.syncAll(false); err != nil {
@@ -345,11 +347,11 @@ func handleLichessMine(l *lichessDeps) http.HandlerFunc {
 		}
 		links, err := loadLinks(l.db, id, id.StudentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load link", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load link", err)
 			return
 		}
 		if len(links) == 0 {
-			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 			return
 		}
 		link := links[0]
@@ -358,13 +360,13 @@ func handleLichessMine(l *lichessDeps) http.HandlerFunc {
 			_ = l.db.QueryRow(`SELECT verify_code FROM student_lichess WHERE student_id = ?`, id.StudentID).Scan(&code)
 			link.VerifyCode = code.String
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"linked": true, "link": link})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": true, "link": link})
 	}
 }
 
-func handleLichessLink(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessLink(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
@@ -372,13 +374,13 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 			Username  string `json:"username"`
 			StudentID string `json:"studentId"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "username is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "username is required", err)
 			return
 		}
 		username := strings.TrimSpace(in.Username)
 		if !lichess.ValidUsername(username) {
-			httpx.Error(w, http.StatusBadRequest, "that is not a valid Lichess username", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that is not a valid Lichess username", nil)
 			return
 		}
 
@@ -389,36 +391,36 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 		switch {
 		case id.Role == "Student" && id.StudentID != "":
 			if studentID != "" && studentID != id.StudentID {
-				httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+				httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 				return
 			}
 			studentID = id.StudentID
 		case accounts.IsStaff(id.Role):
 			if studentID == "" {
-				httpx.Error(w, http.StatusBadRequest, "studentId is required", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "studentId is required", nil)
 				return
 			}
 			staffLinked = true
 		default:
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 
 		user, err := l.client.User(username)
 		if err != nil {
 			if errors.Is(err, lichess.ErrNotFound) {
-				httpx.Error(w, http.StatusNotFound, "no Lichess account with that name", nil)
+				httpx.Error(ctx, http.StatusNotFound, "no Lichess account with that name", nil)
 				return
 			}
 			if errors.Is(err, lichess.ErrRateLimited) {
-				httpx.Error(w, http.StatusTooManyRequests, "Lichess is busy, try again shortly", err)
+				httpx.Error(ctx, http.StatusTooManyRequests, "Lichess is busy, try again shortly", err)
 				return
 			}
-			httpx.Error(w, http.StatusBadGateway, "could not reach Lichess", err)
+			httpx.Error(ctx, http.StatusBadGateway, "could not reach Lichess", err)
 			return
 		}
 		if user.Disabled {
-			httpx.Error(w, http.StatusBadRequest, "that Lichess account is closed", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that Lichess account is closed", nil)
 			return
 		}
 
@@ -426,7 +428,7 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 		err = l.db.QueryRow(`SELECT student_id FROM student_lichess WHERE lichess_id = ?`,
 			strings.ToLower(user.ID)).Scan(&owner)
 		if err == nil && owner != studentID {
-			httpx.Error(w, http.StatusConflict, "that Lichess account is already linked to another student", nil)
+			httpx.Error(ctx, http.StatusConflict, "that Lichess account is already linked to another student", nil)
 			return
 		}
 
@@ -443,7 +445,7 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 			  verified = 0, verify_code = excluded.verify_code,
 			  linked_at = excluded.linked_at, linked_by = excluded.linked_by, synced_at = NULL`,
 			studentID, user.Username, strings.ToLower(user.ID), code, linkedBy); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the link", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the link", err)
 			return
 		}
 		// Ratings are stored straight away, so the screen has something on it
@@ -462,7 +464,7 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 		if !staffLinked {
 			out["verifyCode"] = code
 		}
-		httpx.JSON(w, http.StatusCreated, out)
+		httpx.JSON(ctx, http.StatusCreated, out)
 	}
 }
 
@@ -471,14 +473,14 @@ func handleLichessLink(l *lichessDeps) http.HandlerFunc {
 // The bio is public to read and private to write, which is exactly the property
 // account verification needs, and it costs one API call instead of an OAuth
 // round trip.
-func handleLichessVerify(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessVerify(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Student" || id.StudentID == "" {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		var username, code string
@@ -487,61 +489,61 @@ func handleLichessVerify(l *lichessDeps) http.HandlerFunc {
 		                      FROM student_lichess WHERE student_id = ?`, id.StudentID).
 			Scan(&username, &code, &verified)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "link a Lichess account first", nil)
+			httpx.Error(ctx, http.StatusNotFound, "link a Lichess account first", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the link", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the link", err)
 			return
 		}
 		if verified == 1 {
-			httpx.JSON(w, http.StatusOK, map[string]any{"verified": true})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"verified": true})
 			return
 		}
 		user, err := l.client.User(username)
 		if err != nil {
-			httpx.Error(w, http.StatusBadGateway, "could not reach Lichess", err)
+			httpx.Error(ctx, http.StatusBadGateway, "could not reach Lichess", err)
 			return
 		}
 		if !lichess.BioContains(user.Profile.Bio, code) {
 			// No hint about what was found: the student knows their own bio,
 			// and describing it back is a way to probe someone else's.
-			httpx.JSON(w, http.StatusOK, map[string]any{"verified": false, "reason": "codeNotFound"})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"verified": false, "reason": "codeNotFound"})
 			return
 		}
 		if _, err := l.db.Exec(`UPDATE student_lichess SET verified = 1, verify_code = NULL
 		                        WHERE student_id = ?`, id.StudentID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save", err)
 			return
 		}
 		if err := l.storeRatings(id.StudentID, *user); err != nil {
 			log.Printf("lichess: ratings after verify for %s: %v", id.StudentID, err)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"verified": true})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"verified": true})
 	}
 }
 
-func handleLichessUnlink(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessUnlink(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
-		studentID := r.URL.Query().Get("studentId")
+		studentID := ctx.Query("studentId")
 		switch {
 		case id.Role == "Student" && id.StudentID != "":
 			if studentID != "" && studentID != id.StudentID {
-				httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+				httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 				return
 			}
 			studentID = id.StudentID
 		case accounts.IsStaff(id.Role):
 			if studentID == "" {
-				httpx.Error(w, http.StatusBadRequest, "studentId is required", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "studentId is required", nil)
 				return
 			}
 		default:
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		// Revoked before the row goes, because revoking needs the token that is
@@ -552,7 +554,7 @@ func handleLichessUnlink(l *lichessDeps) http.HandlerFunc {
 
 		tx, err := l.db.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not unlink", err)
 			return
 		}
 		defer tx.Rollback()
@@ -563,65 +565,65 @@ func handleLichessUnlink(l *lichessDeps) http.HandlerFunc {
 			`DELETE FROM student_lichess WHERE student_id = ?`,
 		} {
 			if _, err := tx.Exec(q, studentID); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not unlink", err)
 				return
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not unlink", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 	}
 }
 
 // handleLichessSync forces a refresh. Staff only: it is one outbound request
 // for the whole academy and does not need to be reachable by every pupil.
-func handleLichessSync(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLichessSync(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
 		n, err := l.syncAll(true)
 		if err != nil {
 			if errors.Is(err, lichess.ErrRateLimited) {
-				httpx.Error(w, http.StatusTooManyRequests, "Lichess asked us to slow down, try again shortly", err)
+				httpx.Error(ctx, http.StatusTooManyRequests, "Lichess asked us to slow down, try again shortly", err)
 				return
 			}
-			httpx.Error(w, http.StatusBadGateway, "could not reach Lichess", err)
+			httpx.Error(ctx, http.StatusBadGateway, "could not reach Lichess", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"synced": n})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"synced": n})
 	}
 }
 
 // handleLichessHistory returns a student's rating over time for one perf.
-func handleLichessHistory(l *lichessDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLichessHistory(l *lichessDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
-		studentID := r.PathValue("studentId")
+		studentID := ctx.Param("studentId")
 		// Reuse the scoped read as the authorization check: if the caller
 		// cannot see the link, they cannot see its history either.
 		links, err := loadLinks(l.db, id, studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if len(links) == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
-		perf := r.URL.Query().Get("perf")
+		perf := ctx.Query("perf")
 		if perf == "" {
 			perf = "rapid"
 		}
 		rows, err := l.db.Query(`SELECT on_date, rating, games FROM lichess_rating_day
 		                         WHERE student_id = ? AND perf = ? ORDER BY on_date`, studentID, perf)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load history", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load history", err)
 			return
 		}
 		defer rows.Close()
@@ -634,16 +636,16 @@ func handleLichessHistory(l *lichessDeps) http.HandlerFunc {
 		for rows.Next() {
 			var p point
 			if err := rows.Scan(&p.Date, &p.Rating, &p.Games); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load history", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load history", err)
 				return
 			}
 			out = append(out, p)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"perf": perf, "points": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"perf": perf, "points": out})
 	}
 }
 
-func mountLichess(mux httpx.RouteRegistrar, d *sql.DB) {
+func mountLichess(mux gin.IRoutes, d *sql.DB) {
 	client := lichess.New()
 	if base := strings.TrimSpace(os.Getenv("LICHESS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.
@@ -655,17 +657,17 @@ func mountLichess(mux httpx.RouteRegistrar, d *sql.DB) {
 	// The OAuth pair. Start is signed in; the callback cannot be — the browser
 	// arrives on a redirect from lichess.org — so its budget is tighter and the
 	// single-use state row is what authenticates it.
-	mux.HandleFunc("POST "+p+"/oauth/start", httpx.RateLimit(20, handleLichessOAuthStart(deps.oauth)))
-	mux.HandleFunc("GET "+p+"/oauth/callback", httpx.RateLimit(30, handleLichessOAuthCallback(deps.oauth)))
-	mux.HandleFunc("GET "+p+"/play-status", handleLichessPlayStatus(deps.oauth))
+	mux.POST(p+"/oauth/start", httpx.RateLimit(20), handleLichessOAuthStart(deps.oauth))
+	mux.GET(p+"/oauth/callback", httpx.RateLimit(30), handleLichessOAuthCallback(deps.oauth))
+	mux.GET(p+"/play-status", handleLichessPlayStatus(deps.oauth))
 
-	mux.HandleFunc("GET "+p+"/links", handleLichessList(deps))
-	mux.HandleFunc("GET "+p+"/me", handleLichessMine(deps))
+	mux.GET(p+"/links", handleLichessList(deps))
+	mux.GET(p+"/me", handleLichessMine(deps))
 	// Both of these make an outbound request on the caller's behalf, so they
 	// carry a budget even though the caller is signed in.
-	mux.HandleFunc("POST "+p+"/link", httpx.RateLimit(20, handleLichessLink(deps)))
-	mux.HandleFunc("POST "+p+"/verify", httpx.RateLimit(20, handleLichessVerify(deps)))
-	mux.HandleFunc("DELETE "+p+"/link", handleLichessUnlink(deps))
-	mux.HandleFunc("POST "+p+"/sync", httpx.RateLimit(10, handleLichessSync(deps)))
-	mux.HandleFunc("GET "+p+"/history/{studentId}", handleLichessHistory(deps))
+	mux.POST(p+"/link", httpx.RateLimit(20), handleLichessLink(deps))
+	mux.POST(p+"/verify", httpx.RateLimit(20), handleLichessVerify(deps))
+	mux.DELETE(p+"/link", handleLichessUnlink(deps))
+	mux.POST(p+"/sync", httpx.RateLimit(10), handleLichessSync(deps))
+	mux.GET(p+"/history/:studentId", handleLichessHistory(deps))
 }

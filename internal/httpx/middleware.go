@@ -6,29 +6,31 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // CORS allows the local dev frontends; adjust via ALLOWED_ORIGINS when deployed.
-func CORS(allowedOrigins []string, next http.Handler) http.Handler {
+func CORS(allowedOrigins []string) gin.HandlerFunc {
 	allowed := map[string]bool{}
 	for _, o := range allowedOrigins {
 		allowed[o] = true
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" && allowed[origin] {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	return func(c *gin.Context) {
+		if origin := c.GetHeader("Origin"); origin != "" && allowed[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			// Every method a route is mounted with. PUT was missing, so a
 			// browser-built client could not save a notification setting or
 			// the scan model, though the native phone app could.
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
 // clientIP identifies the caller for rate limiting. Deployed behind a proxy
@@ -52,14 +54,15 @@ func clientIP(r *http.Request) string {
 }
 
 // RateLimit is a fixed-window per-IP limiter for unauthenticated endpoints.
-func RateLimit(perMinute int, next http.HandlerFunc) http.HandlerFunc {
+func RateLimit(perMinute int) gin.HandlerFunc {
 	limiter := NewLimiter(perMinute)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !limiter.Allow(clientIP(r)) {
-			Error(w, http.StatusTooManyRequests, "too many attempts, try again in a minute", nil)
+	return func(c *gin.Context) {
+		if !limiter.Allow(clientIP(c.Request)) {
+			c.Abort()
+			Error(c, http.StatusTooManyRequests, "too many attempts, try again in a minute", nil)
 			return
 		}
-		next(w, r)
+		c.Next()
 	}
 }
 

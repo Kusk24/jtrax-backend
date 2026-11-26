@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -146,25 +148,25 @@ func studentCertificates(d *sql.DB, studentID string) ([]courseCertificate, erro
 	return out, nil
 }
 
-func handleStudentCertificates(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleStudentCertificates(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID := r.PathValue("id")
+		studentID := ctx.Param("id")
 		if !accounts.CanSeeStudent(d, id, studentID) {
-			httpx.Error(w, http.StatusNotFound, "no such student", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such student", nil)
 			return
 		}
 		list, err := studentCertificates(d, studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read certificates", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read certificates", err)
 			return
 		}
 		var name string
 		d.QueryRow(`SELECT name FROM student WHERE student_id = ?`, studentID).Scan(&name)
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"student_name": name, "required_hours": requiredHours(d), "courses": list,
 		})
 	}
@@ -172,34 +174,34 @@ func handleStudentCertificates(d *sql.DB) http.HandlerFunc {
 
 // handleCertify marks a student certified for a course: staff only, once
 // they have the hours, once per course.
-func handleCertify(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		caller := accounts.RequireStaff(d, w, r)
+func handleCertify(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		caller := accounts.RequireStaff(d, ctx)
 		if caller == nil {
 			return
 		}
-		studentID := r.PathValue("id")
+		studentID := ctx.Param("id")
 		var in struct {
 			Course string `json:"course"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || !slices.Contains(CertificateCourses, in.Course) {
-			httpx.Error(w, http.StatusBadRequest, "course must be starters, juniors or nxt", err)
+		if err := httpx.Decode(ctx, &in); err != nil || !slices.Contains(CertificateCourses, in.Course) {
+			httpx.Error(ctx, http.StatusBadRequest, "course must be starters, juniors or nxt", err)
 			return
 		}
 		var n int
 		d.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`, studentID).Scan(&n)
 		if n == 0 {
-			httpx.Error(w, http.StatusNotFound, "no such student", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such student", nil)
 			return
 		}
 		hours, err := courseHours(d, studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read hours", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read hours", err)
 			return
 		}
 		need := requiredHours(d)
 		if hours[in.Course]+1e-9 < need {
-			httpx.Error(w, http.StatusConflict, "not enough hours yet for this certificate", nil)
+			httpx.Error(ctx, http.StatusConflict, "not enough hours yet for this certificate", nil)
 			return
 		}
 		certID := db.NewID("cert")
@@ -210,22 +212,22 @@ func handleCertify(d *sql.DB) http.HandlerFunc {
 			math.Round(hours[in.Course]*100)/100)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				httpx.Error(w, http.StatusConflict, "already certified for this course", nil)
+				httpx.Error(ctx, http.StatusConflict, "already certified for this course", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not certify", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not certify", err)
 			return
 		}
 		list, err := studentCertificates(d, studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read certificates", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read certificates", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{"required_hours": need, "courses": list})
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{"required_hours": need, "courses": list})
 	}
 }
 
-func MountCertificates(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/students/{id}/certificates", handleStudentCertificates(d))
-	mux.HandleFunc("POST /api/v1/students/{id}/certificates", handleCertify(d))
+func MountCertificates(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/students/:id/certificates", handleStudentCertificates(d))
+	mux.POST("/api/v1/students/:id/certificates", handleCertify(d))
 }

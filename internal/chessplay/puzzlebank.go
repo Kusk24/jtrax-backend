@@ -11,7 +11,8 @@ package chessplay
 import (
 	"database/sql"
 
-	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/lichess"
 	"github.com/Kusk24/jtrax-backend/internal/puzzle"
 )
@@ -63,6 +64,6 @@ func topUpBank(d *sql.DB, lc puzzleProvider, t tier) error {
 	return err
 }
 
-func mountPuzzleBank(mux httpx.RouteRegistrar, d *sql.DB) {
+func mountPuzzleBank(mux gin.IRoutes, d *sql.DB) {
 	mountPuzzleList(mux, d, newPuzzleClient())
 }

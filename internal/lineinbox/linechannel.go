@@ -10,26 +10,28 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/line"
 )
 
-func handleLineChannelGet(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLineChannelGet(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Admin" {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		out := map[string]any{
 			"configured":    false,
 			"sealingKeySet": l.box != nil,
-			"webhookUrl":    lineWebhookURL(r),
+			"webhookUrl":    lineWebhookURL(ctx.Request),
 		}
 		var hint, updatedAt string
 		err := l.db.QueryRow(`SELECT token_hint, updated_at FROM line_channel
@@ -49,10 +51,10 @@ func handleLineChannelGet(l *lineDeps) http.HandlerFunc {
 				}
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusInternalServerError, "could not read settings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read settings", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
@@ -76,18 +78,18 @@ func lineWebhookURL(r *http.Request) string {
 	return fmt.Sprintf("%s://%s/api/v1/line/webhook", scheme, r.Host)
 }
 
-func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLineChannelPut(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Admin" {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		if l.box == nil {
-			httpx.Error(w, http.StatusServiceUnavailable,
+			httpx.Error(ctx, http.StatusServiceUnavailable,
 				"the server has no sealing key, so credentials cannot be stored securely", errLineNoKey)
 			return
 		}
@@ -95,21 +97,21 @@ func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
 			AccessToken   string `json:"accessToken"`
 			ChannelSecret string `json:"channelSecret"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "accessToken and channelSecret are required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "accessToken and channelSecret are required", err)
 			return
 		}
 		token := strings.TrimSpace(in.AccessToken)
 		secret := strings.TrimSpace(in.ChannelSecret)
 		if token == "" || secret == "" {
-			httpx.Error(w, http.StatusBadRequest, "accessToken and channelSecret are required", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "accessToken and channelSecret are required", nil)
 			return
 		}
 		// Bounds at the boundary. A LINE access token is a few hundred
 		// characters and a channel secret is 32 hex; these are generous caps
 		// against a paste of something else entirely.
 		if len(token) > 1000 || len(secret) > 200 {
-			httpx.Error(w, http.StatusBadRequest, "that does not look like a LINE credential", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that does not look like a LINE credential", nil)
 			return
 		}
 
@@ -118,7 +120,7 @@ func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
 		// refusing to save during an outage helps nobody.
 		if _, _, _, err := l.newClient(token).Quota(); err != nil {
 			if line.ReasonOf(err) == line.ReasonInvalid {
-				httpx.Error(w, http.StatusBadRequest, "LINE rejected that access token", err)
+				httpx.Error(ctx, http.StatusBadRequest, "LINE rejected that access token", err)
 				return
 			}
 			log.Printf("line: could not verify token on save: %v", err)
@@ -126,12 +128,12 @@ func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
 
 		tokenEnc, err := l.box.Seal(token)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not store credentials", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not store credentials", err)
 			return
 		}
 		secretEnc, err := l.box.Seal(secret)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not store credentials", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not store credentials", err)
 			return
 		}
 		hint := token
@@ -149,27 +151,27 @@ func handleLineChannelPut(l *lineDeps) http.HandlerFunc {
 			  updated_at = excluded.updated_at,
 			  updated_by = excluded.updated_by`,
 			tokenEnc, secretEnc, hint, db.SQLiteNow(), id.UserAccountID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not store credentials", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not store credentials", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"configured": true, "tokenHint": hint})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"configured": true, "tokenHint": hint})
 	}
 }
 
-func handleLineChannelDelete(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLineChannelDelete(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Admin" {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		if _, err := l.db.Exec(`DELETE FROM line_channel WHERE channel_row_id = 'default'`); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not remove credentials", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not remove credentials", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"configured": false})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"configured": false})
 	}
 }

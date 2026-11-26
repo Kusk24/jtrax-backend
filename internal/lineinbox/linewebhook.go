@@ -8,33 +8,35 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/line"
 )
 
-func handleLineWebhook(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, lineMaxWebhookBytes))
+func handleLineWebhook(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		body, err := io.ReadAll(http.MaxBytesReader(ctx.Writer, ctx.Request.Body, lineMaxWebhookBytes))
 		if err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large", err)
+			httpx.Error(ctx, http.StatusRequestEntityTooLarge, "payload too large", err)
 			return
 		}
 		creds, err := l.creds()
 		if err != nil {
-			httpx.Error(w, http.StatusServiceUnavailable, "line messaging is not configured", err)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "line messaging is not configured", err)
 			return
 		}
 		// The signature is over the exact bytes received, which is why the body
 		// is read raw and parsed only after this passes. Re-encoding parsed
 		// JSON would change the digest and reject every genuine delivery.
-		if !line.Verify(creds.Secret, body, r.Header.Get("X-Line-Signature")) {
-			httpx.Error(w, http.StatusUnauthorized, "invalid signature", nil)
+		if !line.Verify(creds.Secret, body, ctx.GetHeader("X-Line-Signature")) {
+			httpx.Error(ctx, http.StatusUnauthorized, "invalid signature", nil)
 			return
 		}
 		events, err := line.ParseEvents(body)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "malformed webhook", err)
+			httpx.Error(ctx, http.StatusBadRequest, "malformed webhook", err)
 			return
 		}
 		client := l.newClient(creds.Token)
@@ -49,7 +51,7 @@ func handleLineWebhook(l *lineDeps) http.HandlerFunc {
 		}
 		// LINE retries anything that is not a 2xx and disables a webhook that
 		// keeps failing, so a batch that changed nothing still succeeds.
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -88,31 +90,31 @@ func readDashboardActivity(d *sql.DB, now time.Time) (*dashboardActivity, error)
 	return a, nil
 }
 
-func handleDashboardActivity(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleDashboardActivity(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
 		// ?date=YYYY-MM-DD reads the week of that day (and the window
 		// ending on it), for the dashboard's date picker; without it, today.
 		now := academytime.Now()
-		if day := r.URL.Query().Get("date"); day != "" {
+		if day := ctx.Query("date"); day != "" {
 			picked, err := time.ParseInLocation(academytime.DayLayout, day, academytime.Location())
 			if err != nil {
-				httpx.Error(w, http.StatusBadRequest, "date must be YYYY-MM-DD", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "date must be YYYY-MM-DD", nil)
 				return
 			}
 			now = picked.Add(12 * time.Hour)
 		}
 		a, err := readDashboardActivity(d, now)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read game activity", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read game activity", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, a)
+		httpx.JSON(ctx, http.StatusOK, a)
 	}
 }
 
-func MountDashboardActivity(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/dashboard/activity", handleDashboardActivity(d))
+func MountDashboardActivity(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/dashboard/activity", handleDashboardActivity(d))
 }

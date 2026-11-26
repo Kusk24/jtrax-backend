@@ -1,59 +1,93 @@
-// The API uses Gin for routing and keeps net/http handlers at the transport boundary.
+// Gin serves all feature handlers. Keep the HTTP details existing school clients rely on.
 package api
 
 import (
+	"context"
 	"net/http"
+	"net/url"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-type router struct {
-	engine   *gin.Engine
-	standard *http.ServeMux
-}
+type router struct{ engine *gin.Engine }
 
-func newRouter() *router {
+type originalRequestKey struct{}
+
+// A marker lets the compatibility check distinguish a registered route from a
+// redirect or a method error. Only Gin can dispatch the actual endpoint.
+type registeredRoute struct{}
+
+func (registeredRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }
+
+func newRouter(register func(gin.IRoutes), middleware ...gin.HandlerFunc) *router {
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
-	r := &router{engine: engine, standard: http.NewServeMux()}
-	// Preserve method discovery (including Allow), redirects and the original
-	// plain-text errors for requests that do not match a Gin route.
-	engine.NoRoute(func(c *gin.Context) { r.standard.ServeHTTP(c.Writer, c.Request) })
-	return r
-}
+	engine.UseEscapedPath = true
+	// Query unescaping would turn a literal '+' in a path parameter into a space.
+	engine.UnescapePathValues = false
 
-func (r *router) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
-	r.standard.HandleFunc(pattern, handler)
-	method, route, _ := strings.Cut(pattern, " ")
-	parts := strings.Split(route, "/")
-	var names []string
-	for i, segment := range parts {
-		if strings.HasPrefix(segment, "{") {
-			names = append(names, strings.TrimSuffix(segment[1:], "}"))
-			// Gin shares wildcard nodes. Two features may call the same
-			// segment "id" and "studentId" in their public handler code.
-			parts[i] = ":param" + strconv.Itoa(len(names))
+	// ServeMux supplies Go's canonical redirects and its 404/405 bodies and
+	// Allow headers. It has no feature handlers.
+	httpErrors := http.NewServeMux()
+	engine.Use(func(c *gin.Context) {
+		if original, ok := c.Request.Context().Value(originalRequestKey{}).(*http.Request); ok {
+			c.Request = original
 		}
-	}
-	r.engine.Handle(method, strings.Join(parts, "/"), func(c *gin.Context) {
-		c.Request.Pattern = pattern
-		for i, name := range names {
-			c.Request.SetPathValue(name, c.Params[i].Value)
+		for i, param := range c.Params {
+			c.Params[i].Value, _ = url.PathUnescape(param.Value)
 		}
-		handler(c.Writer, c.Request)
 	})
+	engine.Use(middleware...)
+	engine.Use(func(c *gin.Context) {
+		u := c.Request.URL
+		if u.RawPath == "" && path.Clean(u.Path) == u.Path {
+			return
+		}
+		// ServeMux decides whether an unusual path names an endpoint. For
+		// example, a%2Fb is one valid ID, but %2F alone is a slash.
+		h, _ := httpErrors.Handler(c.Request)
+		if _, registered := h.(registeredRoute); !registered {
+			c.Abort()
+			h.ServeHTTP(c.Writer, c.Request)
+		}
+	})
+	engine.NoRoute(func(c *gin.Context) { httpErrors.ServeHTTP(c.Writer, c.Request) })
+	register(engine)
+	for _, route := range engine.Routes() {
+		parts := strings.Split(route.Path, "/")
+		for i, part := range parts {
+			if name, ok := strings.CutPrefix(part, ":"); ok {
+				parts[i] = "{" + name + "}"
+			}
+		}
+		httpErrors.Handle(route.Method+" "+strings.Join(parts, "/"), registeredRoute{})
+	}
+	return &router{engine: engine}
 }
 
 func (r *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// ServeMux owns the existing HEAD semantics and canonicalization of
-	// escaped segments, duplicate slashes and dot segments.
-	if req.Method == http.MethodHead || req.Method == http.MethodConnect ||
-		req.URL.RawPath != "" || path.Clean(req.URL.Path) != req.URL.Path {
-		r.standard.ServeHTTP(w, req)
+	if req.Method != http.MethodHead && req.URL.RawPath == "" {
+		r.engine.ServeHTTP(w, req)
 		return
 	}
-	r.engine.ServeHTTP(w, req)
+	// HEAD selects the GET route. Canonicalize escaping one segment at a
+	// time so %68ealth matches health and an encoded slash stays in its ID.
+	// Middleware restores the untouched request before a feature sees it.
+	lookup := req.WithContext(context.WithValue(req.Context(), originalRequestKey{}, req))
+	if req.Method == http.MethodHead {
+		lookup.Method = http.MethodGet
+	}
+	if req.URL.RawPath != "" {
+		parts := strings.Split(req.URL.EscapedPath(), "/")
+		for i, part := range parts {
+			value, _ := url.PathUnescape(part)
+			parts[i] = url.PathEscape(value)
+		}
+		u := *req.URL
+		u.RawPath = strings.Join(parts, "/")
+		lookup.URL = &u
+	}
+	r.engine.ServeHTTP(w, lookup)
 }

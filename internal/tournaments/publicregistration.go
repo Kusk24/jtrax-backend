@@ -47,6 +47,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -170,14 +172,14 @@ func registrationOpen(deadline string, capacity *int, taken int) (bool, string) 
 }
 
 // handlePublicTournamentList serves every event currently open to the public.
-func handlePublicTournamentList(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handlePublicTournamentList(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		rows, err := d.Query(publicTournamentSelect + `
 			WHERE t.public_registration = 1 AND t.draft = 0
 			  AND t.tournament_status <> 'Completed'
 			ORDER BY COALESCE(t.start_date,'9999') ASC, t.name ASC`)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load tournaments", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load tournaments", err)
 			return
 		}
 		defer rows.Close()
@@ -185,43 +187,43 @@ func handlePublicTournamentList(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			t, err := scanPublicTournament(rows)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load tournaments", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load tournaments", err)
 				return
 			}
 			out = append(out, *t)
 		}
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load tournaments", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load tournaments", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"tournaments": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"tournaments": out})
 	}
 }
 
 // handlePublicTournament serves one open event, with its categories.
-func handlePublicTournament(d *sql.DB, cardPayments bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
+func handlePublicTournament(d *sql.DB, cardPayments bool) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := ctx.Param("id")
 		row := d.QueryRow(publicTournamentSelect+`
 			WHERE t.tournament_id = ? AND t.public_registration = 1 AND t.draft = 0`, id)
 		t, err := scanPublicTournament(row)
 		if errors.Is(err, sql.ErrNoRows) {
 			// A closed event is indistinguishable from one that does not
 			// exist, so this cannot be used to discover tournament ids.
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load tournament", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load tournament", err)
 			return
 		}
 		cats, err := publicCategories(d, id)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load tournament", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load tournament", err)
 			return
 		}
 		t.CardPayments = cardPayments
-		httpx.JSON(w, http.StatusOK, map[string]any{"tournament": t, "categories": cats})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"tournament": t, "categories": cats})
 	}
 }
 
@@ -404,41 +406,41 @@ func bornInTime(dob time.Time, year, limit int) bool {
 // already holds a place — are made inside it. Reading the count first and
 // inserting afterwards would let two people take the last seat at once, which
 // on the day means turning a child away at the door.
-func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
+func handlePublicRegister(deps *publicEntryDeps) gin.HandlerFunc {
 	d := deps.db
-	return func(w http.ResponseWriter, r *http.Request) {
-		tournamentID := r.PathValue("id")
+	return func(ctx *gin.Context) {
+		tournamentID := ctx.Param("id")
 
-		r.Body = http.MaxBytesReader(w, r.Body, maxEntryFormBytes)
-		if err := r.ParseMultipartForm(maxEntryFormBytes); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "could not read the form — please try again", nil)
+		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, maxEntryFormBytes)
+		if err := ctx.Request.ParseMultipartForm(maxEntryFormBytes); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "could not read the form — please try again", nil)
 			return
 		}
 		// age arrives as a form string like every other field here; an empty
 		// or unparsable one is 0, "not given", which is exactly what the old
 		// JSON decode produced for an absent field.
-		age, _ := strconv.Atoi(r.FormValue("age"))
+		age, _ := strconv.Atoi(ctx.Request.FormValue("age"))
 		in := registerInput{
-			Name:               r.FormValue("name"),
-			Email:              r.FormValue("email"),
-			Phone:              r.FormValue("phone"),
-			DateOfBirth:        r.FormValue("dateOfBirth"),
-			CategoryID:         r.FormValue("categoryId"),
-			IsStudent:          r.FormValue("isStudent") == "true",
-			StudentID:          r.FormValue("studentId"),
-			Nickname:           r.FormValue("nickname"),
+			Name:               ctx.Request.FormValue("name"),
+			Email:              ctx.Request.FormValue("email"),
+			Phone:              ctx.Request.FormValue("phone"),
+			DateOfBirth:        ctx.Request.FormValue("dateOfBirth"),
+			CategoryID:         ctx.Request.FormValue("categoryId"),
+			IsStudent:          ctx.Request.FormValue("isStudent") == "true",
+			StudentID:          ctx.Request.FormValue("studentId"),
+			Nickname:           ctx.Request.FormValue("nickname"),
 			Age:                age,
-			AcceptTerms:        r.FormValue("acceptTerms") == "true",
-			PrivacyNotice:      r.FormValue("privacyNotice") == "true",
-			NameTh:             r.FormValue("nameTh"),
-			DocumentType:       r.FormValue("documentType"),
-			ScannedName:        r.FormValue("scannedName"),
-			ScannedDateOfBirth: r.FormValue("scannedDateOfBirth"),
-			IDCheck:            r.FormValue("idCheck"),
-			PayChoice:          r.FormValue("payChoice"),
+			AcceptTerms:        ctx.Request.FormValue("acceptTerms") == "true",
+			PrivacyNotice:      ctx.Request.FormValue("privacyNotice") == "true",
+			NameTh:             ctx.Request.FormValue("nameTh"),
+			DocumentType:       ctx.Request.FormValue("documentType"),
+			ScannedName:        ctx.Request.FormValue("scannedName"),
+			ScannedDateOfBirth: ctx.Request.FormValue("scannedDateOfBirth"),
+			IDCheck:            ctx.Request.FormValue("idCheck"),
+			PayChoice:          ctx.Request.FormValue("payChoice"),
 		}
 		if msg := in.validate(); msg != "" {
-			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 			return
 		}
 
@@ -448,13 +450,13 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 		// Made before the transaction: it may write its key on first use.
 		payCode, payCodeHash, err := entrylinks.EntryPayCode(d, regID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		defer tx.Rollback()
@@ -463,18 +465,18 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			WHERE t.tournament_id = ? AND t.public_registration = 1 AND t.draft = 0`, tournamentID)
 		t, err := scanPublicTournament(row)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		if !t.Open {
 			if t.ClosedReason == "full" {
-				httpx.Error(w, http.StatusConflict, "this tournament is full", nil)
+				httpx.Error(ctx, http.StatusConflict, "this tournament is full", nil)
 			} else {
-				httpx.Error(w, http.StatusConflict, "registration for this tournament has closed", nil)
+				httpx.Error(ctx, http.StatusConflict, "registration for this tournament has closed", nil)
 			}
 			return
 		}
@@ -483,11 +485,11 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 		   typed: it decides the age group, so it is the document's word. */
 		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, "")
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		if msg != "" {
-			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 			return
 		}
 		in.DateOfBirth = card.DateOfBirth
@@ -504,11 +506,11 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 		if in.CategoryID != "" {
 			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 			if msg != "" {
-				httpx.Error(w, http.StatusBadRequest, msg, nil)
+				httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 				return
 			}
 			categoryID = in.CategoryID
@@ -524,11 +526,11 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`,
 				in.StudentID).Scan(&n); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 			if n == 0 {
-				httpx.Error(w, http.StatusBadRequest,
+				httpx.Error(ctx, http.StatusBadRequest,
 					"we could not find that JCA student ID — check it, or untick the student box", nil)
 				return
 			}
@@ -541,7 +543,7 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			if err == nil {
 				studentID = matched
 			} else if !errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 		}
@@ -600,22 +602,22 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			if db.IsUniqueViolation(err) {
 				// One email may enter several players; the same player twice
 				// is what is refused (0070).
-				httpx.Error(w, http.StatusConflict,
+				httpx.Error(ctx, http.StatusConflict,
 					"this player is already registered for this tournament", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		/* No account behind a public entry, and no second copy of the
 		   family's email either — the entry it belongs to already says who,
 		   and the retention sweep blanks that when its time comes. */
 		if err := families.RecordConsent(tx, "privacy_notice", regID, "", "public form"); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 
@@ -641,7 +643,7 @@ func handlePublicRegister(deps *publicEntryDeps) http.HandlerFunc {
 			go entrymail.SendEntryNotice(d, deps.notifier, regID, entrymail.NoticeReserved, online)
 		}
 
-		httpx.JSON(w, http.StatusCreated, map[string]any{
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{
 			"registered": true,
 			"status":     "Approved",
 			"feeQuoted":  fee,
@@ -671,21 +673,21 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-func mountPublicRegistration(mux httpx.RouteRegistrar, deps *publicEntryDeps) {
+func mountPublicRegistration(mux gin.IRoutes, deps *publicEntryDeps) {
 	d := deps.db
 	const p = "/api/v1/public/tournaments"
 	// Reads are cheap and cacheable; the write is the one that costs something,
 	// so it carries the tighter budget.
-	mux.HandleFunc("GET "+p, httpx.RateLimit(60, handlePublicTournamentList(d)))
-	mux.HandleFunc("GET "+p+"/{id}", httpx.RateLimit(60, handlePublicTournament(d, deps.stripe != nil)))
-	mux.HandleFunc("POST "+p+"/{id}/register", httpx.RateLimit(10, handlePublicRegister(deps)))
+	mux.GET(p, httpx.RateLimit(60), handlePublicTournamentList(d))
+	mux.GET(p+"/:id", httpx.RateLimit(60), handlePublicTournament(d, deps.stripe != nil))
+	mux.POST(p+"/:id/register", httpx.RateLimit(10), handlePublicRegister(deps))
 
 	// The pay link's two calls. The code is the whole of the authorization,
 	// and it is 256 bits, so the limit is a flood guard rather than what
 	// stops guessing. Paying spends a Stripe API call, so it gets less.
-	const e = "/api/v1/public/tournament-registrations/{id}"
-	mux.HandleFunc("POST "+e, httpx.RateLimit(30, handlePublicEntry(deps)))
-	mux.HandleFunc("POST "+e+"/pay", httpx.RateLimit(20, handlePublicEntryPay(deps)))
+	const e = "/api/v1/public/tournament-registrations/:id"
+	mux.POST(e, httpx.RateLimit(30), handlePublicEntry(deps))
+	mux.POST(e+"/pay", httpx.RateLimit(20), handlePublicEntryPay(deps))
 }
 
 // nullIfZero keeps "not given" out of the database as NULL rather than 0.

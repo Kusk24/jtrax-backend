@@ -4,14 +4,15 @@ package tournaments
 import (
 	"database/sql"
 
-	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/payments"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
-func RegisterRoutes(mux httpx.RouteRegistrar, d *sql.DB, mailCfg mail.Config, sender mail.Sender, notifier *notify.Service) {
+func RegisterRoutes(mux gin.IRoutes, d *sql.DB, mailCfg mail.Config, sender mail.Sender, notifier *notify.Service) {
 	results := mountChessResults(mux, d)
 	mountTournamentResults(mux, d, results)
 	mountTournamentRegulation(mux, d)

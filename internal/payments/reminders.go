@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/families"
@@ -26,18 +28,18 @@ import (
 // only shrink the eligible set: an id outside the expiry window is reported
 // back under `skipped`, never sent to, so the caller cannot make this warn a
 // family whose credits are fine.
-func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func HandleCreditExpiry(d *sql.DB, svc *notify.Service) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only admin or reception may send this", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only admin or reception may send this", nil)
 			return
 		}
 		days := 14
-		if q := r.URL.Query().Get("days"); q != "" {
+		if q := ctx.Query("days"); q != "" {
 			if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 365 {
 				days = v
 			}
@@ -47,12 +49,12 @@ func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			DryRun     bool     `json:"dry_run"`
 			StudentIDs []string `json:"student_ids"`
 		}
-		if r.Body != nil {
+		if ctx.Request.Body != nil {
 			// An empty or absent body keeps the old behaviour: send to everyone.
-			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+			_ = json.NewDecoder(io.LimitReader(ctx.Request.Body, 1<<16)).Decode(&req)
 		}
 		if len(req.StudentIDs) > 500 {
-			httpx.Error(w, http.StatusUnprocessableEntity, "too many student ids", nil)
+			httpx.Error(ctx, http.StatusUnprocessableEntity, "too many student ids", nil)
 			return
 		}
 		chosen := map[string]bool{}
@@ -64,7 +66,7 @@ func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 		// about the soonest of them (creditreminders.go).
 		targets, err := expiringTargets(d, days)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not find expiring credits", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not find expiring credits", err)
 			return
 		}
 
@@ -78,7 +80,7 @@ func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 					"expires":      t.expires,
 				})
 			}
-			httpx.JSON(w, http.StatusOK, map[string]any{"targets": list, "within_days": days})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"targets": list, "within_days": days})
 			return
 		}
 
@@ -107,12 +109,12 @@ func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			}
 			err := svc.Send(recipients, expiryMessage(t, days, "credit_expiry:"+t.studentID+":"+academytime.Today()))
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not send", err)
 				return
 			}
 			sent++
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "within_days": days, "skipped": skipped})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"students_notified": sent, "within_days": days, "skipped": skipped})
 	}
 }
 
@@ -125,31 +127,31 @@ func HandleCreditExpiry(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 // A balance is counted the way the console counts it: the credits recorded
 // against an active course, plus the child's credits that sit in no course. A
 // child in two courses is low if either course is.
-func HandleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func HandleLowCredit(d *sql.DB, svc *notify.Service) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only admin or reception may send this", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only admin or reception may send this", nil)
 			return
 		}
 		var req struct {
 			DryRun     bool     `json:"dry_run"`
 			StudentIDs []string `json:"student_ids"`
 		}
-		if r.Body != nil {
-			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		if ctx.Request.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(ctx.Request.Body, 1<<16)).Decode(&req)
 		}
 		if len(req.StudentIDs) > 500 {
-			httpx.Error(w, http.StatusUnprocessableEntity, "too many student ids", nil)
+			httpx.Error(ctx, http.StatusUnprocessableEntity, "too many student ids", nil)
 			return
 		}
 
 		targets, line, err := lowCreditTargets(d, "")
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read balances", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read balances", err)
 			return
 		}
 		lowest := map[string]bool{}
@@ -167,7 +169,7 @@ func HandleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 					"balance":      t.balance,
 				})
 			}
-			httpx.JSON(w, http.StatusOK, map[string]any{"targets": list, "line": line})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"targets": list, "line": line})
 			return
 		}
 
@@ -194,11 +196,11 @@ func HandleLowCredit(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			// Pressing Send twice in a day reaches a family once.
 			err := svc.Send(recipients, lowCreditMessage(t, "low_credit:"+t.studentID+":"+academytime.Today()))
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not send", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not send", err)
 				return
 			}
 			sent++
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"students_notified": sent, "line": line, "skipped": skipped})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"students_notified": sent, "line": line, "skipped": skipped})
 	}
 }

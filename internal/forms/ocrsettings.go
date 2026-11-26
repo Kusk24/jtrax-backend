@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
@@ -64,16 +66,16 @@ func configValue(d *sql.DB, key string) string {
 	return value
 }
 
-func MountOCRSettings(mux httpx.RouteRegistrar, d *sql.DB, provider ocr.Provider) {
-	mux.HandleFunc("GET /api/v1/ocr", handleOCRGet(d, provider))
-	mux.HandleFunc("PUT /api/v1/ocr", handleOCRPut(d, provider))
+func MountOCRSettings(mux gin.IRoutes, d *sql.DB, provider ocr.Provider) {
+	mux.GET("/api/v1/ocr", handleOCRGet(d, provider))
+	mux.PUT("/api/v1/ocr", handleOCRPut(d, provider))
 	// Each test is a real call to the provider and counts against the key's
 	// quota, so a stuck client pressing it in a loop is limited.
-	mux.HandleFunc("POST /api/v1/ocr/test",
-		httpx.RateLimit(10, handleOCRTest(d, provider)))
+	mux.POST("/api/v1/ocr/test",
+		httpx.RateLimit(10), handleOCRTest(d, provider))
 	// A call to Google each time the list is not cached, so limited like Test.
-	mux.HandleFunc("GET /api/v1/ocr/models",
-		httpx.RateLimit(10, handleOCRModels(d, provider)))
+	mux.GET("/api/v1/ocr/models",
+		httpx.RateLimit(10), handleOCRModels(d, provider))
 }
 
 // ocrState is what the console shows. It never includes the key.
@@ -98,29 +100,29 @@ func ocrState(d *sql.DB, provider ocr.Provider) map[string]any {
 	return out
 }
 
-func handleOCRGet(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireAdmin(d, w, r) == nil {
+func handleOCRGet(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireAdmin(d, ctx) == nil {
 			return
 		}
-		httpx.JSON(w, http.StatusOK, ocrState(d, provider))
+		httpx.JSON(ctx, http.StatusOK, ocrState(d, provider))
 	}
 }
 
 // handleOCRPut saves the model, for every scan in the academy, and who chose
 // it. An empty model removes the saved one, so the server goes back to the
 // model it started with.
-func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		caller := accounts.RequireAdmin(d, w, r)
+func handleOCRPut(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		caller := accounts.RequireAdmin(d, ctx)
 		if caller == nil {
 			return
 		}
 		var body struct {
 			Model string `json:"model"`
 		}
-		if err := httpx.Decode(r, &body); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &body); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		model := strings.TrimSpace(body.Model)
@@ -128,7 +130,7 @@ func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		if model == "" {
 			_, err = d.Exec(`DELETE FROM system_configuration WHERE config_key = ?`, ocrModelKey)
 		} else if !ocr.ValidModel(model) {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"model name may use only lowercase letters, digits, dots and dashes", nil)
 			return
 		} else {
@@ -145,10 +147,10 @@ func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			err = setConfig(d, ocrModelAtKey, time.Now().UTC().Format(time.RFC3339))
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the model", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the model", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, ocrState(d, provider))
+		httpx.JSON(ctx, http.StatusOK, ocrState(d, provider))
 	}
 }
 
@@ -159,23 +161,23 @@ func handleOCRPut(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 // A failed test is still a successful request, so it answers 200 with ok false
 // and a reason code the console translates. It gives the upstream status and
 // nothing else from the provider's reply.
-func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireAdmin(d, w, r) == nil {
+func handleOCRTest(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireAdmin(d, ctx) == nil {
 			return
 		}
 		var body struct {
 			Model string `json:"model"`
 		}
-		if r.ContentLength != 0 {
-			if err := httpx.Decode(r, &body); err != nil {
-				httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if ctx.Request.ContentLength != 0 {
+			if err := httpx.Decode(ctx, &body); err != nil {
+				httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 				return
 			}
 		}
 		model := strings.TrimSpace(body.Model)
 		if model != "" && !ocr.ValidModel(model) {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"model name may use only lowercase letters, digits, dots and dashes", nil)
 			return
 		}
@@ -183,13 +185,13 @@ func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		result := map[string]any{"ok": false, "model": model}
 		if provider == nil {
 			result["reason"] = "not_configured"
-			httpx.JSON(w, http.StatusOK, result)
+			httpx.JSON(ctx, http.StatusOK, result)
 			return
 		}
 		chooser, ok := ScannerFor(d, provider).(ocr.ModelChooser)
 		if !ok {
 			result["reason"] = "not_testable"
-			httpx.JSON(w, http.StatusOK, result)
+			httpx.JSON(ctx, http.StatusOK, result)
 			return
 		}
 		if model != "" {
@@ -197,14 +199,14 @@ func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		}
 		result["model"] = chooser.Model()
 
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		callCtx, cancel := context.WithTimeout(ctx.Request.Context(), 30*time.Second)
 		defer cancel()
 		started := time.Now()
-		err := chooser.Test(ctx)
+		err := chooser.Test(callCtx)
 		if err == nil {
 			result["ok"] = true
 			result["millis"] = time.Since(started).Milliseconds()
-			httpx.JSON(w, http.StatusOK, result)
+			httpx.JSON(ctx, http.StatusOK, result)
 			return
 		}
 		// Logged in full for whoever reads the server log; the console gets
@@ -215,7 +217,7 @@ func handleOCRTest(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		if status != 0 {
 			result["status"] = status
 		}
-		httpx.JSON(w, http.StatusOK, result)
+		httpx.JSON(ctx, http.StatusOK, result)
 	}
 }
 
@@ -237,19 +239,19 @@ const modelListLife = 10 * time.Minute
 // with their prices. It answers 200 even when Google does not, with the reason
 // and status a failed scan gives, so Settings can keep its built-in list and
 // say why.
-func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
+func handleOCRModels(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
 	var mu sync.Mutex
 	var cached []ocr.ModelInfo
 	var cachedAt time.Time
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireAdmin(d, w, r) == nil {
+	return func(ctx *gin.Context) {
+		if accounts.RequireAdmin(d, ctx) == nil {
 			return
 		}
 		out := map[string]any{"models": []scanModel{}, "pricesAsOf": ocr.PricesAsOf, "pricesSource": ocr.PricesSource}
 		lister, ok := provider.(ocr.ModelLister)
 		if provider == nil || !ok {
 			out["reason"] = "not_configured"
-			httpx.JSON(w, http.StatusOK, out)
+			httpx.JSON(ctx, http.StatusOK, out)
 			return
 		}
 
@@ -257,9 +259,9 @@ func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		models, fresh := cached, time.Since(cachedAt) < modelListLife
 		mu.Unlock()
 		if !fresh {
-			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			callCtx, cancel := context.WithTimeout(ctx.Request.Context(), 20*time.Second)
 			defer cancel()
-			listed, err := lister.ListModels(ctx)
+			listed, err := lister.ListModels(callCtx)
 			if err != nil {
 				log.Printf("ocr models: %v", err)
 				reason, status := providerFailure(err)
@@ -267,7 +269,7 @@ func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 				if status != 0 {
 					out["status"] = status
 				}
-				httpx.JSON(w, http.StatusOK, out)
+				httpx.JSON(ctx, http.StatusOK, out)
 				return
 			}
 			mu.Lock()
@@ -286,6 +288,6 @@ func handleOCRModels(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 			list = append(list, entry)
 		}
 		out["models"] = list
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }

@@ -16,6 +16,8 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
@@ -68,58 +70,58 @@ func SniffImage(data []byte) string {
 	return http.DetectContentType(data)
 }
 
-func MountRegistrationScan(mux httpx.RouteRegistrar, d *sql.DB, provider ocr.Provider) {
+func MountRegistrationScan(mux gin.IRoutes, d *sql.DB, provider ocr.Provider) {
 	// Rate-limited even though it is authenticated: every call costs money at
 	// the provider, so a stuck client retrying is a bill as well as load.
-	mux.HandleFunc("POST /api/v1/registrations/scan",
-		httpx.RateLimit(30, handleScanRegistration(d, provider)))
+	mux.POST("/api/v1/registrations/scan",
+		httpx.RateLimit(30), handleScanRegistration(d, provider))
 }
 
-func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleScanRegistration(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		// Registration is front-desk work. A parent or student has no reason to
 		// be able to post a photograph to a paid vision API.
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only admin or reception may scan a form", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only admin or reception may scan a form", nil)
 			return
 		}
 		// The model saved in Settings, read per scan so a change applies
 		// without a restart.
 		provider := ScannerFor(d, provider)
 		if provider == nil {
-			ScanFailed(w, http.StatusServiceUnavailable,
+			ScanFailed(ctx, http.StatusServiceUnavailable,
 				"form scanning is not configured on this server", "not_configured", 0, nil)
 			return
 		}
 
 		// Cap what can be read before parsing, not after: without this the
 		// server buffers whatever was sent.
-		r.Body = http.MaxBytesReader(w, r.Body, MaxScanBytes)
-		if err := r.ParseMultipartForm(MaxScanBytes); err != nil {
-			ScanFailed(w, http.StatusRequestEntityTooLarge,
+		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, MaxScanBytes)
+		if err := ctx.Request.ParseMultipartForm(MaxScanBytes); err != nil {
+			ScanFailed(ctx, http.StatusRequestEntityTooLarge,
 				"image is too large (10 MB maximum)", "too_large", 0, err)
 			return
 		}
-		defer r.MultipartForm.RemoveAll()
+		defer ctx.Request.MultipartForm.RemoveAll()
 
-		file, header, err := r.FormFile("image")
+		file, header, err := ctx.Request.FormFile("image")
 		if err != nil {
-			ScanFailed(w, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
+			ScanFailed(ctx, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
 			return
 		}
 		defer file.Close()
 
 		data, err := io.ReadAll(file)
 		if err != nil {
-			ScanFailed(w, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
+			ScanFailed(ctx, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
 			return
 		}
 		if len(data) == 0 {
-			ScanFailed(w, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
+			ScanFailed(ctx, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
 			return
 		}
 
@@ -128,21 +130,21 @@ func handleScanRegistration(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
 		// a third party.
 		mime := SniffImage(data)
 		if !ScannableTypes[mime] {
-			ScanFailed(w, http.StatusUnsupportedMediaType,
+			ScanFailed(ctx, http.StatusUnsupportedMediaType,
 				"upload a photo of the form (JPEG, PNG, WebP or HEIC)", "not_an_image", 0, nil)
 			return
 		}
 
-		form, err := provider.Extract(r.Context(), data, mime)
+		form, err := provider.Extract(ctx.Request.Context(), data, mime)
 		if err != nil {
 			// The provider's error can quote the request, which is the child's
 			// data, so it stays internal: the reply names only the kind of
 			// failure and the provider's status.
-			ProviderFailed(w, "form", err)
+			ProviderFailed(ctx, "form", err)
 			return
 		}
 
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"fields": form,
 			// Named so it is answerable which service saw the data, and echoed
 			// back so the console can show it beside the results.

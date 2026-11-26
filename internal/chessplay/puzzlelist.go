@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -276,18 +278,18 @@ type listView struct {
 }
 
 // handlePuzzleList returns the pupil's twenty, refreshed for today.
-func handlePuzzleList(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handlePuzzleList(d *sql.DB, lc puzzleProvider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
 		if err := refreshList(d, lc, studentID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not prepare the puzzles", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not prepare the puzzles", err)
 			return
 		}
 		own, _ := pupilTier(d, studentID)
@@ -297,7 +299,7 @@ func handlePuzzleList(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 			WHERE l.student_id = ?
 			ORDER BY l.position`, academytime.Today(), studentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		defer rows.Close()
@@ -307,7 +309,7 @@ func handlePuzzleList(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 			var moves string
 			var solved sql.NullBool
 			if err := rows.Scan(&v.PuzzleID, &v.FEN, &v.Rating, &v.Themes, &moves, &v.Position, &v.Tier, &solved); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 				return
 			}
 			// `moves` is read only to derive these two; it never leaves here.
@@ -316,43 +318,43 @@ func handlePuzzleList(d *sql.DB, lc puzzleProvider) http.HandlerFunc {
 			v.Solved = solved.Valid && solved.Bool
 			out = append(out, v)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"puzzles": out, "level": own})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"puzzles": out, "level": own})
 	}
 }
 
 // handleListOpen stamps when a pupil opened a list puzzle, for the minutes its
 // first solve adds to the day.
-func handleListOpen(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleListOpen(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
 		res, err := d.Exec(`UPDATE puzzle_list SET opened_at = datetime('now')
 		                    WHERE student_id = ? AND puzzle_id = ? AND solved_on IS NULL AND opened_at IS NULL`,
-			studentID, r.PathValue("id"))
+			studentID, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record", err)
 			return
 		}
 		n, _ := res.RowsAffected()
-		httpx.JSON(w, http.StatusOK, map[string]any{"started": n > 0})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"started": n > 0})
 	}
 }
 
 // handleListAttempt grades one move of a list puzzle, as the daily grader
 // does. The first solve is recorded; a replay is graded and nothing more.
-func handleListAttempt(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleListAttempt(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
@@ -360,38 +362,38 @@ func handleListAttempt(d *sql.DB) http.HandlerFunc {
 			Played []string `json:"played"`
 			Move   string   `json:"move"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || strings.TrimSpace(in.Move) == "" {
-			httpx.Error(w, http.StatusBadRequest, "a move is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil || strings.TrimSpace(in.Move) == "" {
+			httpx.Error(ctx, http.StatusBadRequest, "a move is required", err)
 			return
 		}
 		if len(in.Move) > 6 || len(in.Played) > 32 {
-			httpx.Error(w, http.StatusBadRequest, "that is not a move", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that is not a move", nil)
 			return
 		}
-		puzzleID := r.PathValue("id")
+		puzzleID := ctx.Param("id")
 		var fen, solution string
 		var solvedOn sql.NullString
 		err := d.QueryRow(`SELECT p.fen, p.moves, l.solved_on FROM puzzle_list l
 		                   JOIN puzzle p ON p.puzzle_id = l.puzzle_id
 		                   WHERE l.student_id = ? AND l.puzzle_id = ?`, studentID, puzzleID).Scan(&fen, &solution, &solvedOn)
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "that puzzle is not in your list", nil)
+			httpx.Error(ctx, http.StatusNotFound, "that puzzle is not in your list", nil)
 			return
 		}
 		verdict, err := puzzle.Grade(fen, solution, in.Played, in.Move)
 		if err != nil {
 			if errors.Is(err, puzzle.ErrBadPuzzle) {
-				httpx.Error(w, http.StatusConflict, "that puzzle could not be graded", err)
+				httpx.Error(ctx, http.StatusConflict, "that puzzle could not be graded", err)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not grade the attempt", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not grade the attempt", err)
 			return
 		}
 		firstSolve := verdict.Correct && verdict.Solved && !solvedOn.Valid
 		if firstSolve {
 			recordListSolve(d, studentID, puzzleID)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"correct":    verdict.Correct,
 			"solved":     verdict.Solved,
 			"reply":      verdict.Reply,
@@ -434,8 +436,8 @@ func recordListSolve(d *sql.DB, studentID, puzzleID string) {
 	}
 }
 
-func mountPuzzleList(mux httpx.RouteRegistrar, d *sql.DB, lc puzzleProvider) {
-	mux.HandleFunc("GET /api/v1/puzzles/list", httpx.RateLimit(30, handlePuzzleList(d, lc)))
-	mux.HandleFunc("POST /api/v1/puzzles/list/{id}/open", handleListOpen(d))
-	mux.HandleFunc("POST /api/v1/puzzles/list/{id}/attempt", handleListAttempt(d))
+func mountPuzzleList(mux gin.IRoutes, d *sql.DB, lc puzzleProvider) {
+	mux.GET("/api/v1/puzzles/list", httpx.RateLimit(30), handlePuzzleList(d, lc))
+	mux.POST("/api/v1/puzzles/list/:id/open", handleListOpen(d))
+	mux.POST("/api/v1/puzzles/list/:id/attempt", handleListAttempt(d))
 }

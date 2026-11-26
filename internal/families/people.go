@@ -13,6 +13,8 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -231,31 +233,31 @@ func childrenOf(q interface {
 	return ids, rows.Err()
 }
 
-func MountPeopleCascade(mux httpx.RouteRegistrar, d *sql.DB) {
+func MountPeopleCascade(mux gin.IRoutes, d *sql.DB) {
 	// DELETE /api/v1/students/{id}/cascade[?parent=orphan]
 	//
 	// `parent=orphan` also removes the guardian when this was their only child —
 	// a parent account with nobody attached is a login that can see nothing.
-	mux.HandleFunc("DELETE /api/v1/students/{id}/cascade", func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+	mux.DELETE("/api/v1/students/:id/cascade", func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		studentID := r.PathValue("id")
-		withParent := r.URL.Query().Get("parent") == "orphan"
+		studentID := ctx.Param("id")
+		withParent := ctx.Query("parent") == "orphan"
 
 		var parentID string
 		d.QueryRow(`SELECT parent_id FROM student_parent WHERE student_id = ?`, studentID).Scan(&parentID)
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not start transaction", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not start transaction", err)
 			return
 		}
 		defer tx.Rollback()
 
 		res := deleteResult{Status: "deleted", Student: studentID}
 		if err := removeStudent(tx, studentID, &res); err != nil {
-			httpx.Error(w, http.StatusConflict, "could not delete the student", err)
+			httpx.Error(ctx, http.StatusConflict, "could not delete the student", err)
 			return
 		}
 
@@ -264,12 +266,12 @@ func MountPeopleCascade(mux httpx.RouteRegistrar, d *sql.DB) {
 		if withParent && parentID != "" {
 			siblings, err := childrenOf(tx, parentID)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not check the guardian", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not check the guardian", err)
 				return
 			}
 			if len(siblings) == 0 {
 				if err := removeParent(tx, parentID, &res); err != nil {
-					httpx.Error(w, http.StatusConflict, "could not delete the guardian", err)
+					httpx.Error(ctx, http.StatusConflict, "could not delete the guardian", err)
 					return
 				}
 				res.Parent = parentID
@@ -277,26 +279,26 @@ func MountPeopleCascade(mux httpx.RouteRegistrar, d *sql.DB) {
 		}
 
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not commit", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not commit", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, res)
+		httpx.JSON(ctx, http.StatusOK, res)
 	})
 
 	// DELETE /api/v1/parents/{id}/cascade[?children=delete]
 	//
 	// Without the flag the children stay and simply lose their guardian, which
 	// is what usually happens — one parent leaves, another is linked later.
-	mux.HandleFunc("DELETE /api/v1/parents/{id}/cascade", func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+	mux.DELETE("/api/v1/parents/:id/cascade", func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		parentID := r.PathValue("id")
-		withChildren := r.URL.Query().Get("children") == "delete"
+		parentID := ctx.Param("id")
+		withChildren := ctx.Query("children") == "delete"
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not start transaction", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not start transaction", err)
 			return
 		}
 		defer tx.Rollback()
@@ -305,26 +307,26 @@ func MountPeopleCascade(mux httpx.RouteRegistrar, d *sql.DB) {
 		if withChildren {
 			kids, err := childrenOf(tx, parentID)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not list the children", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not list the children", err)
 				return
 			}
 			for _, kid := range kids {
 				if err := removeStudent(tx, kid, &res); err != nil {
-					httpx.Error(w, http.StatusConflict, "could not delete a child", err)
+					httpx.Error(ctx, http.StatusConflict, "could not delete a child", err)
 					return
 				}
 				res.Children = append(res.Children, kid)
 			}
 		}
 		if err := removeParent(tx, parentID, &res); err != nil {
-			httpx.Error(w, http.StatusConflict, "could not delete the parent", err)
+			httpx.Error(ctx, http.StatusConflict, "could not delete the parent", err)
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not commit", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not commit", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, res)
+		httpx.JSON(ctx, http.StatusOK, res)
 	})
 }
