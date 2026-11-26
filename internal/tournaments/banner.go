@@ -116,7 +116,7 @@ func handleGetBanner(d *sql.DB) gin.HandlerFunc {
 		allowed := draft == 0 && public > 0
 		if !allowed {
 			if draft == 1 {
-				allowed = previewAllowed(d, ctx.Request, tid)
+				allowed = previewAllowed(d, tid, ctx.Query("preview"))
 			}
 			if !allowed {
 				id, idErr := auth.Lookup(d, accounts.BearerToken(ctx.Request))

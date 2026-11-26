@@ -133,7 +133,7 @@ func handleGetRegulation(d *sql.DB) gin.HandlerFunc {
 		}
 		// A draft's own preview link shows its regulation too — the organiser
 		// is checking the page exactly as parents will get it.
-		if isPublic == 0 && !previewAllowed(d, ctx.Request, tournamentID) {
+		if isPublic == 0 && !previewAllowed(d, tournamentID, ctx.Query("preview")) {
 			id, idErr := auth.Lookup(d, accounts.BearerToken(ctx.Request))
 			/* A published event that is not open to the public is still the
 			   academy's own families' to read: the parent portal links its
