@@ -11,17 +11,13 @@ package tournaments
 
 import (
 	"database/sql"
-	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
-	"github.com/Kusk24/jtrax-backend/internal/families"
-	"github.com/Kusk24/jtrax-backend/internal/fees"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
@@ -72,201 +68,62 @@ func handleEnterTournament(d *sql.DB) gin.HandlerFunc {
 			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
-		in.StudentID = strings.TrimSpace(in.StudentID)
-		in.Contact = strings.TrimSpace(in.Contact)
-		if in.StudentID == "" {
-			httpx.Error(ctx, http.StatusBadRequest, "student_id is required", nil)
-			return
-		}
-		in.Nickname = strings.TrimSpace(in.Nickname)
-		in.NameTh = strings.TrimSpace(in.NameTh)
-		if in.Nickname == "" {
-			httpx.Error(ctx, http.StatusBadRequest, "please give the player's nickname", nil)
-			return
-		}
-		if len([]rune(in.Nickname)) > maxNameLen || len([]rune(in.NameTh)) > maxNameLen {
-			httpx.Error(ctx, http.StatusBadRequest, "that name is too long", nil)
-			return
-		}
-		// Refused rather than defaulted, as on the public form: a record of
-		// agreement nobody gave is worse than none.
-		if !in.AcceptTerms {
-			httpx.Error(ctx, http.StatusBadRequest, "please accept the terms and conditions to enter", nil)
-			return
-		}
-		if strings.TrimSpace(in.MedicalNotes) != "" && !in.HealthConsent {
-			httpx.Error(ctx, http.StatusBadRequest, "please agree to the academy keeping the medical notes, or leave them empty", nil)
-			return
-		}
-		if len(in.Contact) > maxPhoneLen {
-			httpx.Error(ctx, http.StatusBadRequest, "participant_contact is too long", nil)
-			return
-		}
-		if err := CheckRegistrationNotes(map[string]any{
-			"medical_notes": in.MedicalNotes, "remarks": in.Remarks,
-		}); err != nil {
-			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
-			return
-		}
-
-		tx, err := d.Begin()
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		defer tx.Rollback()
-
-		// The family filter is part of the lookup: somebody else's child reads
-		// as missing, which is also all this caller needs to know.
-		var name string
-		err = tx.QueryRow(`
-			SELECT COALESCE(s.name, '') FROM student s
-			  JOIN student_parent sp ON sp.student_id = s.student_id
-			 WHERE sp.parent_id = ? AND s.student_id = ?`,
-			id.ParentID, in.StudentID).Scan(&name)
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(ctx, http.StatusNotFound, "no such child", nil)
-			return
-		}
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-
-		tournamentID := ctx.Param("id")
-		/* The same doors the public form has: registration closed on the
-		   tournament's card, the closing date passed, or every place taken. */
-		if msg, err := entryClosed(tx, tournamentID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(ctx, http.StatusNotFound, "no such tournament", nil)
-				return
-			}
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		} else if msg != "" {
-			httpx.Error(ctx, http.StatusConflict, msg, nil)
-			return
-		}
-		price, err := fees.LoadPrice(tx, tournamentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(ctx, http.StatusNotFound, "no such tournament", nil)
-			return
-		}
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		/* The ID card check, for this child and this tournament. Its date of
-		   birth decides which category the child may enter. */
-		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, in.StudentID)
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		if msg != "" {
+		if msg := in.validate(); msg != "" {
 			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 			return
 		}
-		var categoryID any
-		var hasCategories int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM tournament_category WHERE tournament_id = ?`,
-			tournamentID).Scan(&hasCategories); err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		in.CategoryID = strings.TrimSpace(in.CategoryID)
-		if in.CategoryID == "" && hasCategories > 0 {
-			httpx.Error(ctx, http.StatusBadRequest, "please choose a category", nil)
-			return
-		}
-		if in.CategoryID != "" {
-			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, card.DateOfBirth)
-			if err != nil {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-			if msg != "" {
-				httpx.Error(ctx, http.StatusBadRequest, msg, nil)
-				return
-			}
-			categoryID = in.CategoryID
-		}
-		var start string
-		tx.QueryRow(`SELECT COALESCE(start_date,'') FROM tournament WHERE tournament_id = ?`, tournamentID).Scan(&start)
-
-		/* The family's own contact details are already on file, so the
-		   portal does not ask again: the entry carries the parent's phone and
-		   email, as a public entry carries what its form gave. A phone the
-		   parent typed (older portals) still wins. */
-		var phone, email string
-		tx.QueryRow(`SELECT COALESCE((SELECT value FROM parent_contact
-		                               WHERE parent_id = ? AND contact_type = 'phone' LIMIT 1), '')`,
-			id.ParentID).Scan(&phone)
-		tx.QueryRow(`SELECT COALESCE((SELECT value FROM parent_contact
-		                               WHERE parent_id = ? AND contact_type = 'email' LIMIT 1),
-		                              (SELECT u.email FROM parent p JOIN user_account u
-		                                  ON u.user_account_id = p.user_account_id WHERE p.parent_id = ?), '')`,
-			id.ParentID, id.ParentID).Scan(&email)
-		if in.Contact == "" {
-			in.Contact = phone
-		}
-
-		// Quoted and charged are the same number: nobody reviews a family's
-		// own entry, so the quote is the charge from the start.
-		fee := price.StudentFee(academytime.Today())
-
-		regID := db.NewID("treg")
-		_, err = tx.Exec(`
-			INSERT INTO tournament_registration (
-				tournament_registration_id, tournament_id, student_id, participant_name,
-				participant_contact, fee_quoted, fee_charged, student_discount_applied,
-				medical_notes, remarks, early_bird_applied, priced_as_student,
-				participant_date_of_birth, participant_age, tournament_category_id,
-				ocr_name, ocr_date_of_birth, id_document_type,
-				nickname, participant_name_th, terms_accepted_at, contact_phone, contact_email
-			) VALUES (?,?,?,?,?,?,?,1,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`,
-			regID, tournamentID, in.StudentID, name, in.Contact, fee, fee,
-			in.MedicalNotes, in.Remarks,
-			// How it was priced, for the early-bird rule (entryrules.go).
-			boolToInt(price.StudentEarlyBird && price.EarlyBirdOpen(academytime.Today())),
-			card.DateOfBirth, nullIfZero(ageAt(card.DateOfBirth, start)), categoryID,
-			db.NullIfEmpty(card.Name), card.DateOfBirth, db.NullIfEmpty(card.DocumentType),
-			in.Nickname, db.NullIfEmpty(in.NameTh), db.SQLiteNow(), db.NullIfEmpty(in.Contact), db.NullIfEmpty(email))
-		if db.IsUniqueViolation(err) {
-			httpx.Error(ctx, http.StatusConflict, "this child is already entered", nil)
-			return
-		}
+		tournamentID := ctx.Param("id")
+		entry, err := registerChild(d, id, tournamentID, in)
 		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		if in.PrivacyNotice {
-			if err := families.RecordConsent(tx, "privacy_notice", regID, id.UserAccountID, id.DisplayName); err != nil {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-		}
-		if strings.TrimSpace(in.MedicalNotes) != "" {
-			if err := families.RecordConsent(tx, "health_data", regID, id.UserAccountID, id.DisplayName); err != nil {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
+			writeRegistrationError(ctx, err)
 			return
 		}
 		httpx.JSON(ctx, http.StatusCreated, map[string]any{
-			"tournament_registration_id": regID,
+			"tournament_registration_id": entry.id,
 			"tournament_id":              tournamentID,
 			"student_id":                 in.StudentID,
-			"participant_name":           name,
+			"participant_name":           entry.playerName,
 			"status":                     "Approved",
-			"fee_charged":                fee,
-			"tournament_category_id":     categoryID,
-			"participant_date_of_birth":  card.DateOfBirth,
+			"fee_charged":                entry.fee,
+			"tournament_category_id":     db.NullIfEmpty(in.CategoryID),
+			"participant_date_of_birth":  entry.dateOfBirth,
 		})
 	}
+}
+
+func (in *entryRequest) validate() string {
+	in.StudentID = strings.TrimSpace(in.StudentID)
+	in.Contact = strings.TrimSpace(in.Contact)
+	if in.StudentID == "" {
+		return "student_id is required"
+	}
+	in.Nickname = strings.TrimSpace(in.Nickname)
+	in.NameTh = strings.TrimSpace(in.NameTh)
+	if in.Nickname == "" {
+		return "please give the player's nickname"
+	}
+	if len([]rune(in.Nickname)) > maxNameLen || len([]rune(in.NameTh)) > maxNameLen {
+		return "that name is too long"
+	}
+	// Refused rather than defaulted, as on the public form: a record of
+	// agreement nobody gave is worse than none.
+	if !in.AcceptTerms {
+		return "please accept the terms and conditions to enter"
+	}
+	if strings.TrimSpace(in.MedicalNotes) != "" && !in.HealthConsent {
+		return "please agree to the academy keeping the medical notes, or leave them empty"
+	}
+	if len(in.Contact) > maxPhoneLen {
+		return "participant_contact is too long"
+	}
+	if err := CheckRegistrationNotes(map[string]any{
+		"medical_notes": in.MedicalNotes, "remarks": in.Remarks,
+	}); err != nil {
+		return err.Error()
+	}
+
+	in.CategoryID = strings.TrimSpace(in.CategoryID)
+	return ""
 }
 
 func mountTournamentEntry(mux gin.IRoutes, d *sql.DB) {

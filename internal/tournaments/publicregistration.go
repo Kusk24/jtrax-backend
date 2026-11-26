@@ -1,45 +1,9 @@
-// Public tournament registration: the three endpoints a stranger may call.
-//
-// Everything here is unauthenticated, which makes it the widest door in the
-// product and the only place where a row is created by somebody the academy has
-// never met. Three things hold that door:
-//
-//   - a tournament is closed until an organiser opens it (public_registration),
-//     exactly like results_public;
-//   - the deadline and the capacity are enforced inside the write transaction,
-//     not read beforehand and hoped about;
-//   - it is rate-limited, and one email may hold one live place per event.
-//
-// # The fourth used to be approval, and is gone on purpose
-//
-// A submission used to land as Pending and wait for a member of staff, so
-// nothing a stranger typed became a participant on its own. The academy takes
-// every entry, so that queue was a step that only ever ended one way — and an
-// unworked queue is worse than none, because a place nobody has confirmed is
-// indistinguishable from a place nobody has looked at.
-//
-// What it cost is real and worth naming: a stranger's submission is now a
-// participant immediately. What replaces it is validation at the door rather
-// than judgement behind it — the category must belong to this event, the age
-// rule in the category's name is enforced against the given date of birth, and
-// a claimed student discount must name a student that exists. The desk's
-// remaining power is to correct a fee or withdraw an entry, not to admit one.
-//
-// # Why the discount is claimed rather than detected
-//
-// A registrant ticks "I am a JCA student" and is quoted the discounted fee on
-// that claim alone. The server does look their email up against the academy's
-// own records, but it never says so in the reply: if the discount appeared only
-// for addresses that matched, this endpoint would be a way to test whether a
-// given child is a pupil here, one guess at a time. The match is surfaced only
-// in the staff roster, where "claimed, and we found a matching student" versus
-// "claimed, no match" is a thing the desk can act on afterwards.
+// Public tournament listings, registration forms and route declarations.
 package tournaments
 
 import (
 	"database/sql"
 	"errors"
-	"log"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -51,9 +15,6 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
-	"github.com/Kusk24/jtrax-backend/internal/db"
-	"github.com/Kusk24/jtrax-backend/internal/entrylinks"
-	"github.com/Kusk24/jtrax-backend/internal/entrymail"
 	"github.com/Kusk24/jtrax-backend/internal/families"
 	"github.com/Kusk24/jtrax-backend/internal/fees"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -399,264 +360,34 @@ func bornInTime(dob time.Time, year, limit int) bool {
 	return dob.Year() >= year-limit
 }
 
-// handlePublicRegister takes one entry.
-//
-// The whole write is a single transaction, and the checks that could go stale
-// between reading and writing — the deadline, the capacity, whether this email
-// already holds a place — are made inside it. Reading the count first and
-// inserting afterwards would let two people take the last seat at once, which
-// on the day means turning a child away at the door.
+// handlePublicRegister accepts the public form and returns the receipt used by the payment screen.
 func handlePublicRegister(deps *publicEntryDeps) gin.HandlerFunc {
-	d := deps.db
 	return func(ctx *gin.Context) {
-		tournamentID := ctx.Param("id")
-
-		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, maxEntryFormBytes)
-		if err := ctx.Request.ParseMultipartForm(maxEntryFormBytes); err != nil {
-			httpx.Error(ctx, http.StatusBadRequest, "could not read the form — please try again", nil)
-			return
-		}
-		// age arrives as a form string like every other field here; an empty
-		// or unparsable one is 0, "not given", which is exactly what the old
-		// JSON decode produced for an absent field.
-		age, _ := strconv.Atoi(ctx.Request.FormValue("age"))
-		in := registerInput{
-			Name:               ctx.Request.FormValue("name"),
-			Email:              ctx.Request.FormValue("email"),
-			Phone:              ctx.Request.FormValue("phone"),
-			DateOfBirth:        ctx.Request.FormValue("dateOfBirth"),
-			CategoryID:         ctx.Request.FormValue("categoryId"),
-			IsStudent:          ctx.Request.FormValue("isStudent") == "true",
-			StudentID:          ctx.Request.FormValue("studentId"),
-			Nickname:           ctx.Request.FormValue("nickname"),
-			Age:                age,
-			AcceptTerms:        ctx.Request.FormValue("acceptTerms") == "true",
-			PrivacyNotice:      ctx.Request.FormValue("privacyNotice") == "true",
-			NameTh:             ctx.Request.FormValue("nameTh"),
-			DocumentType:       ctx.Request.FormValue("documentType"),
-			ScannedName:        ctx.Request.FormValue("scannedName"),
-			ScannedDateOfBirth: ctx.Request.FormValue("scannedDateOfBirth"),
-			IDCheck:            ctx.Request.FormValue("idCheck"),
-			PayChoice:          ctx.Request.FormValue("payChoice"),
-		}
-		if msg := in.validate(); msg != "" {
-			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
-			return
-		}
-
-		regID := db.NewID("treg")
-		// The entrant's right to pay for this entry later, from the email.
-		// Only the hash is stored; the code itself goes back once, below.
-		// Made before the transaction: it may write its key on first use.
-		payCode, payCodeHash, err := entrylinks.EntryPayCode(d, regID)
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-
-		tx, err := d.Begin()
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		defer tx.Rollback()
-
-		row := tx.QueryRow(publicTournamentSelect+`
-			WHERE t.tournament_id = ? AND t.public_registration = 1 AND t.draft = 0`, tournamentID)
-		t, err := scanPublicTournament(row)
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
-			return
-		}
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		if !t.Open {
-			if t.ClosedReason == "full" {
-				httpx.Error(ctx, http.StatusConflict, "this tournament is full", nil)
-			} else {
-				httpx.Error(ctx, http.StatusConflict, "registration for this tournament has closed", nil)
-			}
-			return
-		}
-
-		/* The ID card check. The date of birth is the card's, not what was
-		   typed: it decides the age group, so it is the document's word. */
-		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, "")
-		if err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
+		in, msg := readPublicEntryForm(ctx)
 		if msg != "" {
 			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 			return
 		}
-		in.DateOfBirth = card.DateOfBirth
-		in.ScannedDateOfBirth = card.DateOfBirth
-		in.ScannedName = card.Name
-		if card.DocumentType != "" {
-			in.DocumentType = card.DocumentType
-		}
-		in.Age = ageAt(card.DateOfBirth, t.StartDate)
-
-		// A category, when given, has to belong to *this* event — otherwise the
-		// form is a way to attach an entry to somebody else's tournament.
-		var categoryID any
-		if in.CategoryID != "" {
-			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, in.DateOfBirth)
-			if err != nil {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-			if msg != "" {
-				httpx.Error(ctx, http.StatusBadRequest, msg, nil)
-				return
-			}
-			categoryID = in.CategoryID
-		}
-
-		// The student link. A claimed discount now has to survive a lookup:
-		// the given student ID must name a real student, or the registration
-		// is refused with something the parent can act on. Without a claim,
-		// the old quiet email match still ties the entry to a student for
-		// staff, and never changes the price.
-		var studentID any
-		if in.IsStudent {
-			var n int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM student WHERE student_id = ?`,
-				in.StudentID).Scan(&n); err != nil {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-			if n == 0 {
-				httpx.Error(ctx, http.StatusBadRequest,
-					"we could not find that JCA student ID — check it, or untick the student box", nil)
-				return
-			}
-			studentID = in.StudentID
-		} else {
-			var matched string
-			err = tx.QueryRow(`SELECT s.student_id FROM student s
-			                   JOIN user_account u ON u.user_account_id = s.user_account_id
-			                   WHERE lower(trim(u.email)) = ?`, in.Email).Scan(&matched)
-			if err == nil {
-				studentID = matched
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-				return
-			}
-		}
-
-		// A verified student pays by whichever reductions the organiser
-		// chose; an outsider pays the early-bird price while its window is
-		// open and the regular price after. Both come from pricing.go, the
-		// same rule the parent portal is charged by.
-		fee := t.Fee
-		earlyBird := t.EarlyBirdActive
-		if in.IsStudent {
-			fee = t.StudentFee
-			earlyBird = t.price.StudentEarlyBird && t.EarlyBirdActive
-		}
-
-		// Nothing to pay has no choice to make, and without card payments
-		// "now" is not on offer: both are recorded as what they amount to.
-		choice := in.PayChoice
-		switch {
-		case fee <= 0:
-			choice = ""
-		case deps.stripe == nil || choice == "":
-			choice = "later"
-		}
-		// fee_charged is set here because approving used to set it, and there
-		// is no approving any more. A quote that never becomes a charge would
-		// leave every public entry owing nothing on the desk's own roster —
-		// the two columns still differ in meaning, and staff may still correct
-		// fee_charged afterwards, but its starting value is what we quoted.
-		_, err = tx.Exec(`INSERT INTO tournament_registration (
-			tournament_registration_id, tournament_id, student_id, participant_name,
-			participant_date_of_birth, tournament_category_id, registered_at,
-			status, source, contact_email, contact_phone, fee_quoted, fee_charged,
-			student_discount_applied, nickname, participant_age, terms_accepted_at,
-			pay_code_hash, early_bird_applied, priced_as_student,
-			participant_name_th, id_document_type, ocr_name, ocr_date_of_birth, pay_choice
-		) VALUES (?,?,?,?,?,?,?,'Approved','Public',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			regID, tournamentID, studentID, in.Name,
-			db.NullIfEmpty(in.DateOfBirth), categoryID, db.SQLiteNow(),
-			in.Email, in.Phone, fee, fee, boolToInt(in.IsStudent),
-			in.Nickname, nullIfZero(in.Age),
-			/* Stamped here rather than taken from the request: the time the
-			   terms were accepted is the server's fact, and a client-supplied
-			   timestamp on a consent record is worth nothing. validate()
-			   refuses the entry unless AcceptTerms is true, so reaching this
-			   line is what "accepted" means. */
-			db.SQLiteNow(), payCodeHash,
-			/* How it was priced, for the early-bird rule (entryrules.go). */
-			boolToInt(earlyBird), boolToInt(in.IsStudent),
-			db.NullIfEmpty(in.NameTh), db.NullIfEmpty(in.DocumentType),
-			db.NullIfEmpty(in.ScannedName), db.NullIfEmpty(in.ScannedDateOfBirth), db.NullIfEmpty(choice))
+		entry, err := registerPublicEntry(deps.db, ctx.Param("id"), in, deps.stripe != nil)
 		if err != nil {
-			// The partial unique indexes are the last word on duplicates, and
-			// they are reached rather than pre-checked so that two simultaneous
-			// submissions cannot both pass a check and both insert.
-			if db.IsUniqueViolation(err) {
-				// One email may enter several players; the same player twice
-				// is what is refused (0070).
-				httpx.Error(ctx, http.StatusConflict,
-					"this player is already registered for this tournament", nil)
-				return
-			}
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
+			writeRegistrationError(ctx, err)
 			return
 		}
-		/* No account behind a public entry, and no second copy of the
-		   family's email either — the entry it belongs to already says who,
-		   and the retention sweep blanks that when its time comes. */
-		if err := families.RecordConsent(tx, "privacy_notice", regID, "", "public form"); err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
-			return
-		}
-
-		// The fee is Pending from the moment the place is taken, whichever way
-		// it will be paid, so a fee nobody pays has something to expire.
-		if fee > 0 {
-			sid, _ := studentID.(string)
-			if _, err := createTournamentPayment(d, regID, sql.NullString{String: sid, Valid: sid != ""},
-				in.Name, t.Name, fee); err != nil {
-				// The pay page makes it on first use; nothing is lost.
-				log.Printf("public entry %s: opening its payment: %v", regID, err)
-			}
-		}
-
-		// Off the request, so a slow mail server does not hold the entrant at a
-		// spinner after their place is already theirs. "now" waits: the next
-		// email is "confirmed" or "payment not completed" (entryemails.go).
-		online := deps.stripe != nil
-		switch {
-		case fee <= 0:
-			go entrymail.SendEntryNotice(d, deps.notifier, regID, entrymail.NoticeConfirmed, online)
-		case choice == "later" && claim(d, "reserved_emailed_at", regID):
-			go entrymail.SendEntryNotice(d, deps.notifier, regID, entrymail.NoticeReserved, online)
-		}
-
+		deps.openPaymentAndNotify(entry, in.Name)
 		httpx.JSON(ctx, http.StatusCreated, map[string]any{
 			"registered": true,
 			"status":     "Approved",
-			"feeQuoted":  fee,
+			"feeQuoted":  entry.fee,
 			// What the done screen needs to offer "Pay now" straight away. The
 			// code is shown to this caller once and never again; the email
 			// carries the same one.
-			"registrationId": regID,
-			"payCode":        payCode,
-			"cardPayments":   deps.stripe != nil && fee > 0,
-			"payChoice":      choice,
+			"registrationId": entry.id,
+			"payCode":        entry.payCode,
+			"cardPayments":   deps.stripe != nil && entry.fee > 0,
+			"payChoice":      entry.payChoice,
 			// Only what has gone: a "pay now" entry is emailed once the
 			// payment settles or fails, not here.
-			"emailed": deps.sender != nil && choice != "now",
+			"emailed": deps.sender != nil && entry.payChoice != "now",
 			// Kept, and false, rather than dropped: a portal still running the
 			// previous build reads this to decide whether to say "we will
 			// confirm your place". Removing the key would leave it undefined,
@@ -664,6 +395,38 @@ func handlePublicRegister(deps *publicEntryDeps) gin.HandlerFunc {
 			"needsApproval": false,
 		})
 	}
+}
+
+func readPublicEntryForm(ctx *gin.Context) (registerInput, string) {
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, maxEntryFormBytes)
+	if err := ctx.Request.ParseMultipartForm(maxEntryFormBytes); err != nil {
+		return registerInput{}, "could not read the form — please try again"
+	}
+	// age arrives as a form string like every other field here; an empty
+	// or unparsable one is 0, "not given", which is exactly what the old
+	// JSON decode produced for an absent field.
+	age, _ := strconv.Atoi(ctx.Request.FormValue("age"))
+	in := registerInput{
+		Name:               ctx.Request.FormValue("name"),
+		Email:              ctx.Request.FormValue("email"),
+		Phone:              ctx.Request.FormValue("phone"),
+		DateOfBirth:        ctx.Request.FormValue("dateOfBirth"),
+		CategoryID:         ctx.Request.FormValue("categoryId"),
+		IsStudent:          ctx.Request.FormValue("isStudent") == "true",
+		StudentID:          ctx.Request.FormValue("studentId"),
+		Nickname:           ctx.Request.FormValue("nickname"),
+		Age:                age,
+		AcceptTerms:        ctx.Request.FormValue("acceptTerms") == "true",
+		PrivacyNotice:      ctx.Request.FormValue("privacyNotice") == "true",
+		NameTh:             ctx.Request.FormValue("nameTh"),
+		DocumentType:       ctx.Request.FormValue("documentType"),
+		ScannedName:        ctx.Request.FormValue("scannedName"),
+		ScannedDateOfBirth: ctx.Request.FormValue("scannedDateOfBirth"),
+		IDCheck:            ctx.Request.FormValue("idCheck"),
+		PayChoice:          ctx.Request.FormValue("payChoice"),
+	}
+	msg := in.validate()
+	return in, msg
 }
 
 func boolToInt(b bool) int {

@@ -120,11 +120,10 @@ func saveIDCheck(d *sql.DB, tournamentID, studentID string, card *ocr.IDCard) (s
 }
 
 // useIDCheck spends the check an entry names. It must be for this
-// tournament (and this child, from the portal) and fresh. msg is a refusal
-// to show the family; err is the server's own failure.
-func useIDCheck(tx *sql.Tx, checkID, tournamentID, studentID string) (c idCheck, msg string, err error) {
+// tournament (and this child, from the portal) and still be fresh.
+func useIDCheck(tx *sql.Tx, checkID, tournamentID, studentID string) (c idCheck, err error) {
 	if strings.TrimSpace(checkID) == "" {
-		return c, "please upload the player's ID card to verify their age", nil
+		return c, registrationRefusal{http.StatusBadRequest, "please upload the player's ID card to verify their age"}
 	}
 	var forStudent, name, docType sql.NullString
 	var created string
@@ -132,48 +131,50 @@ func useIDCheck(tx *sql.Tx, checkID, tournamentID, studentID string) (c idCheck,
 	                     FROM id_card_check WHERE id_card_check_id = ? AND tournament_id = ?`,
 		checkID, tournamentID).Scan(&c.DateOfBirth, &forStudent, &name, &docType, &created)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c, "the ID card check has expired — please upload the ID card again", nil
+		return c, registrationRefusal{http.StatusBadRequest, "the ID card check has expired — please upload the ID card again"}
 	}
 	if err != nil {
-		return c, "", err
+		return c, err
 	}
 	if forStudent.String != studentID {
-		return c, "the ID card check is for another player — please upload this player's ID card", nil
+		return c, registrationRefusal{http.StatusBadRequest, "the ID card check is for another player — please upload this player's ID card"}
 	}
 	if at, perr := time.Parse("2006-01-02 15:04:05", created); perr == nil && time.Since(at) > idCheckLife {
-		return c, "the ID card check has expired — please upload the ID card again", nil
+		return c, registrationRefusal{http.StatusBadRequest, "the ID card check has expired — please upload the ID card again"}
 	}
 	if _, err = tx.Exec(`DELETE FROM id_card_check WHERE id_card_check_id = ?`, checkID); err != nil {
-		return c, "", err
+		return c, err
 	}
 	c.Name, c.DocumentType = name.String, docType.String
 	/* The card is the entry's date of birth; under a year old is a misread. */
 	if families.DobTooYoung(c.DateOfBirth) {
-		return c, "the date of birth on the ID card is less than a year ago — please upload a clearer photo", nil
+		return c, registrationRefusal{http.StatusBadRequest, "the date of birth on the ID card is less than a year ago — please upload a clearer photo"}
 	}
-	return c, "", nil
+	return c, nil
 }
 
 // checkCategoryAge is the age rule for one category, against a date of birth
 // from an ID card: the category must belong to the tournament, and the age
 // in its name goes by birth year, as chess events do — "U10" at an event in
-// 2026 is anybody born in 2016 or later. Returns the category's name, or a
-// refusal to show the family.
-func checkCategoryAge(tx *sql.Tx, tournamentID, categoryID, dob string) (name, msg string, err error) {
-	var start string
-	err = tx.QueryRow(`SELECT c.name, COALESCE(t.start_date, '')
+// 2026 is anybody born in 2016 or later. An empty category skips this optional check.
+func checkCategoryAge(tx *sql.Tx, tournamentID, categoryID, dob string) error {
+	if categoryID == "" {
+		return nil
+	}
+	var name, start string
+	err := tx.QueryRow(`SELECT c.name, COALESCE(t.start_date, '')
 	                     FROM tournament_category c JOIN tournament t ON t.tournament_id = c.tournament_id
 	                    WHERE c.tournament_category_id = ? AND c.tournament_id = ?`,
 		categoryID, tournamentID).Scan(&name, &start)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "that category is not part of this tournament", nil
+		return registrationRefusal{http.StatusBadRequest, "that category is not part of this tournament"}
 	}
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	limit := categoryAgeLimit(name)
 	if limit == 0 {
-		return name, "", nil
+		return nil
 	}
 	/* The academy's year, not the server's: a tournament in Bangkok is dated
 	   by the poster, and a UTC clock turns the year over seven hours early. */
@@ -183,12 +184,12 @@ func checkCategoryAge(tx *sql.Tx, tournamentID, categoryID, dob string) (name, m
 	}
 	born, perr := time.Parse("2006-01-02", dob)
 	if perr != nil {
-		return "", "this category has an age limit — please upload the player's ID card", nil
+		return registrationRefusal{http.StatusBadRequest, "this category has an age limit — please upload the player's ID card"}
 	}
 	if !bornInTime(born, year, limit) {
-		return "", "by the ID card the player is too old for this category — please pick another", nil
+		return registrationRefusal{http.StatusBadRequest, "by the ID card the player is too old for this category — please pick another"}
 	}
-	return name, "", nil
+	return nil
 }
 
 // ageAt is how old somebody born on dob is on the day `on` (both

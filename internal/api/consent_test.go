@@ -101,3 +101,44 @@ func TestDeletingAnEntryOrAccountIsNotBlockedByItsConsent(t *testing.T) {
 		t.Errorf("consent outlived its entry: %v", got)
 	}
 }
+
+// Both registration forms spend a one-use ID check before saving consent.
+// A failed consent write must leave the same form and ID check usable for a retry.
+func TestRegistrationCanRetryAfterConsentWriteFails(t *testing.T) {
+	for _, kind := range []string{"public", "parent"} {
+		t.Run(kind, func(t *testing.T) {
+			c, event := openEvent(t, nil)
+			database, _ := serverDBs.Load(c.srv.URL)
+			d := database.(*sql.DB)
+			var submit func() (int, map[string]any)
+			if kind == "public" {
+				form := withCheck(t, c, event, "", "2015-06-01", "idCheck", entry(nil))
+				submit = func() (int, map[string]any) { return register(t, c, event, form, false) }
+			} else {
+				c.login("sandy01234@gmail.com")
+				form := withCheck(t, c, event, "stu_penny", "2015-06-01", "id_check", map[string]any{"student_id": "stu_penny", "nickname": "Pen", "accept_terms": true, "privacy_notice": true})
+				submit = func() (int, map[string]any) {
+					code, row, _ := c.do("POST", "/api/v1/tournaments/"+event+"/entries", form)
+					return code, row
+				}
+			}
+			if _, err := d.Exec(`CREATE TRIGGER fail_entry_consent BEFORE INSERT ON consent_record
+     BEGIN SELECT RAISE(ABORT,'consent write unavailable'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if status, body := submit(); status != 500 || body["error"] != "could not register" {
+				t.Fatalf("failed write: %d %v", status, body)
+			}
+			var entries int
+			if err := d.QueryRow(`SELECT COUNT(*) FROM tournament_registration WHERE tournament_id = ?`, event).Scan(&entries); err != nil || entries != 0 {
+				t.Fatalf("entries after rollback: %d, err %v", entries, err)
+			}
+			if _, err := d.Exec(`DROP TRIGGER fail_entry_consent`); err != nil {
+				t.Fatal(err)
+			}
+			if status, body := submit(); status != 201 || body["status"] != "Approved" {
+				t.Fatalf("retry: %d %v", status, body)
+			}
+		})
+	}
+}
