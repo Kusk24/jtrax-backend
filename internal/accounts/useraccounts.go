@@ -5,6 +5,7 @@ package accounts
 import (
 	"database/sql"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -66,9 +67,16 @@ func accountRow(d *sql.DB, id string) (map[string]any, error) {
 }
 
 func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
-	base := "/api/v1/user-accounts"
+	const base = "/api/v1/user-accounts"
+	mux.GET(base, handleListAccounts(d))
+	mux.POST(base, handleCreateAccount(d))
+	mux.GET(base+"/:id", handleGetAccount(d))
+	mux.PATCH(base+"/:id", handleUpdateAccount(d))
+	mux.DELETE(base+"/:id", handleDeleteAccount(d))
+}
 
-	mux.GET(base, func(ctx *gin.Context) {
+func handleListAccounts(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		if RequireStaff(d, ctx) == nil {
 			return
 		}
@@ -96,9 +104,11 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			})
 		}
 		httpx.JSON(ctx, http.StatusOK, out)
-	})
+	}
+}
 
-	mux.POST(base, func(ctx *gin.Context) {
+func handleCreateAccount(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		if RequireStaff(d, ctx) == nil {
 			return
 		}
@@ -116,11 +126,7 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			httpx.Error(ctx, http.StatusBadRequest, "display_name is required", nil)
 			return
 		}
-		ok := false
-		for _, rl := range accountRoles {
-			ok = ok || rl == in.Role
-		}
-		if !ok {
+		if !slices.Contains(accountRoles, in.Role) {
 			httpx.Error(ctx, http.StatusBadRequest, "role must be one of "+strings.Join(accountRoles, ", "), nil)
 			return
 		}
@@ -153,9 +159,11 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 		}
 		row, _ := accountRow(d, id)
 		httpx.JSON(ctx, http.StatusCreated, row)
-	})
+	}
+}
 
-	mux.GET(base+"/:id", func(ctx *gin.Context) {
+func handleGetAccount(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		if RequireStaff(d, ctx) == nil {
 			return
 		}
@@ -165,9 +173,11 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			return
 		}
 		httpx.JSON(ctx, http.StatusOK, row)
-	})
+	}
+}
 
-	mux.PATCH(base+"/:id", func(ctx *gin.Context) {
+func handleUpdateAccount(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		caller := RequireStaff(d, ctx)
 		if caller == nil {
 			return
@@ -182,21 +192,7 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			return
 		}
 		id := ctx.Param("id")
-		/* Setting somebody else's password is an admin's job, not the front
-		   desk's.
-
-		   It is the one write here that hands over an account rather than
-		   editing a record: whoever types the new password can sign in as that
-		   person, read every family's details, and act as them. That is a
-		   different kind of authority from booking a class, and the academy
-		   wants it held by the people who already have the rest of it.
-
-		   Creating an account still is not restricted, because registration is
-		   the front desk's actual job — the difference is that a new account
-		   belongs to nobody yet, so there is nothing to take over.
-
-		   Changing your *own* is always allowed, so this cannot lock a
-		   receptionist out of the one account they are entitled to. */
+		// Staff may change their own password. Resetting another person's password requires an administrator.
 		if in.Password != nil && caller.Role != "Admin" && caller.UserAccountID != id {
 			httpx.Error(ctx, http.StatusForbidden, "only an admin can reset another account's password", nil)
 			return
@@ -250,9 +246,11 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			return
 		}
 		httpx.JSON(ctx, http.StatusOK, row)
-	})
+	}
+}
 
-	mux.DELETE(base+"/:id", func(ctx *gin.Context) {
+func handleDeleteAccount(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		if RequireStaff(d, ctx) == nil {
 			return
 		}
@@ -267,5 +265,5 @@ func MountUserAccounts(mux gin.IRoutes, d *sql.DB) {
 			return
 		}
 		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "deleted"})
-	})
+	}
 }
