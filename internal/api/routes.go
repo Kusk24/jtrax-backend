@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academy"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/chessplay"
@@ -22,11 +24,11 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
-// NewHandler builds the full API handler (CORS applied by the caller), reading
+// NewHandler builds the full API handler (with the supplied Gin middleware), reading
 // the mail and OCR configuration from the environment.
-func NewHandler(d *sql.DB) http.Handler {
+func NewHandler(d *sql.DB, middleware ...gin.HandlerFunc) http.Handler {
 	cfg := mail.FromEnv()
-	return NewHandlerWith(d, cfg, mail.New(cfg), ocr.New(ocr.FromEnv()))
+	return NewHandlerWith(d, cfg, mail.New(cfg), ocr.New(ocr.FromEnv()), middleware...)
 }
 
 // NewHandlerWithMail keeps the older two-dependency form working for tests that
@@ -38,19 +40,19 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 // NewHandlerWith is the injectable form: tests pass a Sender that captures
 // messages instead of delivering them, and an OCR provider that returns a fixed
 // reading instead of calling a paid API.
-func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) http.Handler {
-	mux := newRouter()
-	registerRoutes(mux, d, mailCfg, sender, scanner)
-	return mux
+func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider, middleware ...gin.HandlerFunc) http.Handler {
+	return newRouter(func(routes gin.IRoutes) {
+		registerRoutes(routes, d, mailCfg, sender, scanner)
+	}, middleware...)
 }
 
-func registerRoutes(mux httpx.RouteRegistrar, d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) {
+func registerRoutes(mux gin.IRoutes, d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) {
 	// Every answered call to the scan service is kept with its tokens, for
 	// the cost line in Settings (scancost.go).
 	scanner = forms.RecordScanUsage(d, scanner)
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	mux.GET("/health", func(ctx *gin.Context) {
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
 	accounts.MountAuth(mux, d, mailCfg, sender)
@@ -84,7 +86,7 @@ func registerRoutes(mux httpx.RouteRegistrar, d *sql.DB, mailCfg mail.Config, se
 	}
 }
 
-func mountPeople(mux httpx.RouteRegistrar, d *sql.DB) {
+func mountPeople(mux gin.IRoutes, d *sql.DB) {
 	accounts.MountUserAccounts(mux, d)
 	families.MountPeopleCascade(mux, d)
 	families.MountMyData(mux, d)

@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -53,63 +55,63 @@ type entryRequest struct {
 // Parents only. Staff register at the desk through the ordinary resource, where
 // setting a fee by hand is their job; a Student may not commit their family to
 // a fee.
-func handleEnterTournament(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleEnterTournament(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "only a parent may enter their child", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only a parent may enter their child", nil)
 			return
 		}
 		// Unknown fields are refused rather than ignored, so a request that
 		// still carries a fee fails loudly instead of appearing to work.
 		var in entryRequest
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
 		in.StudentID = strings.TrimSpace(in.StudentID)
 		in.Contact = strings.TrimSpace(in.Contact)
 		if in.StudentID == "" {
-			httpx.Error(w, http.StatusBadRequest, "student_id is required", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "student_id is required", nil)
 			return
 		}
 		in.Nickname = strings.TrimSpace(in.Nickname)
 		in.NameTh = strings.TrimSpace(in.NameTh)
 		if in.Nickname == "" {
-			httpx.Error(w, http.StatusBadRequest, "please give the player's nickname", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "please give the player's nickname", nil)
 			return
 		}
 		if len([]rune(in.Nickname)) > maxNameLen || len([]rune(in.NameTh)) > maxNameLen {
-			httpx.Error(w, http.StatusBadRequest, "that name is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that name is too long", nil)
 			return
 		}
 		// Refused rather than defaulted, as on the public form: a record of
 		// agreement nobody gave is worse than none.
 		if !in.AcceptTerms {
-			httpx.Error(w, http.StatusBadRequest, "please accept the terms and conditions to enter", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "please accept the terms and conditions to enter", nil)
 			return
 		}
 		if strings.TrimSpace(in.MedicalNotes) != "" && !in.HealthConsent {
-			httpx.Error(w, http.StatusBadRequest, "please agree to the academy keeping the medical notes, or leave them empty", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "please agree to the academy keeping the medical notes, or leave them empty", nil)
 			return
 		}
 		if len(in.Contact) > maxPhoneLen {
-			httpx.Error(w, http.StatusBadRequest, "participant_contact is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "participant_contact is too long", nil)
 			return
 		}
 		if err := CheckRegistrationNotes(map[string]any{
 			"medical_notes": in.MedicalNotes, "remarks": in.Remarks,
 		}); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		defer tx.Rollback()
@@ -123,68 +125,68 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			 WHERE sp.parent_id = ? AND s.student_id = ?`,
 			id.ParentID, in.StudentID).Scan(&name)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such child", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such child", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		/* The same doors the public form has: registration closed on the
 		   tournament's card, the closing date passed, or every place taken. */
 		if msg, err := entryClosed(tx, tournamentID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
+				httpx.Error(ctx, http.StatusNotFound, "no such tournament", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		} else if msg != "" {
-			httpx.Error(w, http.StatusConflict, msg, nil)
+			httpx.Error(ctx, http.StatusConflict, msg, nil)
 			return
 		}
 		price, err := fees.LoadPrice(tx, tournamentID)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such tournament", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		/* The ID card check, for this child and this tournament. Its date of
 		   birth decides which category the child may enter. */
 		card, msg, err := useIDCheck(tx, in.IDCheck, tournamentID, in.StudentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		if msg != "" {
-			httpx.Error(w, http.StatusBadRequest, msg, nil)
+			httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 			return
 		}
 		var categoryID any
 		var hasCategories int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM tournament_category WHERE tournament_id = ?`,
 			tournamentID).Scan(&hasCategories); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		in.CategoryID = strings.TrimSpace(in.CategoryID)
 		if in.CategoryID == "" && hasCategories > 0 {
-			httpx.Error(w, http.StatusBadRequest, "please choose a category", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "please choose a category", nil)
 			return
 		}
 		if in.CategoryID != "" {
 			_, msg, err := checkCategoryAge(tx, tournamentID, in.CategoryID, card.DateOfBirth)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 			if msg != "" {
-				httpx.Error(w, http.StatusBadRequest, msg, nil)
+				httpx.Error(ctx, http.StatusBadRequest, msg, nil)
 				return
 			}
 			categoryID = in.CategoryID
@@ -231,30 +233,30 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 			db.NullIfEmpty(card.Name), card.DateOfBirth, db.NullIfEmpty(card.DocumentType),
 			in.Nickname, db.NullIfEmpty(in.NameTh), db.SQLiteNow(), db.NullIfEmpty(in.Contact), db.NullIfEmpty(email))
 		if db.IsUniqueViolation(err) {
-			httpx.Error(w, http.StatusConflict, "this child is already entered", nil)
+			httpx.Error(ctx, http.StatusConflict, "this child is already entered", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
 		if in.PrivacyNotice {
 			if err := families.RecordConsent(tx, "privacy_notice", regID, id.UserAccountID, id.DisplayName); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 		}
 		if strings.TrimSpace(in.MedicalNotes) != "" {
 			if err := families.RecordConsent(tx, "health_data", regID, id.UserAccountID, id.DisplayName); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 				return
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{
 			"tournament_registration_id": regID,
 			"tournament_id":              tournamentID,
 			"student_id":                 in.StudentID,
@@ -267,8 +269,8 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountTournamentEntry(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("POST /api/v1/tournaments/{id}/entries", handleEnterTournament(d))
+func mountTournamentEntry(mux gin.IRoutes, d *sql.DB) {
+	mux.POST("/api/v1/tournaments/:id/entries", handleEnterTournament(d))
 }
 
 // entryClosed says why a tournament is not taking entries, or "" when it is:

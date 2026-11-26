@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -115,20 +117,20 @@ type practiceDay struct {
 // The week is returned as dates rather than a count because the portal's strip
 // used to light the first N of seven cells from the streak number alone, which
 // drew a week the pupil had not lived.
-func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handlePracticeSummary(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
 		now := academytime.Now()
 		streak, err := currentStreak(d, studentID, now)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read practice", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read practice", err)
 			return
 		}
 
@@ -139,7 +141,7 @@ func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
 			  WHERE student_id = ? AND activity_date > ?`,
 			studentID, now.AddDate(0, 0, -practiceDays).Format(dayLayout))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read practice", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read practice", err)
 			return
 		}
 		for rows.Next() {
@@ -164,7 +166,7 @@ func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
 		                WHERE student_id = ? AND assigned_on = ?`,
 			studentID, now.Format(dayLayout)).Scan(&todayTotal, &todaySolved)
 
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"streak":      streak,
 			"days":        days,
 			"todaySolved": todaySolved,
@@ -173,6 +175,6 @@ func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountPractice(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/practice/summary", handlePracticeSummary(d))
+func mountPractice(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/practice/summary", handlePracticeSummary(d))
 }

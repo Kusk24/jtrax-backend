@@ -29,6 +29,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -46,18 +48,18 @@ import (
 // Parents only. Staff have their own door — they create the payment at the desk
 // and call `payments/{id}/stripe-link` — and a Student may not commit their
 // family to a fee.
-func handleRegistrationStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleRegistrationStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "only a parent may pay for a registration", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only a parent may pay for a registration", nil)
 			return
 		}
 		if client == nil {
-			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not configured", nil)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "card payments are not configured", nil)
 			return
 		}
 
@@ -69,7 +71,7 @@ func handleRegistrationStripeLink(d *sql.DB, client stripepay.CheckoutGateway, c
 		if err := sweepUnpaidEntries(d, academytime.Today()); err != nil {
 			log.Printf("entry rules: %v", err)
 		}
-		regID := r.PathValue("id")
+		regID := ctx.Param("id")
 		var studentID, participantName, status, tournamentName string
 		var fee sql.NullFloat64
 		var existingPayment sql.NullString
@@ -85,34 +87,34 @@ func handleRegistrationStripeLink(d *sql.DB, client stripepay.CheckoutGateway, c
 			regID, id.ParentID).
 			Scan(&studentID, &participantName, &status, &fee, &tournamentName, &existingPayment)
 		if err == sql.ErrNoRows {
-			httpx.Error(w, http.StatusNotFound, "no such registration", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such registration", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read registration", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read registration", err)
 			return
 		}
 		// A place that was turned down or given up is not one to take money for.
 		if status == "Rejected" || status == "Withdrawn" {
-			httpx.Error(w, http.StatusConflict, "this registration is no longer open", nil)
+			httpx.Error(ctx, http.StatusConflict, "this registration is no longer open", nil)
 			return
 		}
 		if existingPayment.Valid && existingPayment.String != "" {
-			payments.CheckoutLink(w, r, d, client, cfg, existingPayment.String)
+			payments.CheckoutLink(ctx, d, client, cfg, existingPayment.String)
 			return
 		}
 		if !fee.Valid || fee.Float64 <= 0 {
-			httpx.Error(w, http.StatusConflict, "this registration has no fee to pay", nil)
+			httpx.Error(ctx, http.StatusConflict, "this registration has no fee to pay", nil)
 			return
 		}
 
 		paymentID, err := createTournamentPayment(d, regID,
 			sql.NullString{String: studentID, Valid: true}, participantName, tournamentName, fee.Float64)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not open the payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not open the payment", err)
 			return
 		}
-		payments.CheckoutLink(w, r, d, client, cfg, paymentID)
+		payments.CheckoutLink(ctx, d, client, cfg, paymentID)
 	}
 }
 
@@ -191,14 +193,14 @@ const maxReferenceLen = 100
 // Staff only — Admin and Receptionist, the people who take the money. It reuses
 // the registration's payment row if the family had already opened a card link,
 // so there is still one payment per registration and the unique index holds.
-func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleDeskPayment(d *sql.DB, svc *notify.Service) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only staff may record a desk payment", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only staff may record a desk payment", nil)
 			return
 		}
 		var in struct {
@@ -207,29 +209,29 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			// so the money can be found on the statement. Optional.
 			Reference string `json:"reference_number"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
 		in.Reference = strings.TrimSpace(in.Reference)
 		if len(in.Reference) > maxReferenceLen {
-			httpx.Error(w, http.StatusBadRequest, "reference_number is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "reference_number is too long", nil)
 			return
 		}
 		if !slices.Contains(deskMethods, in.Method) {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"payment_method must be one of "+strings.Join(deskMethods, ", "), nil)
 			return
 		}
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the payment", err)
 			return
 		}
 		defer tx.Rollback()
 
-		regID := r.PathValue("id")
+		regID := ctx.Param("id")
 		var studentID, existingPayment, existingStatus sql.NullString
 		var participantName, status, tournamentName string
 		var fee sql.NullFloat64
@@ -244,19 +246,19 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 			Scan(&studentID, &participantName, &status, &fee, &tournamentName,
 				&existingPayment, &existingStatus)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such registration", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such registration", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read registration", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read registration", err)
 			return
 		}
 		if status == "Rejected" || status == "Withdrawn" {
-			httpx.Error(w, http.StatusConflict, "this registration is no longer open", nil)
+			httpx.Error(ctx, http.StatusConflict, "this registration is no longer open", nil)
 			return
 		}
 		if !fee.Valid || fee.Float64 <= 0 {
-			httpx.Error(w, http.StatusConflict, "this registration has no fee to collect", nil)
+			httpx.Error(ctx, http.StatusConflict, "this registration has no fee to collect", nil)
 			return
 		}
 
@@ -265,7 +267,7 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 		case existingPayment.Valid && existingStatus.String != "Pending":
 			// Paid is done; Refunded is a decision the payments screen made,
 			// and reopening it from here would hide that it happened.
-			httpx.Error(w, http.StatusConflict, "this fee is already settled", nil)
+			httpx.Error(ctx, http.StatusConflict, "this fee is already settled", nil)
 			return
 		case existingPayment.Valid:
 			// A card link the family opened and never finished. The link is
@@ -288,26 +290,26 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 				academytime.Today(), regID, db.NullIfEmpty(in.Reference))
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the payment", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the payment", err)
 			return
 		}
 		// Written as SQL rather than through the payments resource, so its
 		// receipt hook never sees it: the receipt is sent here instead, the
 		// same one a card payment gets from the webhook.
 		payments.NotifyPaymentPaid(d, svc, paymentID)
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"payment_id": paymentID, "status": "Paid", "final_amount": fee.Float64,
 		})
 	}
 }
 
-func mountDeskPayment(mux httpx.RouteRegistrar, d *sql.DB, svc *notify.Service) {
-	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/desk-payment", handleDeskPayment(d, svc))
-	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/release", handleReleasePlace(d))
+func mountDeskPayment(mux gin.IRoutes, d *sql.DB, svc *notify.Service) {
+	mux.POST("/api/v1/tournament-registrations/:id/desk-payment", handleDeskPayment(d, svc))
+	mux.POST("/api/v1/tournament-registrations/:id/release", handleReleasePlace(d))
 }
 
 // releasePlace takes an entry out of the tournament the way the closing rule
@@ -338,51 +340,51 @@ func releasePlace(tx *sql.Tx, regID string) (bool, error) {
 //     refused — that is a refund, not a cancellation.
 //   - "notAttending": the player is not coming. Paid or not, the place goes;
 //     a paid fee stays paid, since entry fees are not refunded.
-func handleReleasePlace(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleReleasePlace(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		regID := r.PathValue("id")
+		regID := ctx.Param("id")
 		var in struct {
 			Reason string `json:"reason"`
 		}
 		/* An empty body is the original call: a cancelled fee. */
-		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&in)
+		_ = json.NewDecoder(io.LimitReader(ctx.Request.Body, 1<<12)).Decode(&in)
 		notAttending := in.Reason == "notAttending"
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not release the place", err)
 			return
 		}
 		defer tx.Rollback()
 		var paid int
 		tx.QueryRow(`SELECT COUNT(*) FROM payment WHERE tournament_registration_id = ? AND status = 'Paid'`, regID).Scan(&paid)
 		if paid > 0 && !notAttending {
-			httpx.Error(w, http.StatusConflict, "this entry is paid; refund it on the payments screen before cancelling", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry is paid; refund it on the payments screen before cancelling", nil)
 			return
 		}
 		ok, err := releasePlace(tx, regID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not release the place", err)
 			return
 		}
 		if ok && notAttending {
 			if _, err := tx.Exec(`UPDATE tournament_registration SET arrival_status = 'NotAttending', arrival_answered_at = ?
 			                       WHERE tournament_registration_id = ?`, db.SQLiteNow(), regID); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not release the place", err)
 				return
 			}
 		}
 		if !ok {
-			httpx.Error(w, http.StatusConflict, "this entry is not in the tournament", nil)
+			httpx.Error(ctx, http.StatusConflict, "this entry is not in the tournament", nil)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not release the place", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not release the place", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "released"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "released"})
 	}
 }
 

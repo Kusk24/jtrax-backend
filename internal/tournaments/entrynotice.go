@@ -7,8 +7,9 @@ package tournaments
 import (
 	"database/sql"
 	"html"
-	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/Kusk24/jtrax-backend/internal/entrymail"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
@@ -39,13 +40,13 @@ func unpaidRules(earlyBirdUntil, closes string) (en, th []string) {
 //
 // A "pay now" family who leaves is also emailed that the place is held and
 // the fee still owed (entryemails.go), rather than half an hour later.
-func handlePayCancelled(d *sql.DB, svc *notify.Service, online bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handlePayCancelled(d *sql.DB, svc *notify.Service, online bool) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		var b strings.Builder
 		b.WriteString(`<h1 style="font-size:21px;margin:0 0 6px">Payment cancelled — nothing was charged.</h1>`)
 		b.WriteString(`<p style="margin:0 0 18px;color:#4b5f83">ยกเลิกการชำระเงิน ยังไม่มีการตัดเงิน</p>`)
 
-		if entry := r.URL.Query().Get("entry"); entry != "" {
+		if entry := ctx.Query("entry"); entry != "" {
 			var earlyBird sql.NullInt64
 			var ebUntil, closes, status string
 			err := d.QueryRow(`
@@ -98,8 +99,8 @@ func handlePayCancelled(d *sql.DB, svc *notify.Service, online bool) http.Handle
 		}
 		b.WriteString(`</div>`)
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">` +
+		ctx.Header("Content-Type", "text/html; charset=utf-8")
+		_, _ = ctx.Writer.Write([]byte(`<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">` +
 			`<title>JCA Chess Academy</title>` +
 			`<body style="font-family:sans-serif;color:#10264d;display:flex;min-height:90vh;align-items:center;justify-content:center;padding:24px">` +
 			`<main style="max-width:34em;text-align:center">` + b.String() + `</main>`))

@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/chessresults"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -133,41 +135,41 @@ func (c *chessResultsDeps) ensureTracked(crID int, byUser string) error {
 func eventFetchKey(crID int) int { return -crID }
 
 // handleConnectResults connects a tournament from one pasted link.
-func handleConnectResults(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireStaff(c.db, w, r)
+func handleConnectResults(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireStaff(c.db, ctx)
 		if id == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		var exists int
 		if err := c.db.QueryRow(`SELECT COUNT(*) FROM tournament WHERE tournament_id = ?`,
 			tournamentID).Scan(&exists); err != nil || exists == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 		var in struct {
 			URL string `json:"url"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "a chess-results.com link is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "a chess-results.com link is required", err)
 			return
 		}
 		// ParseRef refuses every host but chess-results.com: this is where a
 		// caller's text becomes an outbound request.
 		crID, err := chessresults.ParseRef(in.URL)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "that does not look like a chess-results.com tournament link", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that does not look like a chess-results.com tournament link", nil)
 			return
 		}
 		if !c.allowFetch(eventFetchKey(crID)) {
-			httpx.Error(w, http.StatusTooManyRequests, "that event was read moments ago, try again shortly", nil)
+			httpx.Error(ctx, http.StatusTooManyRequests, "that event was read moments ago, try again shortly", nil)
 			return
 		}
 		ev, err := c.client.FetchEvent(crID)
 		if err != nil {
 			log.Printf("chessresults: event %d: %v", crID, err)
-			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read — check the link, or try again shortly", err)
+			httpx.Error(ctx, http.StatusBadGateway, "chess-results.com could not be read — check the link, or try again shortly", err)
 			return
 		}
 
@@ -192,7 +194,7 @@ func handleConnectResults(c *chessResultsDeps) http.HandlerFunc {
 			return err
 		})
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the categories", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the categories", err)
 			return
 		}
 
@@ -206,44 +208,44 @@ func handleConnectResults(c *chessResultsDeps) http.HandlerFunc {
 
 		out, err := loadResultSections(c.db, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "connected but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "connected but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
-func handleListResultSections(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleListResultSections(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		out, err := loadResultSections(c.db, r.PathValue("id"))
+		out, err := loadResultSections(c.db, ctx.Param("id"))
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // sectionOf reads the section id from the path and checks it belongs to the
 // tournament, so one tournament's route cannot read another's event.
-func sectionOf(c *chessResultsDeps, w http.ResponseWriter, r *http.Request) (int, bool) {
-	crID, err := strconv.Atoi(r.PathValue("crId"))
+func sectionOf(c *chessResultsDeps, ctx *gin.Context) (int, bool) {
+	crID, err := strconv.Atoi(ctx.Param("crId"))
 	if err != nil || crID <= 0 {
-		httpx.Error(w, http.StatusNotFound, "not found", nil)
+		httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 		return 0, false
 	}
 	var n int
 	if err := c.db.QueryRow(`SELECT COUNT(*) FROM tournament_result_section
 	                         WHERE tournament_id = ? AND chess_results_id = ?`,
-		r.PathValue("id"), crID).Scan(&n); err != nil || n == 0 {
-		httpx.Error(w, http.StatusNotFound, "not found", err)
+		ctx.Param("id"), crID).Scan(&n); err != nil || n == 0 {
+		httpx.Error(ctx, http.StatusNotFound, "not found", err)
 		return 0, false
 	}
 	return crID, true
@@ -251,37 +253,37 @@ func sectionOf(c *chessResultsDeps, w http.ResponseWriter, r *http.Request) (int
 
 // handleGetResultSection serves one results category's stored standings and
 // rounds. Read-only: opening a tab never costs chess-results a request.
-func handleGetResultSection(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleGetResultSection(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		crID, ok := sectionOf(c, w, r)
+		crID, ok := sectionOf(c, ctx)
 		if !ok {
 			return
 		}
 		out, err := linkedResultsForID(c.db, sql.NullInt64{Int64: int64(crID), Valid: true})
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if out == nil {
-			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false, "chessResultsId": crID, "url": chessResultsURL(crID)})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false, "chessResultsId": crID, "url": chessResultsURL(crID)})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleRefreshResultSection re-reads one results category now — the one on
 // screen, not the tournament's old single link.
-func handleRefreshResultSection(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireStaff(c.db, w, r)
+func handleRefreshResultSection(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireStaff(c.db, ctx)
 		if id == nil {
 			return
 		}
-		crID, ok := sectionOf(c, w, r)
+		crID, ok := sectionOf(c, ctx)
 		if !ok {
 			return
 		}
@@ -296,31 +298,31 @@ func handleRefreshResultSection(c *chessResultsDeps) http.HandlerFunc {
 			err = c.refreshExternal(extID, crID)
 		}
 		if errors.Is(err, errExternalThrottled) {
-			httpx.Error(w, http.StatusTooManyRequests, "that category was read moments ago, try again shortly", nil)
+			httpx.Error(ctx, http.StatusTooManyRequests, "that category was read moments ago, try again shortly", nil)
 			return
 		}
 		if err != nil {
 			log.Printf("chessresults: refreshing section %d: %v", crID, err)
-			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read just now", err)
+			httpx.Error(ctx, http.StatusBadGateway, "chess-results.com could not be read just now", err)
 			return
 		}
 		out, err := linkedResultsForID(c.db, sql.NullInt64{Int64: int64(crID), Valid: true})
 		if err != nil || out == nil {
-			httpx.Error(w, http.StatusInternalServerError, "refreshed but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "refreshed but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleDisconnectResults forgets the tournament's results categories. The
 // stored copies stay tracked, and the registration categories are untouched.
-func handleDisconnectResults(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleDisconnectResults(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		err := db.InTransaction(c.db, func(tx *sql.Tx) error {
 			if _, err := tx.Exec(`DELETE FROM tournament_result_section WHERE tournament_id = ?`, tournamentID); err != nil {
 				return err
@@ -330,20 +332,20 @@ func handleDisconnectResults(c *chessResultsDeps) http.HandlerFunc {
 			return err
 		})
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not disconnect", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not disconnect", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"connected": false, "sections": []resultSection{}})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"connected": false, "sections": []resultSection{}})
 	}
 }
 
-func mountResultSections(mux httpx.RouteRegistrar, c *chessResultsDeps) {
-	const p = "/api/v1/tournaments/{id}/results-sections"
-	mux.HandleFunc("GET "+p, handleListResultSections(c))
+func mountResultSections(mux gin.IRoutes, c *chessResultsDeps) {
+	const p = "/api/v1/tournaments/:id/results-sections"
+	mux.GET(p, handleListResultSections(c))
 	// Connecting reads every section, so it carries the same outbound budget
 	// as tracking an event.
-	mux.HandleFunc("POST "+p, httpx.RateLimit(10, handleConnectResults(c)))
-	mux.HandleFunc("DELETE "+p, handleDisconnectResults(c))
-	mux.HandleFunc("GET "+p+"/sections/{crId}", handleGetResultSection(c))
-	mux.HandleFunc("POST "+p+"/sections/{crId}/refresh", httpx.RateLimit(10, handleRefreshResultSection(c)))
+	mux.POST(p, httpx.RateLimit(10), handleConnectResults(c))
+	mux.DELETE(p, handleDisconnectResults(c))
+	mux.GET(p+"/sections/:crId", handleGetResultSection(c))
+	mux.POST(p+"/sections/:crId/refresh", httpx.RateLimit(10), handleRefreshResultSection(c))
 }

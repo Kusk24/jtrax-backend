@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -55,60 +57,60 @@ func AuditPaymentEdit(tx *sql.Tx, caller *auth.Identity, paymentID string, exist
 }
 
 // handleVoidPayment voids a payment: admins only, with a reason, once.
-func handleVoidPayment(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		caller := accounts.RequireIdentity(d, w, r)
+func handleVoidPayment(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		caller := accounts.RequireIdentity(d, ctx)
 		if caller == nil {
 			return
 		}
 		if caller.Role != "Admin" {
-			httpx.Error(w, http.StatusForbidden, "only an admin can void a payment", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only an admin can void a payment", nil)
 			return
 		}
 		var in struct {
 			Reason string `json:"reason"`
 			Note   string `json:"note"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || !slices.Contains(voidReasons, in.Reason) {
-			httpx.Error(w, http.StatusBadRequest, "choose a reason for voiding", err)
+		if err := httpx.Decode(ctx, &in); err != nil || !slices.Contains(voidReasons, in.Reason) {
+			httpx.Error(ctx, http.StatusBadRequest, "choose a reason for voiding", err)
 			return
 		}
 		note := strings.TrimSpace(in.Note)
 		if in.Reason == "other" && len([]rune(note)) < minVoidNote {
-			httpx.Error(w, http.StatusBadRequest, "explain the reason for voiding", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "explain the reason for voiding", nil)
 			return
 		}
 		if len([]rune(note)) > 500 {
-			httpx.Error(w, http.StatusBadRequest, "the reason is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "the reason is too long", nil)
 			return
 		}
-		paymentID := r.PathValue("id")
+		paymentID := ctx.Param("id")
 		reversed, err := VoidPayment(d, caller, paymentID, in.Reason, note)
 		switch {
 		case errors.Is(err, ErrNotFound):
-			httpx.Error(w, http.StatusNotFound, err.Error(), nil)
+			httpx.Error(ctx, http.StatusNotFound, err.Error(), nil)
 			return
 		case errors.Is(err, ErrAlreadyVoided):
-			httpx.Error(w, http.StatusConflict, err.Error(), nil)
+			httpx.Error(ctx, http.StatusConflict, err.Error(), nil)
 			return
 		case err != nil:
-			httpx.Error(w, http.StatusInternalServerError, "could not void the payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not void the payment", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"payment_id": paymentID, "status": "Voided", "credits_reversed": reversed})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"payment_id": paymentID, "status": "Voided", "credits_reversed": reversed})
 	}
 }
 
 // handlePaymentHistory is a payment's audit trail, oldest first. Staff only.
-func handlePaymentHistory(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handlePaymentHistory(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
 		rows, err := d.Query(`SELECT action, COALESCE(changed_by_name, ''), changed_at, COALESCE(changes, ''), COALESCE(reason, '')
-		                        FROM payment_audit WHERE payment_id = ? ORDER BY changed_at, rowid`, r.PathValue("id"))
+		                        FROM payment_audit WHERE payment_id = ? ORDER BY changed_at, rowid`, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read the history", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read the history", err)
 			return
 		}
 		defer rows.Close()
@@ -116,7 +118,7 @@ func handlePaymentHistory(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var action, by, at, changes, reason string
 			if err := rows.Scan(&action, &by, &at, &changes, &reason); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not read the history", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not read the history", err)
 				return
 			}
 			entry := map[string]any{"action": action, "by": by, "at": at, "reason": reason}
@@ -126,11 +128,11 @@ func handlePaymentHistory(d *sql.DB) http.HandlerFunc {
 			}
 			out = append(out, entry)
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
-func MountPaymentVoid(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("POST /api/v1/payments/{id}/void", handleVoidPayment(d))
-	mux.HandleFunc("GET /api/v1/payments/{id}/history", handlePaymentHistory(d))
+func MountPaymentVoid(mux gin.IRoutes, d *sql.DB) {
+	mux.POST("/api/v1/payments/:id/void", handleVoidPayment(d))
+	mux.GET("/api/v1/payments/:id/history", handlePaymentHistory(d))
 }

@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -19,41 +21,41 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/liveevents"
 )
 
-func handleLineConversations(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLineConversations(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
 		list, err := listConversations(l.db)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load conversations", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load conversations", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, list)
+		httpx.JSON(ctx, http.StatusOK, list)
 	}
 }
 
-func handleLineThread(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLineThread(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
-		uid := r.PathValue("id")
+		uid := ctx.Param("id")
 		c, err := conversationOf(l.db, uid)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load conversation", err)
 			return
 		}
 		messages, err := threadOf(l.db, uid)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load messages", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load messages", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"conversation": c, "messages": messages})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"conversation": c, "messages": messages})
 	}
 }
 
@@ -76,30 +78,30 @@ func conversationOf(d *sql.DB, uid string) (lineConversation, error) {
 // handleLineLink links a chat to a parent or a student, or — with neither —
 // unlinks it. A record already linked to another chat is refused rather than
 // moved, so one click cannot quietly take a family's chat from them.
-func handleLineLink(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLineLink(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
-		uid := r.PathValue("id")
+		uid := ctx.Param("id")
 		var in struct {
 			ParentID  string `json:"parentId"`
 			StudentID string `json:"studentId"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "malformed request", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "malformed request", err)
 			return
 		}
 		in.ParentID, in.StudentID = strings.TrimSpace(in.ParentID), strings.TrimSpace(in.StudentID)
 		if in.ParentID != "" && in.StudentID != "" {
-			httpx.Error(w, http.StatusBadRequest, "link a parent or a student, not both", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "link a parent or a student, not both", nil)
 			return
 		}
 		if _, err := conversationOf(l.db, uid); errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		} else if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load conversation", err)
 			return
 		}
 		for _, target := range []struct{ id, table, col, missing string }{
@@ -112,81 +114,81 @@ func handleLineLink(l *lineDeps) http.HandlerFunc {
 			var n int
 			l.db.QueryRow(`SELECT COUNT(*) FROM `+target.table+` WHERE `+target.col+` = ?`, target.id).Scan(&n)
 			if n == 0 {
-				httpx.Error(w, http.StatusNotFound, target.missing, nil)
+				httpx.Error(ctx, http.StatusNotFound, target.missing, nil)
 				return
 			}
 			var other string
 			err := l.db.QueryRow(`SELECT display_name FROM line_contact WHERE `+target.col+` = ? AND line_user_id <> ?`,
 				target.id, uid).Scan(&other)
 			if err == nil {
-				httpx.Error(w, http.StatusConflict, "already linked to another LINE chat ("+other+") — unlink that one first", nil)
+				httpx.Error(ctx, http.StatusConflict, "already linked to another LINE chat ("+other+") — unlink that one first", nil)
 				return
 			}
 		}
 		if _, err := l.db.Exec(`UPDATE line_contact SET parent_id = ?, student_id = ? WHERE line_user_id = ?`,
 			db.NullIfEmpty(in.ParentID), db.NullIfEmpty(in.StudentID), uid); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not link the chat", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not link the chat", err)
 			return
 		}
 		c, err := conversationOf(l.db, uid)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load conversation", err)
 			return
 		}
 		l.publishInbox(uid)
-		httpx.JSON(w, http.StatusOK, c)
+		httpx.JSON(ctx, http.StatusOK, c)
 	}
 }
 
-func handleLineMarkRead(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLineMarkRead(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
-		uid := r.PathValue("id")
+		uid := ctx.Param("id")
 		res, err := l.db.Exec(`UPDATE line_contact SET unread_count = 0 WHERE line_user_id = ?`, uid)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not update conversation", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not update conversation", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		l.publishInbox(uid)
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 
-func handleLineSend(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(l.db, w, r)
+func handleLineSend(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(l.db, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		var in struct {
 			Text string `json:"text"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "text is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "text is required", err)
 			return
 		}
 		text := strings.TrimSpace(in.Text)
 		if text == "" {
-			httpx.Error(w, http.StatusBadRequest, "text is required", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "text is required", nil)
 			return
 		}
 		if utf8.RuneCountInString(text) > line.MaxTextLength {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				fmt.Sprintf("a message may be at most %d characters", line.MaxTextLength), nil)
 			return
 		}
 
-		uid := r.PathValue("id")
+		uid := ctx.Param("id")
 		var followed int
 		var replyToken sql.NullString
 		var replyAt sql.NullString
@@ -194,24 +196,24 @@ func handleLineSend(l *lineDeps) http.HandlerFunc {
 		                      FROM line_contact WHERE line_user_id = ?`, uid).
 			Scan(&followed, &replyToken, &replyAt)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load conversation", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load conversation", err)
 			return
 		}
 		if followed == 0 {
 			// Nothing to attempt: LINE rejects a send to someone who has
 			// blocked the account, and spending the attempt to find that out
 			// would record a failure the console already knows about.
-			httpx.JSON(w, http.StatusConflict, map[string]string{
+			httpx.JSON(ctx, http.StatusConflict, map[string]string{
 				"error": "this contact has blocked the account", "reason": string(line.ReasonBlocked)})
 			return
 		}
 		creds, err := l.creds()
 		if err != nil {
-			httpx.Error(w, http.StatusServiceUnavailable, "line messaging is not configured", err)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "line messaging is not configured", err)
 			return
 		}
 		client := l.newClient(creds.Token)
@@ -232,7 +234,7 @@ func handleLineSend(l *lineDeps) http.HandlerFunc {
 			   channel_used, delivery, failure_reason)
 			VALUES (?, ?, 'Out', 'text', ?, ?, ?, ?, ?, ?)`,
 			msgID, uid, text, at, id.UserAccountID, used, delivery, reason); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record message", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record message", err)
 			return
 		}
 		// A failed send is recorded and shown too. "Did she get my message?" is
@@ -250,11 +252,11 @@ func handleLineSend(l *lineDeps) http.HandlerFunc {
 			Channel: used, Delivery: delivery, Reason: reason,
 		}
 		if sendErr != nil {
-			httpx.JSON(w, http.StatusBadGateway, map[string]any{
+			httpx.JSON(ctx, http.StatusBadGateway, map[string]any{
 				"error": "message could not be delivered", "reason": reason, "message": view})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, view)
+		httpx.JSON(ctx, http.StatusOK, view)
 	}
 }
 
@@ -292,21 +294,21 @@ func lineTokenFresh(at sql.NullString) bool {
 }
 
 // handleLineEvents streams the inbox to the console.
-func handleLineEvents(l *lineDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(l.db, w, r) == nil {
+func handleLineEvents(l *lineDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(l.db, ctx) == nil {
 			return
 		}
-		flusher, ok := w.(http.Flusher)
+		flusher, ok := httpx.StreamFlusher(ctx)
 		if !ok {
-			httpx.Error(w, http.StatusInternalServerError, "streaming unavailable", nil)
+			httpx.Error(ctx, http.StatusInternalServerError, "streaming unavailable", nil)
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
+		ctx.Header("Content-Type", "text/event-stream")
+		ctx.Header("Cache-Control", "no-cache")
+		ctx.Header("Connection", "keep-alive")
+		ctx.Header("X-Accel-Buffering", "no")
+		ctx.Status(http.StatusOK)
 
 		ch := l.hub.Subscribe(lineInboxKey)
 		defer l.hub.Unsubscribe(lineInboxKey, ch)
@@ -317,7 +319,7 @@ func handleLineEvents(l *lineDeps) http.HandlerFunc {
 		// anything that arrived while a client was reconnecting.
 		if list, err := listConversations(l.db); err == nil {
 			if payload, err := json.Marshal(map[string]any{"conversations": list, "changed": ""}); err == nil {
-				fmt.Fprintf(w, "event: inbox\ndata: %s\n\n", payload)
+				fmt.Fprintf(ctx.Writer, "event: inbox\ndata: %s\n\n", payload)
 			}
 		}
 		flusher.Flush()
@@ -326,13 +328,13 @@ func handleLineEvents(l *lineDeps) http.HandlerFunc {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-r.Context().Done():
+			case <-ctx.Request.Context().Done():
 				return
 			case payload := <-ch:
-				fmt.Fprintf(w, "event: inbox\ndata: %s\n\n", payload)
+				fmt.Fprintf(ctx.Writer, "event: inbox\ndata: %s\n\n", payload)
 				flusher.Flush()
 			case <-ticker.C:
-				fmt.Fprint(w, ": ping\n\n")
+				fmt.Fprint(ctx.Writer, ": ping\n\n")
 				flusher.Flush()
 			}
 		}

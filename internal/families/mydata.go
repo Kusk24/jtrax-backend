@@ -10,19 +10,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
-func MountMyData(mux httpx.RouteRegistrar, d *sql.DB) {
+func MountMyData(mux gin.IRoutes, d *sql.DB) {
 	// Each export reads every table a family touches, so it is budgeted.
-	mux.HandleFunc("GET /api/v1/me/export", httpx.RateLimit(10, handleExport(d)))
-	mux.HandleFunc("POST /api/v1/me/erasure-request", httpx.RateLimit(10, handleErasureRequest(d)))
-	mux.HandleFunc("GET /api/v1/me/erasure-request", handleMyErasureRequest(d))
-	mux.HandleFunc("GET /api/v1/data-requests", handleListDataRequests(d))
-	mux.HandleFunc("POST /api/v1/data-requests/{id}/resolve", handleResolveDataRequest(d))
+	mux.GET("/api/v1/me/export", httpx.RateLimit(10), handleExport(d))
+	mux.POST("/api/v1/me/erasure-request", httpx.RateLimit(10), handleErasureRequest(d))
+	mux.GET("/api/v1/me/erasure-request", handleMyErasureRequest(d))
+	mux.GET("/api/v1/data-requests", handleListDataRequests(d))
+	mux.POST("/api/v1/data-requests/:id/resolve", handleResolveDataRequest(d))
 }
 
 // rowsOf runs a query and returns its rows as column → value maps. The
@@ -161,59 +163,59 @@ func exportFor(d *sql.DB, id *auth.Identity) (map[string]any, error) {
 // handleExport answers a parent or student with everything held about them,
 // as a JSON file. Staff ask the office like anybody else: their accounts hold
 // other people's data, which an export of "theirs" must not sweep up.
-func handleExport(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleExport(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" && id.Role != "Student" {
-			httpx.Error(w, http.StatusForbidden, "ask the office for a copy of a staff account's data", nil)
+			httpx.Error(ctx, http.StatusForbidden, "ask the office for a copy of a staff account's data", nil)
 			return
 		}
 		data, err := exportFor(d, id)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not export", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not export", err)
 			return
 		}
-		w.Header().Set("Content-Disposition", `attachment; filename="jtrax-my-data.json"`)
-		httpx.JSON(w, http.StatusOK, data)
+		ctx.Header("Content-Disposition", `attachment; filename="jtrax-my-data.json"`)
+		httpx.JSON(ctx, http.StatusOK, data)
 	}
 }
 
 // handleErasureRequest records a parent's request to erase their family's
 // data. One open request at a time: asking twice is the same request.
-func handleErasureRequest(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleErasureRequest(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "a parent asks for their family", nil)
+			httpx.Error(ctx, http.StatusForbidden, "a parent asks for their family", nil)
 			return
 		}
 		var in struct {
 			Note string `json:"note"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
 		in.Note = strings.TrimSpace(in.Note)
 		if len([]rune(in.Note)) > 1000 {
-			httpx.Error(w, http.StatusBadRequest, "that note is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that note is too long", nil)
 			return
 		}
 		var existing string
 		err := d.QueryRow(`SELECT data_request_id FROM data_request
 			WHERE parent_id = ? AND kind = 'erasure' AND status = 'Open'`, id.ParentID).Scan(&existing)
 		if err == nil {
-			httpx.JSON(w, http.StatusOK, map[string]any{"data_request_id": existing, "status": "Open"})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"data_request_id": existing, "status": "Open"})
 			return
 		}
 		if err != sql.ErrNoRows {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the request", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the request", err)
 			return
 		}
 		reqID := db.NewID("dreq")
@@ -221,56 +223,56 @@ func handleErasureRequest(d *sql.DB) http.HandlerFunc {
 			(data_request_id, kind, user_account_id, parent_id, requested_by_name, note)
 			VALUES (?, 'erasure', ?, ?, ?, ?)`,
 			reqID, id.UserAccountID, id.ParentID, id.DisplayName, in.Note); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the request", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the request", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{"data_request_id": reqID, "status": "Open"})
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{"data_request_id": reqID, "status": "Open"})
 	}
 }
 
 // handleMyErasureRequest says whether the caller's family has a request open,
 // so the portal can show it rather than offer the button again.
-func handleMyErasureRequest(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleMyErasureRequest(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		rows, err := rowsOf(d, `SELECT data_request_id, status, requested_at FROM data_request
 			WHERE parent_id = ? AND kind = 'erasure' ORDER BY requested_at DESC LIMIT 1`, id.ParentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read", err)
 			return
 		}
 		if len(rows) == 0 {
-			httpx.JSON(w, http.StatusOK, map[string]any{"status": ""})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"status": ""})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, rows[0])
+		httpx.JSON(ctx, http.StatusOK, rows[0])
 	}
 }
 
 // Staff see every request; only an admin closes one, as only an admin may
 // delete the people it is about.
-func handleListDataRequests(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleListDataRequests(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
 		rows, err := rowsOf(d, `SELECT data_request_id, kind, status, parent_id, requested_by_name, note,
 			requested_at, resolved_at, resolved_by, resolution_note
 			FROM data_request ORDER BY status = 'Open' DESC, requested_at DESC`)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not read", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, rows)
+		httpx.JSON(ctx, http.StatusOK, rows)
 	}
 }
 
-func handleResolveDataRequest(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireAdmin(d, w, r)
+func handleResolveDataRequest(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireAdmin(d, ctx)
 		if id == nil {
 			return
 		}
@@ -278,28 +280,28 @@ func handleResolveDataRequest(d *sql.DB) http.HandlerFunc {
 			Status string `json:"status"`
 			Note   string `json:"note"`
 		}
-		if err := httpx.Decode(r, &in); err != nil || (in.Status != "Done" && in.Status != "Declined") {
-			httpx.Error(w, http.StatusBadRequest, "status must be Done or Declined", nil)
+		if err := httpx.Decode(ctx, &in); err != nil || (in.Status != "Done" && in.Status != "Declined") {
+			httpx.Error(ctx, http.StatusBadRequest, "status must be Done or Declined", nil)
 			return
 		}
 		in.Note = strings.TrimSpace(in.Note)
 		/* A refusal has to say why — the family is owed a reason, and the
 		   PDPC may ask for one. */
 		if in.Status == "Declined" && in.Note == "" {
-			httpx.Error(w, http.StatusBadRequest, "say why the request is declined", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "say why the request is declined", nil)
 			return
 		}
 		res, err := d.Exec(`UPDATE data_request SET status = ?, resolution_note = ?, resolved_at = ?, resolved_by = ?
 			WHERE data_request_id = ? AND status = 'Open'`,
-			in.Status, in.Note, db.SQLiteNow(), id.DisplayName, r.PathValue("id"))
+			in.Status, in.Note, db.SQLiteNow(), id.DisplayName, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not update", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not update", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "no open request with that id", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no open request with that id", nil)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		ctx.Status(http.StatusNoContent)
 	}
 }

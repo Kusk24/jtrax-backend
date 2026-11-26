@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/chessresults"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -148,18 +150,18 @@ func loadResults(d *sql.DB, tournamentID string) ([]roundView, []standingView, e
 	return rounds, table, nil
 }
 
-func handleTournamentResults(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireIdentity(d, w, r) == nil {
+func handleTournamentResults(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireIdentity(d, ctx) == nil {
 			return
 		}
-		id := r.PathValue("id")
+		id := ctx.Param("id")
 		rounds, table, err := loadResults(d, id)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"rounds": rounds, "standings": table})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"rounds": rounds, "standings": table})
 	}
 }
 
@@ -169,9 +171,9 @@ func handleTournamentResults(d *sql.DB) http.HandlerFunc {
 // per event, it is rate-limited, and it carries only what is already pinned to
 // the wall at a tournament hall — name, category, score. No contact details, no
 // date of birth, no student id, nothing that ties a child to a JTrax account.
-func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
+func handlePublicResults(d *sql.DB, cr *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := ctx.Param("id")
 		var name, status, start, end, venueName, venueAddress string
 		var public, hasBanner int
 		err := d.QueryRow(`SELECT name, tournament_status, results_public,
@@ -183,11 +185,11 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && public != 1) {
 			// An unpublished tournament is indistinguishable from one that does
 			// not exist, so the endpoint cannot be used to discover ids.
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
 		// What the page's banner needs: the picture, or the name, dates and
@@ -201,11 +203,11 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 		// event, each with its own table and rounds. This is what the console's
 		// Results tab shows, so the public page shows the same thing.
 		if sections, err := publicSections(d, cr, id); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		} else if len(sections) > 0 {
 			first := sections[0]
-			httpx.JSON(w, http.StatusOK, map[string]any{
+			httpx.JSON(ctx, http.StatusOK, map[string]any{
 				"tournament": head,
 				"source":     "chess-results",
 				"sections":   sections,
@@ -225,7 +227,7 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 		// invite exactly the disagreement this is meant to end.
 		linked, err := linkedResultsFor(d, id)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
 		if linked != nil {
@@ -245,7 +247,7 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 					}
 				}()
 			}
-			httpx.JSON(w, http.StatusOK, map[string]any{
+			httpx.JSON(ctx, http.StatusOK, map[string]any{
 				"tournament": head,
 				"source":     linked.Source,
 				"sourceUrl":  linked.URL,
@@ -259,7 +261,7 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 
 		rounds, table, err := loadResults(d, id)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
 		// Strip everything the public has no business seeing: the registration
@@ -285,38 +287,38 @@ func handlePublicResults(d *sql.DB, cr *chessResultsDeps) http.HandlerFunc {
 				"round": rd.Round, "status": rd.Status, "pairings": boards,
 			})
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"tournament": head,
 			"rounds":     pubRounds, "standings": pub,
 		})
 	}
 }
 
-func handleCreateRound(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleCreateRound(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		var exists int
 		if err := d.QueryRow(`SELECT COUNT(*) FROM tournament WHERE tournament_id = ?`,
 			tournamentID).Scan(&exists); err != nil || exists == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 		var next int
 		if err := d.QueryRow(`SELECT COALESCE(MAX(round_no),0) + 1 FROM tournament_round
 		                      WHERE tournament_id = ?`, tournamentID).Scan(&next); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not add a round", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not add a round", err)
 			return
 		}
 		roundID := db.NewID("trd")
 		if _, err := d.Exec(`INSERT INTO tournament_round (tournament_round_id, tournament_id, round_no, status)
 		                     VALUES (?, ?, ?, 'Pending')`, roundID, tournamentID, next); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not add a round", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not add a round", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{"roundId": roundID, "round": next, "status": "Pending"})
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{"roundId": roundID, "round": next, "status": "Pending"})
 	}
 }
 
@@ -326,15 +328,15 @@ func handleCreateRound(d *sql.DB) http.HandlerFunc {
 // colour balance and float history, and this sorts by standing and pairs down
 // the list avoiding rematches. It exists so an arbiter starts from a sensible
 // list rather than a blank screen, and every board is editable before saving.
-func handleProposePairings(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleProposePairings(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		rounds, _, err := loadResults(d, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load results", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load results", err)
 			return
 		}
 		played := []standings.Pairing{}
@@ -348,14 +350,14 @@ func handleProposePairings(d *sql.DB) http.HandlerFunc {
 		rows, err := d.Query(`SELECT tournament_registration_id, participant_name
 		                      FROM tournament_registration WHERE tournament_id = ?`, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load players", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load players", err)
 			return
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var id, name string
 			if err := rows.Scan(&id, &name); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load players", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load players", err)
 				return
 			}
 			ids = append(ids, id)
@@ -368,7 +370,7 @@ func handleProposePairings(d *sql.DB) http.HandlerFunc {
 				"blackRegistrationId": p.Black, "black": names[p.Black], "result": p.Result,
 			})
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"pairings": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"pairings": out})
 	}
 }
 
@@ -377,21 +379,21 @@ func handleProposePairings(d *sql.DB) http.HandlerFunc {
 // A replace rather than a merge: an arbiter re-pairing a round has decided the
 // old list is wrong, and leaving orphans behind would put a player on two
 // boards at once.
-func handleSetPairings(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleSetPairings(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		roundID := r.PathValue("roundId")
+		roundID := ctx.Param("roundId")
 		var tournamentID string
 		err := d.QueryRow(`SELECT tournament_id FROM tournament_round WHERE tournament_round_id = ?`,
 			roundID).Scan(&tournamentID)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load the round", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load the round", err)
 			return
 		}
 		var in struct {
@@ -402,8 +404,8 @@ func handleSetPairings(d *sql.DB) http.HandlerFunc {
 				Result string `json:"result"`
 			} `json:"pairings"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "pairings are required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "pairings are required", err)
 			return
 		}
 
@@ -414,7 +416,7 @@ func handleSetPairings(d *sql.DB) http.HandlerFunc {
 		rows, err := d.Query(`SELECT tournament_registration_id FROM tournament_registration
 		                      WHERE tournament_id = ?`, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load players", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load players", err)
 			return
 		}
 		for rows.Next() {
@@ -428,15 +430,15 @@ func handleSetPairings(d *sql.DB) http.HandlerFunc {
 		seen := map[string]bool{}
 		for _, p := range in.Pairings {
 			if !valid[p.White] || (p.Black != "" && !valid[p.Black]) {
-				httpx.Error(w, http.StatusBadRequest, "a player is not registered for this tournament", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "a player is not registered for this tournament", nil)
 				return
 			}
 			if p.Black != "" && p.White == p.Black {
-				httpx.Error(w, http.StatusBadRequest, "a player cannot be paired against themselves", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "a player cannot be paired against themselves", nil)
 				return
 			}
 			if seen[p.White] || (p.Black != "" && seen[p.Black]) {
-				httpx.Error(w, http.StatusBadRequest, "a player appears on two boards in the same round", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "a player appears on two boards in the same round", nil)
 				return
 			}
 			seen[p.White] = true
@@ -444,19 +446,19 @@ func handleSetPairings(d *sql.DB) http.HandlerFunc {
 				seen[p.Black] = true
 			}
 			if p.Result != "" && !slices.Contains(resultCodes, p.Result) {
-				httpx.Error(w, http.StatusBadRequest, "unknown result", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "unknown result", nil)
 				return
 			}
 		}
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save pairings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save pairings", err)
 			return
 		}
 		defer tx.Rollback()
 		if _, err := tx.Exec(`DELETE FROM tournament_pairing WHERE tournament_round_id = ?`, roundID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save pairings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save pairings", err)
 			return
 		}
 		for i, p := range in.Pairings {
@@ -478,57 +480,57 @@ func handleSetPairings(d *sql.DB) http.HandlerFunc {
 				   white_registration_id, black_registration_id, result)
 				VALUES (?, ?, ?, ?, ?, ?)`,
 				db.NewID("tpr"), roundID, board, p.White, black, result); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not save pairings", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not save pairings", err)
 				return
 			}
 		}
 		if _, err := tx.Exec(`UPDATE tournament_round SET started_at = COALESCE(started_at, datetime('now'))
 		                      WHERE tournament_round_id = ?`, roundID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save pairings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save pairings", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save pairings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save pairings", err)
 			return
 		}
 		// A round of nothing but byes is finished the moment it is paired.
 		refreshRoundStatus(d, roundID)
-		httpx.JSON(w, http.StatusOK, map[string]any{"roundId": roundID, "boards": len(in.Pairings)})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"roundId": roundID, "boards": len(in.Pairings)})
 	}
 }
 
 // handleRecordResult sets one board's result — the endpoint an arbiter hits
 // most, between rounds, on a phone, in a noisy hall.
-func handleRecordResult(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireStaff(d, w, r)
+func handleRecordResult(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireStaff(d, ctx)
 		if id == nil {
 			return
 		}
 		var in struct {
 			Result string `json:"result"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "result is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "result is required", err)
 			return
 		}
 		result := strings.TrimSpace(in.Result)
 		if !slices.Contains(resultCodes, result) {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"result must be one of "+strings.Join(resultCodes, ", "), nil)
 			return
 		}
-		pairingID := r.PathValue("pairingId")
+		pairingID := ctx.Param("pairingId")
 		res, err := d.Exec(`UPDATE tournament_pairing
 		                    SET result = ?, recorded_at = ?, recorded_by = ?
 		                    WHERE tournament_pairing_id = ?`,
 			result, time.Now().UTC().Format("2006-01-02 15:04:05"), id.UserAccountID, pairingID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not record the result", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not record the result", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		var roundID string
@@ -536,7 +538,7 @@ func handleRecordResult(d *sql.DB) http.HandlerFunc {
 		                      WHERE tournament_pairing_id = ?`, pairingID).Scan(&roundID); err == nil {
 			refreshRoundStatus(d, roundID)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"result": result})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"result": result})
 	}
 }
 
@@ -576,14 +578,14 @@ func refreshRoundStatus(d *sql.DB, roundID string) {
 // to /t/<id>. It carries names and ids only, both already served by the
 // results endpoint itself, and completed events drop off so the portals stop
 // advertising an event that is over.
-func handleListLiveTournaments(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handleListLiveTournaments(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		rows, err := d.Query(`
 			SELECT tournament_id, name, tournament_status FROM tournament
 			WHERE results_public = 1 AND tournament_status IN ('Upcoming','Ongoing')
 			ORDER BY CASE tournament_status WHEN 'Ongoing' THEN 0 ELSE 1 END, start_date, tournament_id`)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		defer rows.Close()
@@ -591,33 +593,33 @@ func handleListLiveTournaments(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var id, name, status string
 			if err := rows.Scan(&id, &name, &status); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 				return
 			}
 			out = append(out, map[string]any{"tournamentId": id, "name": name, "status": status})
 		}
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
-func mountTournamentResults(mux httpx.RouteRegistrar, d *sql.DB, cr *chessResultsDeps) {
+func mountTournamentResults(mux gin.IRoutes, d *sql.DB, cr *chessResultsDeps) {
 	const p = "/api/v1/tournaments"
-	mux.HandleFunc("GET "+p+"/{id}/results", handleTournamentResults(d))
-	mux.HandleFunc("POST "+p+"/{id}/rounds", handleCreateRound(d))
-	mux.HandleFunc("GET "+p+"/{id}/proposed-pairings", handleProposePairings(d))
-	mux.HandleFunc("PUT "+p+"/rounds/{roundId}/pairings", handleSetPairings(d))
-	mux.HandleFunc("PATCH "+p+"/pairings/{pairingId}", handleRecordResult(d))
+	mux.GET(p+"/:id/results", handleTournamentResults(d))
+	mux.POST(p+"/:id/rounds", handleCreateRound(d))
+	mux.GET(p+"/:id/proposed-pairings", handleProposePairings(d))
+	mux.PUT(p+"/rounds/:roundId/pairings", handleSetPairings(d))
+	mux.PATCH(p+"/pairings/:pairingId", handleRecordResult(d))
 
 	// The one endpoint here that needs no session. Published events only, and
 	// rate-limited because anything unauthenticated has to be.
-	mux.HandleFunc("GET /api/v1/public/tournaments/{id}/results",
-		httpx.RateLimit(60, handlePublicResults(d, cr)))
-	mux.HandleFunc("GET /api/v1/public/live-tournaments",
-		httpx.RateLimit(60, handleListLiveTournaments(d)))
+	mux.GET("/api/v1/public/tournaments/:id/results",
+		httpx.RateLimit(60), handlePublicResults(d, cr))
+	mux.GET("/api/v1/public/live-tournaments",
+		httpx.RateLimit(60), handleListLiveTournaments(d))
 }
 
 // publicSections is a connected tournament's chess-results categories as the

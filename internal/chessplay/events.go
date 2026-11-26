@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/game"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -87,35 +89,35 @@ func publishRoom(d *sql.DB, h *liveevents.Hub, roomID string) {
 // handleRoomEvents streams a room's state changes to staff and to the two
 // players. Anyone else gets the same 404 the read endpoint gives, so a room id
 // cannot be probed through the stream either.
-func handleRoomEvents(d *sql.DB, h *liveevents.Hub) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleRoomEvents(d *sql.DB, h *liveevents.Hub) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		roomID := r.PathValue("id")
+		roomID := ctx.Param("id")
 		room, err := loadRoom(d, roomID)
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if !accounts.IsStaff(id.Role) && room.seatOf(id.UserAccountID) == "" {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
-		flusher, ok := w.(http.Flusher)
+		flusher, ok := httpx.StreamFlusher(ctx)
 		if !ok {
-			httpx.Error(w, http.StatusInternalServerError, "streaming unavailable", nil)
+			httpx.Error(ctx, http.StatusInternalServerError, "streaming unavailable", nil)
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+		ctx.Header("Content-Type", "text/event-stream")
+		ctx.Header("Cache-Control", "no-cache")
+		ctx.Header("Connection", "keep-alive")
 		// Tells nginx-style proxies not to buffer, which would hold every event
 		// until the response ended — that is, until the game did.
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
+		ctx.Header("X-Accel-Buffering", "no")
+		ctx.Status(http.StatusOK)
 
 		ch := h.Subscribe(roomID)
 		defer h.Unsubscribe(roomID, ch)
@@ -128,15 +130,15 @@ func handleRoomEvents(d *sql.DB, h *liveevents.Hub) http.HandlerFunc {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-r.Context().Done():
+			case <-ctx.Request.Context().Done():
 				return
 			case payload := <-ch:
-				fmt.Fprintf(w, "event: room\ndata: %s\n\n", payload)
+				fmt.Fprintf(ctx.Writer, "event: room\ndata: %s\n\n", payload)
 				flusher.Flush()
 			case <-ticker.C:
 				// A comment line: valid SSE, ignored by EventSource, enough to
 				// keep the connection from being reaped as idle.
-				fmt.Fprint(w, ": ping\n\n")
+				fmt.Fprint(ctx.Writer, ": ping\n\n")
 				flusher.Flush()
 			}
 		}

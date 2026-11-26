@@ -12,6 +12,8 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -23,26 +25,26 @@ import (
 // credit-expiry trigger. The service is shared with the registry hooks that
 // fire on check-in and on a new announcement. webpushKey is the VAPID public
 // key browsers subscribe with; empty while browser push is not set up.
-func MountNotifications(mux httpx.RouteRegistrar, d *sql.DB, svc *notify.Service, webpushKey string) {
-	mux.HandleFunc("GET /api/v1/notifications", handleListNotifications(d))
-	mux.HandleFunc("POST /api/v1/notifications/{id}/read", handleMarkRead(d))
-	mux.HandleFunc("POST /api/v1/notifications/read-all", handleMarkAllRead(d))
+func MountNotifications(mux gin.IRoutes, d *sql.DB, svc *notify.Service, webpushKey string) {
+	mux.GET("/api/v1/notifications", handleListNotifications(d))
+	mux.POST("/api/v1/notifications/:id/read", handleMarkRead(d))
+	mux.POST("/api/v1/notifications/read-all", handleMarkAllRead(d))
 
-	mux.HandleFunc("GET /api/v1/notification-settings", handleGetSettings(d))
-	mux.HandleFunc("PUT /api/v1/notification-settings", handlePutSettings(d))
+	mux.GET("/api/v1/notification-settings", handleGetSettings(d))
+	mux.PUT("/api/v1/notification-settings", handlePutSettings(d))
 
-	mux.HandleFunc("GET /api/v1/push-subscriptions/webpush-key", handleWebPushKey(d, webpushKey))
-	mux.HandleFunc("POST /api/v1/push-subscriptions", handleRegisterPush(d))
-	mux.HandleFunc("DELETE /api/v1/push-subscriptions", handleUnregisterPush(d))
+	mux.GET("/api/v1/push-subscriptions/webpush-key", handleWebPushKey(d, webpushKey))
+	mux.POST("/api/v1/push-subscriptions", handleRegisterPush(d))
+	mux.DELETE("/api/v1/push-subscriptions", handleUnregisterPush(d))
 
 	// Manual, permission-gated: only Admin / Receptionist may set these off.
-	mux.HandleFunc("POST /api/v1/notifications/credit-expiry", payments.HandleCreditExpiry(d, svc))
-	mux.HandleFunc("POST /api/v1/notifications/low-credit", payments.HandleLowCredit(d, svc))
+	mux.POST("/api/v1/notifications/credit-expiry", payments.HandleCreditExpiry(d, svc))
+	mux.POST("/api/v1/notifications/low-credit", payments.HandleLowCredit(d, svc))
 }
 
-func handleListNotifications(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleListNotifications(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -52,7 +54,7 @@ func handleListNotifications(d *sql.DB) http.HandlerFunc {
 			 FROM notification WHERE user_account_id = ?
 			 ORDER BY created_at DESC, notification_id DESC LIMIT 100`, id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load notifications", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load notifications", err)
 			return
 		}
 		defer rows.Close()
@@ -62,7 +64,7 @@ func handleListNotifications(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var nid, typ, title, body, data, createdAt, readAt string
 			if err := rows.Scan(&nid, &typ, &title, &body, &data, &createdAt, &readAt); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not read notifications", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not read notifications", err)
 				return
 			}
 			if readAt == "" {
@@ -73,13 +75,13 @@ func handleListNotifications(d *sql.DB) http.HandlerFunc {
 				"data": data, "created_at": createdAt, "read_at": db.Nullable(readAt),
 			})
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"notifications": list, "unread": unread})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"notifications": list, "unread": unread})
 	}
 }
 
-func handleMarkRead(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleMarkRead(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -88,19 +90,19 @@ func handleMarkRead(d *sql.DB) http.HandlerFunc {
 		res, err := d.Exec(
 			`UPDATE notification SET read_at = datetime('now')
 			 WHERE notification_id = ? AND user_account_id = ? AND read_at IS NULL`,
-			r.PathValue("id"), id.UserAccountID)
+			ctx.Param("id"), id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not mark read", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not mark read", err)
 			return
 		}
 		n, _ := res.RowsAffected()
-		httpx.JSON(w, http.StatusOK, map[string]any{"updated": n})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"updated": n})
 	}
 }
 
-func handleMarkAllRead(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleMarkAllRead(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -108,20 +110,20 @@ func handleMarkAllRead(d *sql.DB) http.HandlerFunc {
 			`UPDATE notification SET read_at = datetime('now')
 			 WHERE user_account_id = ? AND read_at IS NULL`, id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not mark read", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not mark read", err)
 			return
 		}
 		n, _ := res.RowsAffected()
-		httpx.JSON(w, http.StatusOK, map[string]any{"updated": n})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"updated": n})
 	}
 }
 
 // handleGetSettings returns the caller's stored overrides. An absent (type,
 // channel) means the default, which is on — the client fills the grid from
 // that rule, so the response is only the exceptions.
-func handleGetSettings(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleGetSettings(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -129,7 +131,7 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 			`SELECT type, channel, enabled FROM notification_setting WHERE user_account_id = ?`,
 			id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load settings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load settings", err)
 			return
 		}
 		defer rows.Close()
@@ -138,7 +140,7 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 			var typ, channel string
 			var enabled int
 			if err := rows.Scan(&typ, &channel, &enabled); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not read settings", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not read settings", err)
 				return
 			}
 			settings = append(settings, map[string]any{"type": typ, "channel": channel, "enabled": enabled != 0})
@@ -157,7 +159,7 @@ func handleGetSettings(d *sql.DB) http.HandlerFunc {
 			school[typ] = notify.SchoolEnabled(d, typ)
 			channelsByType[typ] = notify.ChannelsFor(typ)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"settings":       settings,
 			"types":          []string{notify.TypeCheckIn, notify.TypeCheckOut, notify.TypeCreditExpiry, notify.TypeAnnouncement, notify.TypeClassCancelled},
 			"channels":       notify.Channels,
@@ -177,25 +179,25 @@ type settingInput struct {
 // type is that person's master toggle — most alert types are in-app only, so
 // "Check-in Alerts: off" has to mean off, and the opt-in types (low credit)
 // are turned on the same way.
-func handlePutSettings(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handlePutSettings(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		var in settingInput
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		if !validType(in.Type) || !validChannel(in.Channel) {
-			httpx.Error(w, http.StatusBadRequest, "unknown type or channel", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "unknown type or channel", nil)
 			return
 		}
 		// The school's switch is the master: nobody opts in to a type the
 		// school does not send. Opting out is always allowed.
 		if in.Enabled && !notify.SchoolEnabled(d, in.Type) {
-			httpx.Error(w, http.StatusConflict, "the school has turned this notification off", nil)
+			httpx.Error(ctx, http.StatusConflict, "the school has turned this notification off", nil)
 			return
 		}
 		enabled := 0
@@ -207,9 +209,9 @@ func handlePutSettings(d *sql.DB) http.HandlerFunc {
 			 VALUES (?,?,?,?)
 			 ON CONFLICT(user_account_id, type, channel) DO UPDATE SET enabled = excluded.enabled`,
 			id.UserAccountID, in.Type, in.Channel, enabled); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save setting", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save setting", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"saved": true})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"saved": true})
 	}
 }

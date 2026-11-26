@@ -14,26 +14,28 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
 
-func handleChildPassword(d *sql.DB, sender mail.Sender) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := RequireIdentity(d, w, r)
+func handleChildPassword(d *sql.DB, sender mail.Sender) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "only a parent may reset their child's password", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only a parent may reset their child's password", nil)
 			return
 		}
 		var in struct {
 			Password string `json:"password"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", nil)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", nil)
 			return
 		}
 		// The family filter is part of the lookup: somebody else's child
@@ -45,30 +47,30 @@ func handleChildPassword(d *sql.DB, sender mail.Sender) http.HandlerFunc {
 			  JOIN student_parent sp ON sp.student_id = s.student_id
 			  JOIN user_account u ON u.user_account_id = s.user_account_id
 			 WHERE sp.parent_id = ? AND s.student_id = ?`,
-			id.ParentID, r.PathValue("id")).Scan(&accountID, &login, &childName)
+			id.ParentID, ctx.Param("id")).Scan(&accountID, &login, &childName)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such child", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such child", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not reset the password", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not reset the password", err)
 			return
 		}
 		if auth.LooksLikeEmail(login) {
-			httpx.Error(w, http.StatusConflict,
+			httpx.Error(ctx, http.StatusConflict,
 				"this child signs in with their own email address — they can reset it with Forgot password", nil)
 			return
 		}
 		if err := auth.ValidatePassword(in.Password); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 		if err := auth.SetPassword(d, accountID, in.Password); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not reset the password", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not reset the password", err)
 			return
 		}
 		go tellParentPasswordChanged(d, sender, id.UserAccountID, childName, login)
-		w.WriteHeader(http.StatusNoContent)
+		ctx.Status(http.StatusNoContent)
 	}
 }
 
@@ -106,14 +108,14 @@ func tellParentPasswordChanged(d *sql.DB, sender mail.Sender, parentAccountID, c
 
 // handleChildLogin tells a parent how their child signs in: the username, and
 // whether it is the child's own email (then the parent cannot reset it).
-func handleChildLogin(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := RequireIdentity(d, w, r)
+func handleChildLogin(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "parents only", nil)
+			httpx.Error(ctx, http.StatusForbidden, "parents only", nil)
 			return
 		}
 		var login string
@@ -122,15 +124,15 @@ func handleChildLogin(d *sql.DB) http.HandlerFunc {
 			  JOIN student_parent sp ON sp.student_id = s.student_id
 			  JOIN user_account u ON u.user_account_id = s.user_account_id
 			 WHERE sp.parent_id = ? AND s.student_id = ?`,
-			id.ParentID, r.PathValue("id")).Scan(&login)
+			id.ParentID, ctx.Param("id")).Scan(&login)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no such child", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such child", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load the login", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load the login", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"login": login, "ownEmail": auth.LooksLikeEmail(login)})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"login": login, "ownEmail": auth.LooksLikeEmail(login)})
 	}
 }

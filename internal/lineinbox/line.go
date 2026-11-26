@@ -19,6 +19,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/line"
@@ -248,7 +250,7 @@ func lineKindOf(t string) string {
 	}
 }
 
-func MountLine(mux httpx.RouteRegistrar, d *sql.DB) {
+func MountLine(mux gin.IRoutes, d *sql.DB) {
 	box, err := secretbox.FromEnv(lineKeyVar)
 	if err != nil && !errors.Is(err, secretbox.ErrNoKey) {
 		// A malformed key is worth shouting about: the operator meant to
@@ -278,16 +280,16 @@ func MountLine(mux httpx.RouteRegistrar, d *sql.DB) {
 	// verification happens after the body is read, so an unsigned flood would
 	// otherwise be free work. The budget is generous because a real batch of
 	// events from a busy account is legitimate traffic.
-	mux.HandleFunc("POST "+p+"/webhook", httpx.RateLimit(120, handleLineWebhook(deps)))
+	mux.POST(p+"/webhook", httpx.RateLimit(120), handleLineWebhook(deps))
 
-	mux.HandleFunc("GET "+p+"/conversations", handleLineConversations(deps))
-	mux.HandleFunc("GET "+p+"/conversations/{id}", handleLineThread(deps))
-	mux.HandleFunc("POST "+p+"/conversations/{id}/messages", handleLineSend(deps))
-	mux.HandleFunc("POST "+p+"/conversations/{id}/read", handleLineMarkRead(deps))
-	mux.HandleFunc("PUT "+p+"/conversations/{id}/link", handleLineLink(deps))
-	mux.HandleFunc("GET "+p+"/events", handleLineEvents(deps))
+	mux.GET(p+"/conversations", handleLineConversations(deps))
+	mux.GET(p+"/conversations/:id", handleLineThread(deps))
+	mux.POST(p+"/conversations/:id/messages", handleLineSend(deps))
+	mux.POST(p+"/conversations/:id/read", handleLineMarkRead(deps))
+	mux.PUT(p+"/conversations/:id/link", handleLineLink(deps))
+	mux.GET(p+"/events", handleLineEvents(deps))
 
-	mux.HandleFunc("GET "+p+"/channel", handleLineChannelGet(deps))
-	mux.HandleFunc("PUT "+p+"/channel", handleLineChannelPut(deps))
-	mux.HandleFunc("DELETE "+p+"/channel", handleLineChannelDelete(deps))
+	mux.GET(p+"/channel", handleLineChannelGet(deps))
+	mux.PUT(p+"/channel", handleLineChannelPut(deps))
+	mux.DELETE(p+"/channel", handleLineChannelDelete(deps))
 }

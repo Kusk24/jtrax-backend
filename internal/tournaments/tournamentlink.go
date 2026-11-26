@@ -13,6 +13,8 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/chessresults"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -207,23 +209,23 @@ func publicExternalStandings(rows []externalStanding) []map[string]any {
 // Staff-only and read-only: it never fetches from chess-results, it reads the
 // copy already stored. The console calls it when the Results tab opens, and a
 // screen opening must not cost somebody else's server a request.
-func handleGetChessResultsLink(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleGetChessResultsLink(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		out, err := linkedResultsFor(c.db, r.PathValue("id"))
+		out, err := linkedResultsFor(c.db, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if out == nil {
 			// Not linked is a fact, not a failure — the card renders its empty
 			// state from this rather than from an error.
-			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
@@ -233,25 +235,25 @@ func handleGetChessResultsLink(c *chessResultsDeps) http.HandlerFunc {
 // staff pasting the link onto a tournament means "this is that", and having to
 // also add it to a separate list would be a way to end up with a tournament
 // linked to an event whose standings nobody ever fetches.
-func handleLinkChessResults(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireStaff(c.db, w, r)
+func handleLinkChessResults(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireStaff(c.db, ctx)
 		if id == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		var exists int
 		if err := c.db.QueryRow(`SELECT COUNT(*) FROM tournament WHERE tournament_id = ?`,
 			tournamentID).Scan(&exists); err != nil || exists == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 
 		var in struct {
 			URL string `json:"url"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "a chess-results.com link is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "a chess-results.com link is required", err)
 			return
 		}
 		// ParseRef also refuses any host that is not chess-results.com, which is
@@ -259,42 +261,42 @@ func handleLinkChessResults(c *chessResultsDeps) http.HandlerFunc {
 		// caller's choosing.
 		crID, err := chessresults.ParseRef(in.URL)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"that does not look like a chess-results.com tournament link", nil)
 			return
 		}
 
-		if !c.trackEvent(w, crID, id.UserAccountID) {
+		if !c.trackEvent(ctx, crID, id.UserAccountID) {
 			return
 		}
 
 		if _, err := c.db.Exec(`UPDATE tournament SET chess_results_id = ? WHERE tournament_id = ?`,
 			crID, tournamentID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not link", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not link", err)
 			return
 		}
 		out, err := linkedResultsFor(c.db, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "linked but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "linked but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleUnlinkChessResults breaks the tie and gives the tournament its own
 // standings back. The external event stays tracked.
-func handleUnlinkChessResults(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleUnlinkChessResults(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
 		if _, err := c.db.Exec(`UPDATE tournament SET chess_results_id = NULL WHERE tournament_id = ?`,
-			r.PathValue("id")); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+			ctx.Param("id")); err != nil {
+			httpx.Error(ctx, http.StatusInternalServerError, "could not unlink", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 	}
 }
 
@@ -303,26 +305,26 @@ func handleUnlinkChessResults(c *chessResultsDeps) http.HandlerFunc {
 // Staff-only and throttled by the same per-tournament floor as every other
 // fetch: the button exists so the desk can pull a round in without waiting for
 // the timer, not so it can be held down.
-func handleRefreshTournamentResults(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleRefreshTournamentResults(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		var crID sql.NullInt64
 		if err := c.db.QueryRow(`SELECT chess_results_id FROM tournament WHERE tournament_id = ?`,
 			tournamentID).Scan(&crID); err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 		if !crID.Valid {
-			httpx.Error(w, http.StatusBadRequest, "this tournament is not linked to chess-results.com", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "this tournament is not linked to chess-results.com", nil)
 			return
 		}
 		var extID string
 		if err := c.db.QueryRow(`SELECT external_tournament_id FROM external_tournament
 		                         WHERE chess_results_id = ?`, crID.Int64).Scan(&extID); err != nil {
-			httpx.Error(w, http.StatusNotFound, "that event is no longer tracked", err)
+			httpx.Error(ctx, http.StatusNotFound, "that event is no longer tracked", err)
 			return
 		}
 		// refreshExternal claims the politeness floor itself — claiming it here
@@ -330,20 +332,20 @@ func handleRefreshTournamentResults(c *chessResultsDeps) http.HandlerFunc {
 		// the day it shipped. The floor belongs in exactly one place.
 		if err := c.refreshExternal(extID, int(crID.Int64)); err != nil {
 			if errors.Is(err, errExternalThrottled) {
-				httpx.Error(w, http.StatusTooManyRequests,
+				httpx.Error(ctx, http.StatusTooManyRequests,
 					"that tournament was fetched moments ago, try again shortly", nil)
 				return
 			}
 			log.Printf("chessresults: refreshing %d: %v", crID.Int64, err)
-			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read just now", err)
+			httpx.Error(ctx, http.StatusBadGateway, "chess-results.com could not be read just now", err)
 			return
 		}
 		out, err := linkedResultsFor(c.db, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "refreshed but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "refreshed but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
@@ -355,7 +357,7 @@ func handleRefreshTournamentResults(c *chessResultsDeps) http.HandlerFunc {
 // be a way to end up linked to an event whose standings nobody ever fetches.
 //
 // Reports its own HTTP errors and returns false when it has; the caller stops.
-func (c *chessResultsDeps) trackEvent(w http.ResponseWriter, crID int, byUser string) bool {
+func (c *chessResultsDeps) trackEvent(ctx *gin.Context, crID int, byUser string) bool {
 	var extID string
 	err := c.db.QueryRow(`SELECT external_tournament_id FROM external_tournament
 	                      WHERE chess_results_id = ?`, crID).Scan(&extID)
@@ -363,18 +365,18 @@ func (c *chessResultsDeps) trackEvent(w http.ResponseWriter, crID int, byUser st
 		return true // already tracked, the ordinary case for the second group
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		httpx.Error(w, http.StatusInternalServerError, "could not check", err)
+		httpx.Error(ctx, http.StatusInternalServerError, "could not check", err)
 		return false
 	}
 	if !c.allowFetch(crID) {
-		httpx.Error(w, http.StatusTooManyRequests,
+		httpx.Error(ctx, http.StatusTooManyRequests,
 			"that tournament was fetched moments ago, try again shortly", nil)
 		return false
 	}
 	t, ferr := c.client.Fetch(crID)
 	if ferr != nil {
 		log.Printf("chessresults: fetching %d: %v", crID, ferr)
-		httpx.Error(w, http.StatusBadGateway,
+		httpx.Error(ctx, http.StatusBadGateway,
 			"chess-results.com could not be read — check the link, or try again shortly", ferr)
 		return false
 	}
@@ -382,11 +384,11 @@ func (c *chessResultsDeps) trackEvent(w http.ResponseWriter, crID int, byUser st
 	if _, err := c.db.Exec(`INSERT INTO external_tournament
 	                        (external_tournament_id, chess_results_id, name, created_by)
 	                        VALUES (?, ?, ?, ?)`, extID, crID, t.Name, byUser); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "could not save", err)
+		httpx.Error(ctx, http.StatusInternalServerError, "could not save", err)
 		return false
 	}
 	if err := c.storeExternal(extID, t); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
+		httpx.Error(ctx, http.StatusInternalServerError, "could not save the standings", err)
 		return false
 	}
 	if err := c.syncRounds(extID, t); err != nil {
@@ -396,44 +398,44 @@ func (c *chessResultsDeps) trackEvent(w http.ResponseWriter, crID int, byUser st
 }
 
 // handleGetCategoryLink serves one age group's linked standings.
-func handleGetCategoryLink(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleGetCategoryLink(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
-		out, err := linkedResultsForCategory(c.db, r.PathValue("categoryId"))
+		out, err := linkedResultsForCategory(c.db, ctx.Param("categoryId"))
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if out == nil {
-			httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleLinkCategory points one age group at its own chess-results event.
-func handleLinkCategory(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireStaff(c.db, w, r)
+func handleLinkCategory(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireStaff(c.db, ctx)
 		if id == nil {
 			return
 		}
-		categoryID := r.PathValue("categoryId")
+		categoryID := ctx.Param("categoryId")
 		var exists int
 		if err := c.db.QueryRow(`SELECT COUNT(*) FROM tournament_category
 		                         WHERE tournament_category_id = ?`, categoryID).Scan(&exists); err != nil || exists == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", err)
+			httpx.Error(ctx, http.StatusNotFound, "not found", err)
 			return
 		}
 
 		var in struct {
 			URL string `json:"url"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "a chess-results.com link is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "a chess-results.com link is required", err)
 			return
 		}
 		// ParseRef also refuses any host that is not chess-results.com, which is
@@ -441,39 +443,39 @@ func handleLinkCategory(c *chessResultsDeps) http.HandlerFunc {
 		// caller's choosing.
 		crID, err := chessresults.ParseRef(in.URL)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest,
+			httpx.Error(ctx, http.StatusBadRequest,
 				"that does not look like a chess-results.com tournament link", nil)
 			return
 		}
-		if !c.trackEvent(w, crID, id.UserAccountID) {
+		if !c.trackEvent(ctx, crID, id.UserAccountID) {
 			return
 		}
 		if _, err := c.db.Exec(`UPDATE tournament_category SET chess_results_id = ?
 		                        WHERE tournament_category_id = ?`, crID, categoryID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not link", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not link", err)
 			return
 		}
 		out, err := linkedResultsForCategory(c.db, categoryID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "linked but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "linked but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleUnlinkCategory breaks one group's tie. The event stays tracked.
-func handleUnlinkCategory(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(c.db, w, r) == nil {
+func handleUnlinkCategory(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(c.db, ctx) == nil {
 			return
 		}
 		if _, err := c.db.Exec(`UPDATE tournament_category SET chess_results_id = NULL
-		                        WHERE tournament_category_id = ?`, r.PathValue("categoryId")); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not unlink", err)
+		                        WHERE tournament_category_id = ?`, ctx.Param("categoryId")); err != nil {
+			httpx.Error(ctx, http.StatusInternalServerError, "could not unlink", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"linked": false})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"linked": false})
 	}
 }
 

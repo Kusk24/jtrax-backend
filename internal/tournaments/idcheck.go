@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -42,36 +44,36 @@ type idCheck struct {
 // readIDCard reads the card in the request's "image" field and returns what
 // was on it. It writes the error reply itself and returns nil when it fails.
 // The image is never written anywhere.
-func readIDCard(d *sql.DB, provider ocr.Provider, w http.ResponseWriter, r *http.Request) *ocr.IDCard {
+func readIDCard(d *sql.DB, provider ocr.Provider, ctx *gin.Context) *ocr.IDCard {
 	provider = forms.ScannerFor(d, provider)
 	reader, ok := provider.(ocr.IDCardReader)
 	if provider == nil || !ok {
-		forms.ScanFailed(w, http.StatusServiceUnavailable,
+		forms.ScanFailed(ctx, http.StatusServiceUnavailable,
 			"ID card reading is not available right now — please try again later", "not_configured", 0, nil)
 		return nil
 	}
 
 	// Cap what can be read before parsing, not after.
-	r.Body = http.MaxBytesReader(w, r.Body, forms.MaxScanBytes)
-	if err := r.ParseMultipartForm(forms.MaxScanBytes); err != nil {
-		forms.ScanFailed(w, http.StatusRequestEntityTooLarge, "image is too large (10 MB maximum)", "too_large", 0, err)
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, forms.MaxScanBytes)
+	if err := ctx.Request.ParseMultipartForm(forms.MaxScanBytes); err != nil {
+		forms.ScanFailed(ctx, http.StatusRequestEntityTooLarge, "image is too large (10 MB maximum)", "too_large", 0, err)
 		return nil
 	}
-	defer r.MultipartForm.RemoveAll()
+	defer ctx.Request.MultipartForm.RemoveAll()
 
-	file, _, err := r.FormFile("image")
+	file, _, err := ctx.Request.FormFile("image")
 	if err != nil {
-		forms.ScanFailed(w, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
+		forms.ScanFailed(ctx, http.StatusBadRequest, "expected an image field named 'image'", "no_image", 0, err)
 		return nil
 	}
 	defer file.Close()
 	data, err := io.ReadAll(file)
 	if err != nil {
-		forms.ScanFailed(w, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
+		forms.ScanFailed(ctx, http.StatusBadRequest, "could not read the uploaded image", "no_image", 0, err)
 		return nil
 	}
 	if len(data) == 0 {
-		forms.ScanFailed(w, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
+		forms.ScanFailed(ctx, http.StatusBadRequest, "the uploaded image is empty", "no_image", 0, nil)
 		return nil
 	}
 	// Sniff the bytes rather than trust the declared type: the browser's
@@ -79,23 +81,23 @@ func readIDCard(d *sql.DB, provider ocr.Provider, w http.ResponseWriter, r *http
 	// a third party.
 	mime := forms.SniffImage(data)
 	if !forms.ScannableTypes[mime] {
-		forms.ScanFailed(w, http.StatusUnsupportedMediaType,
+		forms.ScanFailed(ctx, http.StatusUnsupportedMediaType,
 			"upload a photo of the card (JPEG, PNG, WebP or HEIC)", "not_an_image", 0, nil)
 		return nil
 	}
 
-	card, err := reader.ExtractIDCard(r.Context(), data, mime)
+	card, err := reader.ExtractIDCard(ctx.Request.Context(), data, mime)
 	if err != nil {
 		// The provider's error can quote the request, which is the child's
 		// identity document, so it stays internal: the reply names only the
 		// kind of failure and the provider's status.
-		forms.ProviderFailed(w, "card", err)
+		forms.ProviderFailed(ctx, "card", err)
 		return nil
 	}
 	if _, err := time.Parse("2006-01-02", strings.TrimSpace(card.DateOfBirth.Value)); err != nil {
 		// The date of birth is what the check is for; a card read without
 		// one has verified nothing.
-		forms.ScanFailed(w, http.StatusUnprocessableEntity,
+		forms.ScanFailed(ctx, http.StatusUnprocessableEntity,
 			"could not read the date of birth — try a clearer, straighter photo", "no_date_of_birth", 0, nil)
 		return nil
 	}
@@ -213,44 +215,44 @@ func ageAt(dob, on string) int {
 // handleParentScanIDCard reads one of the caller's children's ID card for a
 // tournament they are about to enter. Parents only; the child must be theirs
 // and the tournament live.
-func handleParentScanIDCard(d *sql.DB, provider ocr.Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleParentScanIDCard(d *sql.DB, provider ocr.Provider) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if id.Role != "Parent" {
-			httpx.Error(w, http.StatusForbidden, "only a parent may enter their child", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only a parent may enter their child", nil)
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		/* No card is read for a tournament that is not taking entries. */
 		if msg, err := entryClosed(d, tournamentID); err != nil {
-			httpx.Error(w, http.StatusNotFound, "no such tournament", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such tournament", nil)
 			return
 		} else if msg != "" {
-			httpx.Error(w, http.StatusConflict, msg, nil)
+			httpx.Error(ctx, http.StatusConflict, msg, nil)
 			return
 		}
 		var n int
 		// Read before the image so the form field is there to check; the
 		// multipart parse happens inside readIDCard, so peek at the query
 		// string instead.
-		studentID := strings.TrimSpace(r.URL.Query().Get("student_id"))
+		studentID := strings.TrimSpace(ctx.Query("student_id"))
 		if err := d.QueryRow(`SELECT COUNT(*) FROM student_parent WHERE parent_id = ? AND student_id = ?`,
 			id.ParentID, studentID).Scan(&n); err != nil || n == 0 {
-			httpx.Error(w, http.StatusNotFound, "no such child", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no such child", nil)
 			return
 		}
-		card := readIDCard(d, provider, w, r)
+		card := readIDCard(d, provider, ctx)
 		if card == nil {
 			return
 		}
 		checkID, err := saveIDCheck(d, tournamentID, studentID, card)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the ID card check", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the ID card check", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"fields": card, "checkId": checkID})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"fields": card, "checkId": checkID})
 	}
 }

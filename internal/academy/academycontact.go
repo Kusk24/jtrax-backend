@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 )
@@ -28,26 +30,26 @@ var academyContactKeys = map[string]string{
 	"address":   "academy_address",
 }
 
-func handleAcademyContact(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func handleAcademyContact(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
 		out := map[string]string{}
 		for field, key := range academyContactKeys {
 			var v string
 			err := d.QueryRow(`SELECT config_value FROM system_configuration WHERE config_key = ?`, key).Scan(&v)
 			if err != nil && err != sql.ErrNoRows {
-				httpx.Error(w, http.StatusInternalServerError, "could not load contact details", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load contact details", err)
 				return
 			}
 			if v != "" {
 				out[field] = v
 			}
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
-func MountAcademyContact(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/public/academy", httpx.RateLimit(120, handleAcademyContact(d)))
+func MountAcademyContact(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/public/academy", httpx.RateLimit(120), handleAcademyContact(d))
 }
 
 // AcademyContact is what the office saved in Settings → Academy Contact, for

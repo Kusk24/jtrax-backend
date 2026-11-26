@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/game"
@@ -47,20 +49,20 @@ type playerResult struct {
 //
 // Two ways to match, deliberately different in shape: an exact student id
 // returns exactly that pupil, and a name fragment returns everyone it matches.
-func handleSearchPlayers(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleSearchPlayers(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !canPlay(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only students and teachers can search for an opponent", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only students and teachers can search for an opponent", nil)
 			return
 		}
-		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		q := strings.TrimSpace(ctx.Query("q"))
 		if len([]rune(q)) < minSearchLen {
 			// Not an error: an empty box is the normal state of a search screen.
-			httpx.JSON(w, http.StatusOK, map[string]any{"players": []playerResult{}})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"players": []playerResult{}})
 			return
 		}
 
@@ -81,7 +83,7 @@ func handleSearchPlayers(d *sql.DB) http.HandlerFunc {
 			LIMIT ?`,
 			id.UserAccountID, q, "%"+strings.ToLower(q)+"%", q, searchLimit)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not search", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not search", err)
 			return
 		}
 		defer rows.Close()
@@ -90,16 +92,16 @@ func handleSearchPlayers(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var p playerResult
 			if err := rows.Scan(&p.StudentID, &p.Name, &p.CanPlayRated); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not search", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not search", err)
 				return
 			}
 			out = append(out, p)
 		}
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not search", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not search", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"players": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"players": out})
 	}
 }
 
@@ -125,14 +127,14 @@ type challengeView struct {
 // handleListChallenges returns the caller's live invitations, both directions,
 // the games they led to that are still being played, and — for the challenger
 // only — a decline they have not dismissed yet.
-func handleListChallenges(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleListChallenges(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !canPlay(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		rows, err := d.Query(`
@@ -168,7 +170,7 @@ func handleListChallenges(d *sql.DB) http.HandlerFunc {
 			ORDER BY c.created_at DESC
 			LIMIT 50`, id.UserAccountID, id.UserAccountID, id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load challenges", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load challenges", err)
 			return
 		}
 		defer rows.Close()
@@ -181,7 +183,7 @@ func handleListChallenges(d *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(&c.ID, &from, &to, &c.Status, &c.Rated,
 				&c.ClockLimit, &c.ClockIncrement, &c.GameRoomID, &c.CreatedAt,
 				&fromName, &fromSid, &toName, &toSid, &fromRated, &toRated); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load challenges", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load challenges", err)
 				return
 			}
 			if from == id.UserAccountID {
@@ -193,22 +195,22 @@ func handleListChallenges(d *sql.DB) http.HandlerFunc {
 			out = append(out, c)
 		}
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load challenges", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load challenges", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"challenges": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"challenges": out})
 	}
 }
 
 // handleCreateChallenge invites one player to a game.
-func handleCreateChallenge(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleCreateChallenge(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !canPlay(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only students and teachers can send a challenge", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only students and teachers can send a challenge", nil)
 			return
 		}
 		var in struct {
@@ -217,13 +219,13 @@ func handleCreateChallenge(d *sql.DB) http.HandlerFunc {
 			ClockLimit     int    `json:"clockLimit"`
 			ClockIncrement int    `json:"clockIncrement"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		limit, increment, err := lichessClock(in.ClockLimit, in.ClockIncrement)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 
@@ -232,15 +234,15 @@ func handleCreateChallenge(d *sql.DB) http.HandlerFunc {
 		                  JOIN user_account u ON u.user_account_id = s.user_account_id
 		                  WHERE s.student_id = ?`, strings.TrimSpace(in.StudentID)).Scan(&toAccount)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "no player with that id", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no player with that id", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not send the challenge", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not send the challenge", err)
 			return
 		}
 		if toAccount == id.UserAccountID {
-			httpx.Error(w, http.StatusBadRequest, "you cannot challenge yourself", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "you cannot challenge yourself", nil)
 			return
 		}
 
@@ -257,13 +259,13 @@ func handleCreateChallenge(d *sql.DB) http.HandlerFunc {
 			// The partial unique index is the last word: re-sending is answered
 			// as a conflict rather than filling somebody's inbox with copies.
 			if db.IsUniqueViolation(err) {
-				httpx.Error(w, http.StatusConflict, "you have already challenged this player", nil)
+				httpx.Error(ctx, http.StatusConflict, "you have already challenged this player", nil)
 				return
 			}
-			httpx.Error(w, http.StatusInternalServerError, "could not send the challenge", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not send the challenge", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{
 			"challengeId": challengeID, "status": "Pending",
 		})
 	}
@@ -274,21 +276,21 @@ func handleCreateChallenge(d *sql.DB) http.HandlerFunc {
 // Accepting is the interesting half: it mints a room and seats both players in
 // the same transaction, so a challenge can never be Accepted with no room, nor
 // a room exist that nobody agreed to.
-func handleRespondToChallenge(d *sql.DB, relay *lichessRelay, accept bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleRespondToChallenge(d *sql.DB, relay *lichessRelay, accept bool) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !canPlay(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		challengeID := r.PathValue("id")
+		challengeID := ctx.Param("id")
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not respond", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not respond", err)
 			return
 		}
 		defer tx.Rollback()
@@ -302,25 +304,25 @@ func handleRespondToChallenge(d *sql.DB, relay *lichessRelay, accept bool) http.
 		                   WHERE game_challenge_id = ? AND to_account_id = ? AND status = 'Pending'`,
 			challengeID, id.UserAccountID).Scan(&from, &to, &rated, &limit, &increment)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "that challenge is no longer waiting for you", nil)
+			httpx.Error(ctx, http.StatusNotFound, "that challenge is no longer waiting for you", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not respond", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not respond", err)
 			return
 		}
 
 		if !accept {
 			if _, err := tx.Exec(`UPDATE game_challenge SET status = 'Declined', responded_at = ?
 			                      WHERE game_challenge_id = ?`, db.SQLiteNow(), challengeID); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not decline", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not decline", err)
 				return
 			}
 			if err := tx.Commit(); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not decline", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not decline", err)
 				return
 			}
-			httpx.JSON(w, http.StatusOK, map[string]any{"status": "Declined"})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"status": "Declined"})
 			return
 		}
 
@@ -333,17 +335,17 @@ func handleRespondToChallenge(d *sql.DB, relay *lichessRelay, accept bool) http.
 			Label: "",
 		})
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not create the game", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not create the game", err)
 			return
 		}
 		if _, err := tx.Exec(`UPDATE game_challenge
 			SET status = 'Accepted', responded_at = ?, game_room_id = ?
 			WHERE game_challenge_id = ?`, db.SQLiteNow(), roomID, challengeID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not accept", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not accept", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not accept", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not accept", err)
 			return
 		}
 		// Both seats were filled by the accept itself, so nothing else will
@@ -353,53 +355,53 @@ func handleRespondToChallenge(d *sql.DB, relay *lichessRelay, accept bool) http.
 		if rated == 1 {
 			relay.begin(roomID)
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"status": "Accepted", "gameRoomId": roomID})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"status": "Accepted", "gameRoomId": roomID})
 	}
 }
 
 // handleCancelChallenge withdraws one the caller sent.
-func handleCancelChallenge(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleCancelChallenge(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		res, err := d.Exec(`UPDATE game_challenge SET status = 'Cancelled', responded_at = ?
 		                    WHERE game_challenge_id = ? AND from_account_id = ? AND status = 'Pending'`,
-			db.SQLiteNow(), r.PathValue("id"), id.UserAccountID)
+			db.SQLiteNow(), ctx.Param("id"), id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not cancel", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not cancel", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "that challenge is no longer yours to cancel", nil)
+			httpx.Error(ctx, http.StatusNotFound, "that challenge is no longer yours to cancel", nil)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"status": "Cancelled"})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"status": "Cancelled"})
 	}
 }
 
 // handleDismissDecline clears a declined challenge from the challenger's list
 // once they have seen it.
-func handleDismissDecline(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleDismissDecline(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		res, err := d.Exec(`UPDATE game_challenge SET decline_seen_at = ?
 		                    WHERE game_challenge_id = ? AND from_account_id = ?
 		                      AND status = 'Declined' AND decline_seen_at IS NULL`,
-			db.SQLiteNow(), r.PathValue("id"), id.UserAccountID)
+			db.SQLiteNow(), ctx.Param("id"), id.UserAccountID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not dismiss", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not dismiss", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "there is no decline of yours to dismiss", nil)
+			httpx.Error(ctx, http.StatusNotFound, "there is no decline of yours to dismiss", nil)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"status": "Declined"})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"status": "Declined"})
 	}
 }
 
@@ -479,16 +481,16 @@ func startedAt(white, black string) any {
 	return nil
 }
 
-func mountChallenges(mux httpx.RouteRegistrar, d *sql.DB, relay *lichessRelay) {
+func mountChallenges(mux gin.IRoutes, d *sql.DB, relay *lichessRelay) {
 	// Searching names other children, so it needs a session and a budget: it is
 	// the one read here that could be used to walk the roster.
-	mux.HandleFunc("GET /api/v1/players/search", httpx.RateLimit(60, handleSearchPlayers(d)))
+	mux.GET("/api/v1/players/search", httpx.RateLimit(60), handleSearchPlayers(d))
 
 	const p = "/api/v1/challenges"
-	mux.HandleFunc("GET "+p, handleListChallenges(d))
-	mux.HandleFunc("POST "+p, httpx.RateLimit(20, handleCreateChallenge(d)))
-	mux.HandleFunc("POST "+p+"/{id}/accept", handleRespondToChallenge(d, relay, true))
-	mux.HandleFunc("POST "+p+"/{id}/decline", handleRespondToChallenge(d, relay, false))
-	mux.HandleFunc("POST "+p+"/{id}/dismiss", handleDismissDecline(d))
-	mux.HandleFunc("DELETE "+p+"/{id}", handleCancelChallenge(d))
+	mux.GET(p, handleListChallenges(d))
+	mux.POST(p, httpx.RateLimit(20), handleCreateChallenge(d))
+	mux.POST(p+"/:id/accept", handleRespondToChallenge(d, relay, true))
+	mux.POST(p+"/:id/decline", handleRespondToChallenge(d, relay, false))
+	mux.POST(p+"/:id/dismiss", handleDismissDecline(d))
+	mux.DELETE(p+"/:id", handleCancelChallenge(d))
 }

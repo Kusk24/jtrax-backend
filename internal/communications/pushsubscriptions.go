@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -23,26 +25,26 @@ type pushInput struct {
 	UserAgent string `json:"user_agent"`
 }
 
-func handleRegisterPush(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleRegisterPush(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		var in pushInput
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		if (in.Channel != notify.ChannelWebPush && in.Channel != notify.ChannelMobile) || in.Endpoint == "" {
-			httpx.Error(w, http.StatusBadRequest, "channel must be webpush or mobile, with an endpoint", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "channel must be webpush or mobile, with an endpoint", nil)
 			return
 		}
 		// A phone registers an Expo push token and nothing else: that is the
 		// only kind the sender can deliver to, and the column is not a place
 		// to park whatever a client sends.
 		if in.Channel == notify.ChannelMobile && (len(in.Endpoint) > 512 || !push.IsExpoToken(in.Endpoint)) {
-			httpx.Error(w, http.StatusBadRequest, "that is not a push token this server can use", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that is not a push token this server can use", nil)
 			return
 		}
 		// A browser's endpoint is a URL this server will POST to, so it has to
@@ -50,7 +52,7 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 		// — and come with the two keys a message is encrypted with.
 		if in.Channel == notify.ChannelWebPush &&
 			(len(in.Endpoint) > 2048 || !webpush.AllowedEndpoint(in.Endpoint) || !keyOfLength(in.P256dh, 65) || !keyOfLength(in.Auth, 16)) {
-			httpx.Error(w, http.StatusBadRequest, "that is not a browser subscription this server can use", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that is not a browser subscription this server can use", nil)
 			return
 		}
 		// endpoint is UNIQUE: the same browser re-registering updates its owner
@@ -65,10 +67,10 @@ func handleRegisterPush(d *sql.DB) http.HandlerFunc {
 			   channel = excluded.channel, p256dh = excluded.p256dh, auth = excluded.auth,
 			   user_agent = excluded.user_agent, last_seen_at = datetime('now'), failed_at = NULL`,
 			db.NewID("psb"), id.UserAccountID, in.Channel, in.Endpoint, db.Nullable(in.P256dh), db.Nullable(in.Auth), db.Nullable(in.UserAgent)); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not register", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, map[string]any{"registered": true})
+		httpx.JSON(ctx, http.StatusCreated, map[string]any{"registered": true})
 	}
 }
 
@@ -82,37 +84,37 @@ func keyOfLength(s string, n int) bool {
 // handleWebPushKey hands a signed-in browser the public key it subscribes
 // with. 404 while browser push is not set up, so the portal can leave the
 // switch out rather than offer one that cannot work.
-func handleWebPushKey(d *sql.DB, key string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireIdentity(d, w, r) == nil {
+func handleWebPushKey(d *sql.DB, key string) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireIdentity(d, ctx) == nil {
 			return
 		}
 		if key == "" {
-			httpx.Error(w, http.StatusNotFound, "browser notifications are not set up", nil)
+			httpx.Error(ctx, http.StatusNotFound, "browser notifications are not set up", nil)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"publicKey": key})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"publicKey": key})
 	}
 }
 
-func handleUnregisterPush(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleUnregisterPush(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		var in pushInput
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		// Scoped to the caller: you can only remove your own endpoint.
 		if _, err := d.Exec(
 			`DELETE FROM push_subscription WHERE endpoint = ? AND user_account_id = ?`,
 			in.Endpoint, id.UserAccountID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not unregister", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not unregister", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"unregistered": true})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"unregistered": true})
 	}
 }

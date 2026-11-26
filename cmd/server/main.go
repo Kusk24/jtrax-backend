@@ -64,7 +64,7 @@ func main() {
 	if origins[0] == "" {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
 	}
-	handler := httpx.CORS(origins, api.NewHandler(d))
+	handler := api.NewHandler(d, httpx.CORS(origins))
 	// An unpaid entry's early-bird price and place lapse on their dates
 	// (internal/tournaments/entryrules.go); this applies them through the day.
 	tournaments.StartEntrySweeper(context.Background(), d)

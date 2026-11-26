@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/chessresults"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -348,26 +350,26 @@ func (c *chessResultsDeps) storeRound(extID string, r *chessresults.Round, playe
 // handleTrackExternal starts tracking a tournament. Staff only: each track
 // costs outbound requests to a third party, and deciding what the academy
 // follows is a front-desk call.
-func handleTrackExternal(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(c.db, w, r)
+func handleTrackExternal(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(c.db, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		var in struct {
 			URL string `json:"url"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "a chess-results.com link is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "a chess-results.com link is required", err)
 			return
 		}
 		crID, err := chessresults.ParseRef(in.URL)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "that does not look like a chess-results.com tournament link", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "that does not look like a chess-results.com tournament link", nil)
 			return
 		}
 
@@ -380,36 +382,36 @@ func handleTrackExternal(c *chessResultsDeps) http.HandlerFunc {
 		if err == nil {
 			view, verr := loadExternal(c.db, existing)
 			if verr != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load", verr)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load", verr)
 				return
 			}
-			httpx.JSON(w, http.StatusOK, view)
+			httpx.JSON(ctx, http.StatusOK, view)
 			return
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusInternalServerError, "could not check", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not check", err)
 			return
 		}
 
 		if !c.allowFetch(crID) {
-			httpx.Error(w, http.StatusTooManyRequests, "that tournament was fetched moments ago, try again shortly", nil)
+			httpx.Error(ctx, http.StatusTooManyRequests, "that tournament was fetched moments ago, try again shortly", nil)
 			return
 		}
 		t, err := c.client.Fetch(crID)
 		if err != nil {
 			log.Printf("chessresults: fetching %d: %v", crID, err)
-			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read — check the link, or try again shortly", err)
+			httpx.Error(ctx, http.StatusBadGateway, "chess-results.com could not be read — check the link, or try again shortly", err)
 			return
 		}
 
 		extID := db.NewID("ext")
 		if _, err := c.db.Exec(`INSERT INTO external_tournament (external_tournament_id, chess_results_id, name, created_by)
 		                        VALUES (?, ?, ?, ?)`, extID, crID, t.Name, id.UserAccountID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save", err)
 			return
 		}
 		if err := c.storeExternal(extID, t); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not save the standings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not save the standings", err)
 			return
 		}
 		if err := c.syncRounds(extID, t); err != nil {
@@ -417,10 +419,10 @@ func handleTrackExternal(c *chessResultsDeps) http.HandlerFunc {
 		}
 		view, err := loadExternal(c.db, extID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "saved but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "saved but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, view)
+		httpx.JSON(ctx, http.StatusCreated, view)
 	}
 }
 
@@ -447,9 +449,9 @@ func loadExternal(d *sql.DB, extID string) (*externalTournament, error) {
 // handleListExternal lists tracked tournaments. Any signed-in user: the data
 // is already public on chess-results.com, and a parent following their child's
 // event is the audience.
-func handleListExternal(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireIdentity(c.db, w, r) == nil {
+func handleListExternal(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireIdentity(c.db, ctx) == nil {
 			return
 		}
 		// Ids first, rows closed, *then* the per-tournament loads. The local
@@ -462,21 +464,21 @@ func handleListExternal(c *chessResultsDeps) http.HandlerFunc {
 		rows, err := c.db.Query(`SELECT external_tournament_id FROM external_tournament
 		                         ORDER BY created_at DESC, external_tournament_id DESC`)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 				return
 			}
 			ids = append(ids, id)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 
@@ -484,30 +486,30 @@ func handleListExternal(c *chessResultsDeps) http.HandlerFunc {
 		for _, id := range ids {
 			v, err := loadExternal(c.db, id)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 				return
 			}
 			out = append(out, *v)
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleGetExternal returns one tournament with its standings, refreshing the
 // copy first when it is stale and the event might still be moving.
-func handleGetExternal(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireIdentity(c.db, w, r) == nil {
+func handleGetExternal(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireIdentity(c.db, ctx) == nil {
 			return
 		}
-		extID := r.PathValue("id")
+		extID := ctx.Param("id")
 		view, err := loadExternal(c.db, extID)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 
@@ -526,15 +528,15 @@ func handleGetExternal(c *chessResultsDeps) http.HandlerFunc {
 
 		standings, err := loadExternalStandings(c.db, extID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load standings", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load standings", err)
 			return
 		}
 		rounds, err := loadExternalRounds(c.db, extID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load rounds", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load rounds", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"tournament": view, "standings": standings, "rounds": rounds})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"tournament": view, "standings": standings, "rounds": rounds})
 	}
 }
 
@@ -575,94 +577,94 @@ func loadExternalStandings(d *sql.DB, extID string) ([]externalStanding, error) 
 
 // handleRefreshExternal re-reads the source now. Staff only, and throttled:
 // this is the button that costs a third party requests.
-func handleRefreshExternal(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(c.db, w, r)
+func handleRefreshExternal(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(c.db, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		extID := r.PathValue("id")
+		extID := ctx.Param("id")
 		view, err := loadExternal(c.db, extID)
 		if errors.Is(err, sql.ErrNoRows) {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load", err)
 			return
 		}
 		if err := c.refreshExternal(extID, view.ChessResultsID); err != nil {
 			if errors.Is(err, errExternalThrottled) {
-				httpx.Error(w, http.StatusTooManyRequests, "refreshed moments ago — chess-results.com asks readers to go gently", nil)
+				httpx.Error(ctx, http.StatusTooManyRequests, "refreshed moments ago — chess-results.com asks readers to go gently", nil)
 				return
 			}
 			log.Printf("chessresults: refresh %d: %v", view.ChessResultsID, err)
-			httpx.Error(w, http.StatusBadGateway, "chess-results.com could not be read, the previous standings still stand", err)
+			httpx.Error(ctx, http.StatusBadGateway, "chess-results.com could not be read, the previous standings still stand", err)
 			return
 		}
 		fresh, err := loadExternal(c.db, extID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "refreshed but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "refreshed but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, fresh)
+		httpx.JSON(ctx, http.StatusOK, fresh)
 	}
 }
 
 // handleUntrackExternal stops following a tournament. Staff only. The copy is
 // deleted outright — the source of truth is still on chess-results.com, so
 // nothing of record is lost.
-func handleUntrackExternal(c *chessResultsDeps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(c.db, w, r)
+func handleUntrackExternal(c *chessResultsDeps) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(c.db, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
-		extID := r.PathValue("id")
+		extID := ctx.Param("id")
 		tx, err := c.db.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
 		defer tx.Rollback()
 		if _, err := tx.Exec(`DELETE FROM external_standing WHERE external_tournament_id = ?`, extID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
 		if _, err := tx.Exec(`DELETE FROM external_pairing WHERE external_tournament_id = ?`, extID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
 		if _, err := tx.Exec(`DELETE FROM external_round WHERE external_tournament_id = ?`, extID); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
 		res, err := tx.Exec(`DELETE FROM external_tournament WHERE external_tournament_id = ?`, extID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not delete", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not delete", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"deleted": true})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"deleted": true})
 	}
 }
 
-func mountChessResults(mux httpx.RouteRegistrar, d *sql.DB) *chessResultsDeps {
+func mountChessResults(mux gin.IRoutes, d *sql.DB) *chessResultsDeps {
 	client := chessresults.New()
 	if base := strings.TrimSpace(os.Getenv("CHESS_RESULTS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.
@@ -672,29 +674,29 @@ func mountChessResults(mux httpx.RouteRegistrar, d *sql.DB) *chessResultsDeps {
 	const p = "/api/v1/external-tournaments"
 	// Track carries a budget on top of the per-tournament floor: it is the one
 	// endpoint where a caller-chosen number becomes an outbound request.
-	mux.HandleFunc("POST "+p, httpx.RateLimit(10, handleTrackExternal(deps)))
-	mux.HandleFunc("GET "+p, handleListExternal(deps))
-	mux.HandleFunc("GET "+p+"/{id}", handleGetExternal(deps))
-	mux.HandleFunc("POST "+p+"/{id}/refresh", httpx.RateLimit(10, handleRefreshExternal(deps)))
-	mux.HandleFunc("DELETE "+p+"/{id}", handleUntrackExternal(deps))
+	mux.POST(p, httpx.RateLimit(10), handleTrackExternal(deps))
+	mux.GET(p, handleListExternal(deps))
+	mux.GET(p+"/:id", handleGetExternal(deps))
+	mux.POST(p+"/:id/refresh", httpx.RateLimit(10), handleRefreshExternal(deps))
+	mux.DELETE(p+"/:id", handleUntrackExternal(deps))
 
 	// Tying one of the academy's own tournaments to an event on that site.
 	// Mounted here so both share one client and one per-tournament fetch
 	// throttle — two throttles would be no throttle at all.
 	const t = "/api/v1/tournaments"
-	mux.HandleFunc("GET "+t+"/{id}/chess-results", handleGetChessResultsLink(deps))
-	mux.HandleFunc("POST "+t+"/{id}/chess-results", httpx.RateLimit(10, handleLinkChessResults(deps)))
-	mux.HandleFunc("DELETE "+t+"/{id}/chess-results", handleUnlinkChessResults(deps))
-	mux.HandleFunc("POST "+t+"/{id}/chess-results/refresh", httpx.RateLimit(10, handleRefreshTournamentResults(deps)))
+	mux.GET(t+"/:id/chess-results", handleGetChessResultsLink(deps))
+	mux.POST(t+"/:id/chess-results", httpx.RateLimit(10), handleLinkChessResults(deps))
+	mux.DELETE(t+"/:id/chess-results", handleUnlinkChessResults(deps))
+	mux.POST(t+"/:id/chess-results/refresh", httpx.RateLimit(10), handleRefreshTournamentResults(deps))
 
 	// Per age group. A chessfest runs OPEN, U18, U12, U10 and U08 on one day
 	// and the arbiter publishes each as its own event, so the group is what
 	// carries a link — see migration 0037. Mounted under /categories/ rather
 	// than nested beneath a tournament id: a category id is unique on its own,
 	// and a route carrying both would let the two disagree.
-	mux.HandleFunc("GET "+t+"/categories/{categoryId}/chess-results", handleGetCategoryLink(deps))
-	mux.HandleFunc("POST "+t+"/categories/{categoryId}/chess-results", httpx.RateLimit(10, handleLinkCategory(deps)))
-	mux.HandleFunc("DELETE "+t+"/categories/{categoryId}/chess-results", handleUnlinkCategory(deps))
+	mux.GET(t+"/categories/:categoryId/chess-results", handleGetCategoryLink(deps))
+	mux.POST(t+"/categories/:categoryId/chess-results", httpx.RateLimit(10), handleLinkCategory(deps))
+	mux.DELETE(t+"/categories/:categoryId/chess-results", handleUnlinkCategory(deps))
 
 	// One link for the whole event: its sections become the tournament's
 	// results categories (resultsections.go, migration 0051).

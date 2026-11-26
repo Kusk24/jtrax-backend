@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/game"
@@ -141,18 +143,18 @@ func gameCounts(d *sql.DB, studentID string) (played, won int, err error) {
 	return played + soloPlayed, won + soloWon, nil
 }
 
-func handleStudentProgress(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleStudentProgress(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		studentID, ok := studentOf(w, id)
+		studentID, ok := studentOf(ctx, id)
 		if !ok {
 			return
 		}
 		fail := func(err error) {
-			httpx.Error(w, http.StatusInternalServerError, "could not read progress", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not read progress", err)
 		}
 		var p progressView
 
@@ -240,10 +242,10 @@ func handleStudentProgress(d *sql.DB) http.HandlerFunc {
 		}
 		rows.Close()
 
-		httpx.JSON(w, http.StatusOK, p)
+		httpx.JSON(ctx, http.StatusOK, p)
 	}
 }
 
-func mountProgress(mux httpx.RouteRegistrar, d *sql.DB) {
-	mux.HandleFunc("GET /api/v1/student/progress", handleStudentProgress(d))
+func mountProgress(mux gin.IRoutes, d *sql.DB) {
+	mux.GET("/api/v1/student/progress", handleStudentProgress(d))
 }

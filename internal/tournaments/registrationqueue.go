@@ -16,6 +16,8 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
@@ -46,12 +48,12 @@ type queueEntry struct {
 // Everything is returned, not just the live ones: withdrawals and the rows a
 // previous build rejected are part of the answer, and the desk works from this
 // screen.
-func handleRegistrationQueue(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if accounts.RequireStaff(d, w, r) == nil {
+func handleRegistrationQueue(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if accounts.RequireStaff(d, ctx) == nil {
 			return
 		}
-		tournamentID := r.PathValue("id")
+		tournamentID := ctx.Param("id")
 		rows, err := d.Query(`
 			SELECT reg.tournament_registration_id, reg.participant_name,
 			       reg.contact_email, reg.contact_phone,
@@ -68,7 +70,7 @@ func handleRegistrationQueue(d *sql.DB) http.HandlerFunc {
 			ORDER BY CASE reg.status WHEN 'Pending' THEN 0 ELSE 1 END,
 			         reg.registered_at DESC`, tournamentID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load registrations", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load registrations", err)
 			return
 		}
 		defer rows.Close()
@@ -81,21 +83,21 @@ func handleRegistrationQueue(d *sql.DB) http.HandlerFunc {
 				&e.Category, &e.Status, &e.Source, &e.RegisteredAt,
 				&e.FeeQuoted, &e.FeeCharged, &claimed,
 				&e.MatchedStudentID, &e.MatchedStudentName); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not load registrations", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not load registrations", err)
 				return
 			}
 			e.ClaimedStudent = claimed == 1
 			out = append(out, e)
 		}
 		if err := rows.Err(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not load registrations", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not load registrations", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"registrations": out})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"registrations": out})
 	}
 }
 
-func mountRegistrationQueue(mux httpx.RouteRegistrar, d *sql.DB) {
+func mountRegistrationQueue(mux gin.IRoutes, d *sql.DB) {
 	const p = "/api/v1/tournaments"
-	mux.HandleFunc("GET "+p+"/{id}/registrations", handleRegistrationQueue(d))
+	mux.GET(p+"/:id/registrations", handleRegistrationQueue(d))
 }

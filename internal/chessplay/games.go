@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/game"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
@@ -30,14 +32,14 @@ func canPlay(role string) bool { return role == "Student" || role == "Teacher" }
 // student and the game opens already in play, the way an accepted challenge
 // does, and appears in both pupils' own game lists — nobody has to type a
 // code. Without them it is the old room: a code to read out, first two in.
-func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleCreateRoom(d *sql.DB, relay *lichessRelay) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "not allowed", nil)
+			httpx.Error(ctx, http.StatusForbidden, "not allowed", nil)
 			return
 		}
 		var in struct {
@@ -55,18 +57,18 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 			WhiteStudentID string `json:"whiteStudentId"`
 			BlackStudentID string `json:"blackStudentId"`
 		}
-		if err := httpx.Decode(r, &in); err != nil && err.Error() != "EOF" {
-			httpx.Error(w, http.StatusBadRequest, "invalid body", err)
+		if err := httpx.Decode(ctx, &in); err != nil && err.Error() != "EOF" {
+			httpx.Error(ctx, http.StatusBadRequest, "invalid body", err)
 			return
 		}
 		if len(in.Label) > 80 {
-			httpx.Error(w, http.StatusBadRequest, "label is too long", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "label is too long", nil)
 			return
 		}
 		timed := in.Rated || in.Timed
 		limit, increment, err := lichessClock(in.ClockLimit, in.ClockIncrement)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error(), nil)
+			httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 			return
 		}
 
@@ -75,11 +77,11 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 		var white, black string
 		if in.WhiteStudentID != "" || in.BlackStudentID != "" {
 			if in.WhiteStudentID == "" || in.BlackStudentID == "" {
-				httpx.Error(w, http.StatusBadRequest, "choose both players, or neither", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "choose both players, or neither", nil)
 				return
 			}
 			if in.WhiteStudentID == in.BlackStudentID {
-				httpx.Error(w, http.StatusBadRequest, "a student cannot play themselves", nil)
+				httpx.Error(ctx, http.StatusBadRequest, "a student cannot play themselves", nil)
 				return
 			}
 			for _, p := range []struct {
@@ -89,15 +91,15 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 				err := d.QueryRow(`SELECT COALESCE(user_account_id,'') FROM student
 				                   WHERE student_id = ?`, p.studentID).Scan(p.into)
 				if errors.Is(err, sql.ErrNoRows) {
-					httpx.Error(w, http.StatusBadRequest, "no such student", nil)
+					httpx.Error(ctx, http.StatusBadRequest, "no such student", nil)
 					return
 				}
 				if err != nil {
-					httpx.Error(w, http.StatusInternalServerError, "could not read student", err)
+					httpx.Error(ctx, http.StatusInternalServerError, "could not read student", err)
 					return
 				}
 				if *p.into == "" {
-					httpx.Error(w, http.StatusBadRequest, "that student has no sign-in yet", nil)
+					httpx.Error(ctx, http.StatusBadRequest, "that student has no sign-in yet", nil)
 					return
 				}
 			}
@@ -105,7 +107,7 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 
 		tx, err := d.Begin()
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not create room", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not create room", err)
 			return
 		}
 		defer tx.Rollback()
@@ -117,11 +119,11 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 			                       WHERE status IN ('Open','Active')
 			                         AND (white_account_id IN (?, ?) OR black_account_id IN (?, ?))`,
 				white, black, white, black).Scan(&seated); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not create room", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not create room", err)
 				return
 			}
 			if seated > 0 {
-				httpx.Error(w, http.StatusConflict, "that student is already in another game", nil)
+				httpx.Error(ctx, http.StatusConflict, "that student is already in another game", nil)
 				return
 			}
 		}
@@ -131,21 +133,21 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 			Rated: in.Rated, Timed: timed, ClockLimit: limit, ClockIncrement: increment,
 		})
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not create room", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not create room", err)
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not create room", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not create room", err)
 			return
 		}
 		// Seated but not started: the game — and on a rated one, the Lichess
 		// pairing — begins when both students press Enter.
 		room, err := loadRoom(d, roomID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "created but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "created but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusCreated, room.view(id))
+		httpx.JSON(ctx, http.StatusCreated, room.view(id))
 	}
 }
 
@@ -153,9 +155,9 @@ func handleCreateRoom(d *sql.DB, relay *lichessRelay) http.HandlerFunc {
 // boards for a player. The restriction is in the WHERE clause, not applied to
 // results afterwards, so a player's own list can never contain someone else's
 // room code.
-func handleListRooms(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleListRooms(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
@@ -164,14 +166,14 @@ func handleListRooms(d *sql.DB) http.HandlerFunc {
 		if !accounts.IsStaff(id.Role) {
 			q += " WHERE (r.white_account_id = ? OR r.black_account_id = ?)"
 			args = append(args, id.UserAccountID, id.UserAccountID)
-		} else if s := r.URL.Query().Get("status"); s != "" {
+		} else if s := ctx.Query("status"); s != "" {
 			q += " WHERE r.status = ?"
 			args = append(args, s)
 		}
 		q += " ORDER BY r.created_at DESC, r.game_room_id DESC"
 		rows, err := d.Query(q, args...)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		defer rows.Close()
@@ -179,22 +181,22 @@ func handleListRooms(d *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			room, err := scanRoom(rows)
 			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 				return
 			}
 			out = append(out, room.view(id))
 		}
 		if err := rows.Close(); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		// The console's wall of boards shows each game's moves, so it asks for
 		// them here rather than opening every room one by one.
-		if accounts.IsStaff(id.Role) && r.URL.Query().Get("moves") == "1" {
+		if accounts.IsStaff(id.Role) && ctx.Query("moves") == "1" {
 			for i := range out {
 				moves, _, err := roomMoves(d, out[i].ID)
 				if err != nil {
-					httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+					httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 					return
 				}
 				out[i].SANs = make([]string, len(moves))
@@ -206,43 +208,43 @@ func handleListRooms(d *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		httpx.JSON(w, http.StatusOK, out)
+		httpx.JSON(ctx, http.StatusOK, out)
 	}
 }
 
 // handleGetRoom returns one room with its full move list and, for a player, the
 // moves they may legally make.
-func handleGetRoom(d *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleGetRoom(d *sql.DB) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		room, err := loadRoom(d, r.PathValue("id"))
+		room, err := loadRoom(d, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		mySeat := room.seatOf(id.UserAccountID)
 		if !accounts.IsStaff(id.Role) && mySeat == "" {
 			// Same answer as a room that does not exist: a player probing ids
 			// should not be able to tell a real room from a missing one.
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		moves, ucis, err := roomMoves(d, room.ID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "query failed", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "query failed", err)
 			return
 		}
 		status, err := game.Describe(ucis)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not replay game", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not replay game", err)
 			return
 		}
 		v := room.view(id)
 		v.Turn = status.Turn
-		httpx.JSON(w, http.StatusOK, map[string]any{
+		httpx.JSON(ctx, http.StatusOK, map[string]any{
 			"room":       v,
 			"seat":       mySeat,
 			"moves":      moves,
@@ -256,31 +258,31 @@ func handleGetRoom(d *sql.DB) http.HandlerFunc {
 // The claim is a conditional UPDATE, not a read-then-write: two students
 // submitting the same code at the same instant both pass any check performed in
 // Go, so the free-seat test has to be the WHERE clause the database evaluates.
-func handleJoinRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleJoinRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !canPlay(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only students and teachers can take a seat", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only students and teachers can take a seat", nil)
 			return
 		}
 		var in struct {
 			Code string `json:"code"`
 		}
-		if err := httpx.Decode(r, &in); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "a room code is required", err)
+		if err := httpx.Decode(ctx, &in); err != nil {
+			httpx.Error(ctx, http.StatusBadRequest, "a room code is required", err)
 			return
 		}
 		code := strings.ToUpper(strings.TrimSpace(in.Code))
 		if code == "" {
-			httpx.Error(w, http.StatusBadRequest, "a room code is required", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "a room code is required", nil)
 			return
 		}
 		room, err := scanRoom(d.QueryRow(roomSelect+" WHERE r.code = ?", code))
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "no open room with that code", nil)
+			httpx.Error(ctx, http.StatusNotFound, "no open room with that code", nil)
 			return
 		}
 		// Rejoining is not joining: a player who reloaded the page keeps their
@@ -288,17 +290,17 @@ func handleJoinRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) http.Hand
 		// seated who types the code instead of pressing Enter has entered.
 		if s := room.seatOf(id.UserAccountID); s != "" {
 			if err := enterSeat(d, h, relay, room.ID, s); err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "could not enter the game", err)
+				httpx.Error(ctx, http.StatusInternalServerError, "could not enter the game", err)
 				return
 			}
 			if fresh, err := loadRoom(d, room.ID); err == nil {
 				room = fresh
 			}
-			httpx.JSON(w, http.StatusOK, map[string]any{"room": room.view(id), "seat": s})
+			httpx.JSON(ctx, http.StatusOK, map[string]any{"room": room.view(id), "seat": s})
 			return
 		}
 		if room.Status != "Open" {
-			httpx.Error(w, http.StatusConflict, "that room is no longer open", nil)
+			httpx.Error(ctx, http.StatusConflict, "that room is no longer open", nil)
 			return
 		}
 
@@ -327,11 +329,11 @@ func handleJoinRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) http.Hand
 			}
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not join room", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not join room", err)
 			return
 		}
 		if seatTaken == "" {
-			httpx.Error(w, http.StatusConflict, "that room already has two players", nil)
+			httpx.Error(ctx, http.StatusConflict, "that room already has two players", nil)
 			return
 		}
 		// The second seat is what starts the game, so it is also what pairs the
@@ -349,12 +351,12 @@ func handleJoinRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) http.Hand
 
 		fresh, err := loadRoom(d, room.ID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "joined but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "joined but could not reload", err)
 			return
 		}
 		// The opponent's board learns a player sat down without polling for it.
 		publishRoom(d, h, room.ID)
-		httpx.JSON(w, http.StatusOK, map[string]any{"room": fresh.view(id), "seat": seatTaken})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"room": fresh.view(id), "seat": seatTaken})
 	}
 }
 
@@ -395,73 +397,73 @@ func enterSeat(d *sql.DB, h *liveevents.Hub, relay *lichessRelay, roomID, seat s
 // handleEnterRoom is a seated player pressing Enter on a game the office set up
 // for them. The game is in play once both have; until then it waits, Open.
 // Pressing it again, or on a game already in play, is harmless.
-func handleEnterRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func handleEnterRoom(d *sql.DB, h *liveevents.Hub, relay *lichessRelay) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
-		room, err := loadRoom(d, r.PathValue("id"))
+		room, err := loadRoom(d, ctx.Param("id"))
 		if err != nil {
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		mySeat := room.seatOf(id.UserAccountID)
 		if mySeat == "" {
 			// Same answer as a room that does not exist.
-			httpx.Error(w, http.StatusNotFound, "not found", nil)
+			httpx.Error(ctx, http.StatusNotFound, "not found", nil)
 			return
 		}
 		if room.Status == "Finished" || room.Status == "Cancelled" {
-			httpx.Error(w, http.StatusConflict, "that game is over", nil)
+			httpx.Error(ctx, http.StatusConflict, "that game is over", nil)
 			return
 		}
 		if room.Stopped {
-			httpx.Error(w, http.StatusConflict, "that game is paused", nil)
+			httpx.Error(ctx, http.StatusConflict, "that game is paused", nil)
 			return
 		}
 		if err := enterSeat(d, h, relay, room.ID, mySeat); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not enter the game", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not enter the game", err)
 			return
 		}
 		fresh, err := loadRoom(d, room.ID)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "entered but could not reload", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "entered but could not reload", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"room": fresh.view(id), "seat": mySeat})
+		httpx.JSON(ctx, http.StatusOK, map[string]any{"room": fresh.view(id), "seat": mySeat})
 	}
 }
 
 // mountGameRooms returns the relay it built, so an accepted challenge can start
 // a rated game through the same one. Two relays would mean two watchers on the
 // same board and two sets of moves forwarded to Lichess.
-func mountGameRooms(mux httpx.RouteRegistrar, d *sql.DB) *lichessRelay {
+func mountGameRooms(mux gin.IRoutes, d *sql.DB) *lichessRelay {
 	h := liveevents.NewHub()
 	relay := newLichessRelay(d, h, lichessOAuthFromEnv(d))
 	// Rated games that were in play when this process last stopped still need
 	// watching; on the free tier a restart mid-lesson is routine.
 	relay.resume()
 	const base = "/api/v1/game-rooms"
-	mux.HandleFunc("GET "+base, handleListRooms(d))
-	mux.HandleFunc("POST "+base, handleCreateRoom(d, relay))
+	mux.GET(base, handleListRooms(d))
+	mux.POST(base, handleCreateRoom(d, relay))
 	// Joining is the one endpoint where a caller supplies a secret they might
 	// be guessing, so it carries a tighter budget than the rest.
-	mux.HandleFunc("POST "+base+"/join", httpx.RateLimit(20, handleJoinRoom(d, h, relay)))
-	mux.HandleFunc("GET "+base+"/{id}", handleGetRoom(d))
+	mux.POST(base+"/join", httpx.RateLimit(20), handleJoinRoom(d, h, relay))
+	mux.GET(base+"/:id", handleGetRoom(d))
 	// Cancel keeps DELETE /{id} — an older console sends it for "Stop this
 	// game", and a deploy window where that destroys a board is not a thing to
 	// invite. Throwing the record away is its own path.
-	mux.HandleFunc("DELETE "+base+"/{id}", handleCancelRoom(d, h, relay))
-	mux.HandleFunc("DELETE "+base+"/{id}/record", handleDeleteRoom(d, h, relay))
-	mux.HandleFunc("POST "+base+"/{id}/enter", handleEnterRoom(d, h, relay))
-	mux.HandleFunc("POST "+base+"/{id}/stop", handleStopRoom(d, h, relay))
-	mux.HandleFunc("POST "+base+"/{id}/resume", handleResumeRoom(d, h))
-	mux.HandleFunc("POST "+base+"/{id}/moves", handleMove(d, h, relay))
-	mux.HandleFunc("POST "+base+"/{id}/resign", handleResign(d, h, relay))
-	mux.HandleFunc("POST "+base+"/{id}/draw/offer", handleDraw(d, h, relay, "offer"))
-	mux.HandleFunc("POST "+base+"/{id}/draw/accept", handleDraw(d, h, relay, "accept"))
-	mux.HandleFunc("POST "+base+"/{id}/draw/decline", handleDraw(d, h, relay, "decline"))
-	mux.HandleFunc("GET "+base+"/{id}/events", handleRoomEvents(d, h))
+	mux.DELETE(base+"/:id", handleCancelRoom(d, h, relay))
+	mux.DELETE(base+"/:id/record", handleDeleteRoom(d, h, relay))
+	mux.POST(base+"/:id/enter", handleEnterRoom(d, h, relay))
+	mux.POST(base+"/:id/stop", handleStopRoom(d, h, relay))
+	mux.POST(base+"/:id/resume", handleResumeRoom(d, h))
+	mux.POST(base+"/:id/moves", handleMove(d, h, relay))
+	mux.POST(base+"/:id/resign", handleResign(d, h, relay))
+	mux.POST(base+"/:id/draw/offer", handleDraw(d, h, relay, "offer"))
+	mux.POST(base+"/:id/draw/accept", handleDraw(d, h, relay, "accept"))
+	mux.POST(base+"/:id/draw/decline", handleDraw(d, h, relay, "decline"))
+	mux.GET(base+"/:id/events", handleRoomEvents(d, h))
 	return relay
 }

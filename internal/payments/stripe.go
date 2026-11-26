@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/accounts"
 	"github.com/Kusk24/jtrax-backend/internal/db"
@@ -27,10 +29,10 @@ import (
 // so refuse here first with a message a person can act on.
 const minSatang = 1000
 
-func payPage(text string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte("<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
+func payPage(text string) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ctx.Header("Content-Type", "text/html; charset=utf-8")
+		_, _ = ctx.Writer.Write([]byte("<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
 			"<title>JCA Chess Academy</title>" +
 			"<body style=\"font-family:sans-serif;display:flex;min-height:90vh;align-items:center;justify-content:center;text-align:center;padding:24px\">" +
 			"<p style=\"font-size:19px;max-width:26em\">" + text + "</p>"))
@@ -53,21 +55,21 @@ func returnBase(cfg stripepay.Config) string {
 // at the desk's request. Who may ask is decided here; what the link is, and
 // whether one already exists, is `checkoutLink` — a parent paying their own
 // child's tournament fee reaches the same code by a different door.
-func HandleStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := accounts.RequireIdentity(d, w, r)
+func HandleStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id := accounts.RequireIdentity(d, ctx)
 		if id == nil {
 			return
 		}
 		if !accounts.IsStaff(id.Role) {
-			httpx.Error(w, http.StatusForbidden, "only admin or reception may create payment links", nil)
+			httpx.Error(ctx, http.StatusForbidden, "only admin or reception may create payment links", nil)
 			return
 		}
 		if client == nil {
-			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not configured", nil)
+			httpx.Error(ctx, http.StatusServiceUnavailable, "card payments are not configured", nil)
 			return
 		}
-		CheckoutLink(w, r, d, client, cfg, r.PathValue("id"))
+		CheckoutLink(ctx, d, client, cfg, ctx.Param("id"))
 	}
 }
 
@@ -78,7 +80,7 @@ func HandleStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay
 // It assumes the caller has already been allowed to pay this payment. It
 // decides nothing about authorization and must never be reached without that
 // check.
-func CheckoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config, paymentID string) {
+func CheckoutLink(ctx *gin.Context, d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config, paymentID string) {
 	var status, studentName, className, existingURL, existingSession string
 	var finalAmount float64
 	err := d.QueryRow(
@@ -87,31 +89,31 @@ func CheckoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client stri
 		   FROM payment WHERE payment_id = ?`, paymentID).
 		Scan(&status, &studentName, &className, &finalAmount, &existingURL, &existingSession)
 	if err == sql.ErrNoRows {
-		httpx.Error(w, http.StatusNotFound, "no such payment", nil)
+		httpx.Error(ctx, http.StatusNotFound, "no such payment", nil)
 		return
 	}
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "could not read payment", err)
+		httpx.Error(ctx, http.StatusInternalServerError, "could not read payment", err)
 		return
 	}
 	// Only money still owed gets a link. A Paid payment has nothing to
 	// collect and a Refunded one must never become chargeable again.
 	if status != "Pending" {
-		httpx.Error(w, http.StatusConflict, "only a pending payment can take a card link", nil)
+		httpx.Error(ctx, http.StatusConflict, "only a pending payment can take a card link", nil)
 		return
 	}
 	if existingURL != "" {
 		// A tournament page closes after half an hour; handing it back then
 		// would send the family to Stripe's "this page has expired".
-		s, err := client.GetCheckoutSession(r.Context(), existingSession)
+		s, err := client.GetCheckoutSession(ctx.Request.Context(), existingSession)
 		if err != nil || s.Status != "expired" {
-			httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
+			httpx.JSON(ctx, http.StatusOK, map[string]string{"url": existingURL})
 			return
 		}
 	}
 	satang := int64(math.Round(finalAmount * 100))
 	if satang < minSatang {
-		httpx.Error(w, http.StatusUnprocessableEntity, "amount is below the ฿10 card minimum", nil)
+		httpx.Error(ctx, http.StatusUnprocessableEntity, "amount is below the ฿10 card minimum", nil)
 		return
 	}
 
@@ -143,21 +145,21 @@ func CheckoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client stri
 	}
 	// Stripe replaces {CHECKOUT_SESSION_ID} itself, so the return page can
 	// settle the payment without waiting for the webhook.
-	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
+	session, err := client.CreateCheckoutSession(ctx.Request.Context(), paymentID, name, satang,
 		base+"/pay/done?session_id={CHECKOUT_SESSION_ID}", cancelled, email, expires)
 	if err != nil {
 		// The Stripe error names the account; the log gets it, the client
 		// does not.
-		httpx.Error(w, http.StatusBadGateway, "could not create the payment link", err)
+		httpx.Error(ctx, http.StatusBadGateway, "could not create the payment link", err)
 		return
 	}
 	if _, err := d.Exec(
 		`UPDATE payment SET stripe_session_id = ?, stripe_checkout_url = ? WHERE payment_id = ?`,
 		session.ID, session.URL, paymentID); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "could not store the payment link", err)
+		httpx.Error(ctx, http.StatusInternalServerError, "could not store the payment link", err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]string{"url": session.URL})
+	httpx.JSON(ctx, http.StatusOK, map[string]string{"url": session.URL})
 }
 
 // stripeEvent is the slice of a webhook event this server reads.
@@ -182,22 +184,22 @@ type stripeEvent struct {
 // because it will. The idempotency guard is the UPDATE's `status = 'Pending'`:
 // whichever delivery flips the row grants the credits, every other one changes
 // nothing and answers 200.
-func HandleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 512*1024))
+func HandleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		payload, err := io.ReadAll(http.MaxBytesReader(ctx.Writer, ctx.Request.Body, 512*1024))
 		if err != nil {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large", nil)
+			httpx.Error(ctx, http.StatusRequestEntityTooLarge, "payload too large", nil)
 			return
 		}
-		if err := stripepay.VerifyWebhook(payload, r.Header.Get("Stripe-Signature"), secret, time.Now()); err != nil {
+		if err := stripepay.VerifyWebhook(payload, ctx.GetHeader("Stripe-Signature"), secret, time.Now()); err != nil {
 			// One message for every failure mode, so a forger learns nothing.
-			httpx.Error(w, http.StatusBadRequest, "invalid signature", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "invalid signature", nil)
 			return
 		}
 
 		var ev stripeEvent
 		if err := json.Unmarshal(payload, &ev); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "malformed event", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "malformed event", nil)
 			return
 		}
 		// Two events can settle a payment. A card pays at once, so its
@@ -210,26 +212,26 @@ func HandleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.Han
 		settles := ev.Type == "checkout.session.completed" ||
 			ev.Type == "checkout.session.async_payment_succeeded"
 		if !settles || ev.Data.Object.PaymentStatus != "paid" {
-			httpx.JSON(w, http.StatusOK, map[string]string{"received": "ignored"})
+			httpx.JSON(ctx, http.StatusOK, map[string]string{"received": "ignored"})
 			return
 		}
 		paymentID := ev.Data.Object.Metadata["payment_id"]
 		if paymentID == "" {
-			httpx.JSON(w, http.StatusOK, map[string]string{"received": "no payment id"})
+			httpx.JSON(ctx, http.StatusOK, map[string]string{"received": "no payment id"})
 			return
 		}
 
 		outcome, err := settleCheckout(d, svc, paymentID, ev.Data.Object.ID,
 			ev.Data.Object.AmountTotal, ev.Data.Object.Currency)
 		if errors.Is(err, errAmountMismatch) {
-			httpx.Error(w, http.StatusBadRequest, "amount mismatch", nil)
+			httpx.Error(ctx, http.StatusBadRequest, "amount mismatch", nil)
 			return
 		}
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not settle payment", err)
+			httpx.Error(ctx, http.StatusInternalServerError, "could not settle payment", err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"received": outcome})
+		httpx.JSON(ctx, http.StatusOK, map[string]string{"received": outcome})
 	}
 }
 
@@ -395,15 +397,15 @@ func ReconcileStripePayments(ctx context.Context, d *sql.DB, client stripepay.Ch
 // by asking Stripe — the page's own word that it was reached proves nothing.
 // A session that is not paid yet (PromptPay still confirming) is left to the
 // webhook and the reconciler; the thank-you text is the same either way.
-func HandlePayDone(d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service, text string) http.HandlerFunc {
+func HandlePayDone(d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service, text string) gin.HandlerFunc {
 	page := payPage(text)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if id := r.URL.Query().Get("session_id"); client != nil && strings.HasPrefix(id, "cs_") {
-			if _, err := SettleFromStripe(r.Context(), d, client, svc, id); err != nil {
+	return func(ctx *gin.Context) {
+		if id := ctx.Query("session_id"); client != nil && strings.HasPrefix(id, "cs_") {
+			if _, err := SettleFromStripe(ctx.Request.Context(), d, client, svc, id); err != nil {
 				log.Printf("stripe: settling on return, session %s: %v", id, err)
 			}
 		}
-		page(w, r)
+		page(ctx)
 	}
 }
 
