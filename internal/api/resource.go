@@ -5,9 +5,7 @@
 package api
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Kusk24/jtrax-backend/internal/auth"
+	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
@@ -152,9 +151,7 @@ func (rs *Resource) col(name string) *Col {
 }
 
 func newID(prefix string) string {
-	raw := make([]byte, 5)
-	rand.Read(raw)
-	return prefix + "_" + hex.EncodeToString(raw)
+	return db.NewID(prefix)
 }
 
 func (rs *Resource) canRead(role string) bool {

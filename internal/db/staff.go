@@ -5,9 +5,7 @@
 package db
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,7 +74,7 @@ func EnsureStaff(d *sql.DB, accounts []StaffAccount) ([]string, error) {
 		err = d.QueryRow(`SELECT user_account_id FROM user_account WHERE email = ?`, a.Email).Scan(&userID)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			userID = newID("usr")
+			userID = NewID("usr")
 			if _, err := d.Exec(`INSERT INTO user_account (user_account_id, email, password_hash, role, display_name)
 				VALUES (?,?,?,?,?)`, userID, a.Email, hash, a.Role, a.Name); err != nil {
 				return nil, fmt.Errorf("create %s: %w", a.Email, err)
@@ -102,7 +100,7 @@ func EnsureStaff(d *sql.DB, accounts []StaffAccount) ([]string, error) {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if _, err := d.Exec(`INSERT INTO admin (admin_id, user_account_id, name, phone, email, line_id)
-				VALUES (?,?,?,?,?,?)`, newID("adm"), userID, a.Name, a.Phone, a.Email, a.LineID); err != nil {
+				VALUES (?,?,?,?,?,?)`, NewID("adm"), userID, a.Name, a.Phone, a.Email, a.LineID); err != nil {
 				return nil, fmt.Errorf("create admin row for %s: %w", a.Email, err)
 			}
 		case err != nil:
@@ -117,10 +115,4 @@ func EnsureStaff(d *sql.DB, accounts []StaffAccount) ([]string, error) {
 		written = append(written, a.Email)
 	}
 	return written, nil
-}
-
-func newID(prefix string) string {
-	raw := make([]byte, 5)
-	rand.Read(raw)
-	return prefix + "_" + hex.EncodeToString(raw)
 }

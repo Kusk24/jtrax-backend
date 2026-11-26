@@ -20,6 +20,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/auth"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/payments"
 )
 
 // voidReasons are the reasons a payment can be voided for.
@@ -87,125 +88,20 @@ func handleVoidPayment(d *sql.DB) http.HandlerFunc {
 			return
 		}
 		paymentID := r.PathValue("id")
-		var reversed float64
-		err := inTx(d, func(tx *sql.Tx) error {
-			var status, enrollmentID string
-			err := tx.QueryRow(`SELECT status, COALESCE(enrollment_id, '') FROM payment WHERE payment_id = ?`, paymentID).
-				Scan(&status, &enrollmentID)
-			if err == sql.ErrNoRows {
-				return &ClientError{Status: http.StatusNotFound, Message: "no such payment"}
-			}
-			if err != nil {
-				return err
-			}
-			if status == "Voided" {
-				return &ClientError{Status: http.StatusConflict, Message: "this payment is already voided"}
-			}
-			now := time.Now().UTC().Format(time.RFC3339)
-			if _, err := tx.Exec(`UPDATE payment SET status = 'Voided', voided_at = ?, voided_by = ?, void_reason = ?,
-			                             stripe_checkout_url = NULL
-			                       WHERE payment_id = ?`,
-				now, caller.UserAccountID, voidReasonText(in.Reason, note), paymentID); err != nil {
-				return err
-			}
-			if reversed, err = reverseVoidedCredits(tx, paymentID, in.Reason); err != nil {
-				return err
-			}
-			ended, err := endEnrolmentOfVoided(tx, paymentID, enrollmentID)
-			if err != nil {
-				return err
-			}
-			changes := map[string]any{"status": map[string]any{"from": status, "to": "Voided"}}
-			if reversed != 0 {
-				changes["credits_reversed"] = reversed
-			}
-			if ended {
-				changes["enrollment_ended"] = enrollmentID
-			}
-			if note != "" {
-				changes["note"] = note
-			}
-			raw, _ := json.Marshal(changes)
-			_, err = tx.Exec(`INSERT INTO payment_audit (audit_id, payment_id, action, changed_by, changed_by_name, changed_at, changes, reason)
-			                  VALUES (?,?,?,?,?,?,?,?)`,
-				newID("pau"), paymentID, "void", caller.UserAccountID, caller.DisplayName, now, string(raw), in.Reason)
-			return err
-		})
-		if err != nil {
-			var ce *ClientError
-			if errors.As(err, &ce) {
-				httpx.Error(w, ce.Status, ce.Message, nil)
-				return
-			}
+		reversed, err := payments.VoidPayment(d, caller, paymentID, in.Reason, note)
+		switch {
+		case errors.Is(err, payments.ErrNotFound):
+			httpx.Error(w, http.StatusNotFound, err.Error(), nil)
+			return
+		case errors.Is(err, payments.ErrAlreadyVoided):
+			httpx.Error(w, http.StatusConflict, err.Error(), nil)
+			return
+		case err != nil:
 			httpx.Error(w, http.StatusInternalServerError, "could not void the payment", err)
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]any{"payment_id": paymentID, "status": "Voided", "credits_reversed": reversed})
 	}
-}
-
-// voidReasonText is the reason as stored on the payment: the code, and the
-// admin's words for "other".
-func voidReasonText(reason, note string) string {
-	if note == "" {
-		return reason
-	}
-	return reason + ": " + note
-}
-
-// reverseVoidedCredits takes back what is left of the credits the payment
-// bought, with an adjustment linked to it. A balance already spent may go
-// below zero: that is what the record now says happened.
-func reverseVoidedCredits(tx *sql.Tx, paymentID, reason string) (float64, error) {
-	var net float64
-	var enrollmentID, studentID, classID sql.NullString
-	err := tx.QueryRow(`
-		SELECT COALESCE(SUM(amount), 0),
-		       (SELECT enrollment_id FROM credit_transaction WHERE payment_id = ? AND transaction_type = 'purchase' LIMIT 1),
-		       (SELECT student_id FROM credit_transaction WHERE payment_id = ? AND transaction_type = 'purchase' LIMIT 1),
-		       (SELECT class_id FROM credit_transaction WHERE payment_id = ? AND transaction_type = 'purchase' LIMIT 1)
-		  FROM credit_transaction WHERE payment_id = ?`, paymentID, paymentID, paymentID, paymentID).
-		Scan(&net, &enrollmentID, &studentID, &classID)
-	if err != nil || net <= 0 {
-		return 0, err
-	}
-	_, err = tx.Exec(`INSERT INTO credit_transaction
-	                    (credit_transaction_id, enrollment_id, student_id, class_id, transaction_type,
-	                     amount, transaction_date, payment_id, notes)
-	                  VALUES (?,?,?,?, 'manual_adjustment', ?,?,?,?)`,
-		newID("ctx"), enrollmentID, studentID, classID, -net, today(), paymentID,
-		"Payment voided ("+reason+")")
-	return -net, err
-}
-
-// endEnrolmentOfVoided ends the enrolment the payment opened, when it has
-// nothing else behind it — no class attended, no other credits, no other
-// payment. An enrolment with any history of its own is left alone.
-func endEnrolmentOfVoided(tx *sql.Tx, paymentID, enrollmentID string) (bool, error) {
-	if enrollmentID == "" {
-		return false, nil
-	}
-	var others int
-	err := tx.QueryRow(`
-		SELECT (SELECT COUNT(*) FROM credit_transaction
-		         WHERE enrollment_id = ? AND COALESCE(payment_id, '') <> ?)
-		     + (SELECT COUNT(*) FROM payment
-		         WHERE enrollment_id = ? AND payment_id <> ? AND status <> 'Voided')
-		     + (SELECT COUNT(*) FROM attendance a
-		          JOIN class_session s ON s.session_id = a.session_id
-		          JOIN student_enrollment e ON e.class_id = s.class_id AND e.student_id = a.student_id
-		         WHERE e.enrollment_id = ?)`,
-		enrollmentID, paymentID, enrollmentID, paymentID, enrollmentID).Scan(&others)
-	if err != nil || others > 0 {
-		return false, err
-	}
-	res, err := tx.Exec(`UPDATE student_enrollment SET status = 'Withdrawn', ended_date = ?
-	                      WHERE enrollment_id = ? AND status = 'Active'`, today(), enrollmentID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
 }
 
 // handlePaymentHistory is a payment's audit trail, oldest first. Staff only.
