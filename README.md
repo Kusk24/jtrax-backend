@@ -66,6 +66,10 @@ go build ./cmd/...
 
 The [API integration suite](internal/api) drives Gin against temporary databases. Run it when changing routes, status codes, JSON fields, role permissions, or database hooks. Package tests cover feature rules and integrations.
 
+## Database migrations
+
+Append SQL files to [the migration directory](internal/db/migrations) using the next four-digit version and a descriptive name. The server records each full filename in `schema_migration`. Preserve applied filenames and their SQL, including the five historical version pairs. The [version-order test](internal/db/migration_versions_test.go) checks new files for collisions and gaps.
+
 ## Deployment and backups
 
 Production runs on AWS Lightsail behind nginx. The API uses a local SQLite file, and Litestream replicates it to S3. Use the [production runbook](https://github.com/Kusk24/jtrax-docs/blob/main/ops/jtrax-on-lightsail.md) for deployment and the [backup and restore runbook](https://github.com/Kusk24/jtrax-docs/blob/main/ops/backups-with-litestream.md) for recovery. The [Litestream configuration and restore check](deploy) live in this repository.

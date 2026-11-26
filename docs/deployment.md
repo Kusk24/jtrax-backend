@@ -149,7 +149,7 @@ Use the [backend quickstart](../README.md#run-locally) for a local SQLite databa
 
 ## Adding a migration
 
-Append `internal/db/migrations/NNNN_name.sql`. It applies on next boot and is
+Use the next version as described in the [migration guide](../README.md#database-migrations). Each new file applies on next boot and is
 recorded in `schema_migration`. Migrations are append-only — never edit one
 that has run anywhere.
 
