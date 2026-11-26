@@ -15,14 +15,13 @@ package notify
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/push"
 	"github.com/Kusk24/jtrax-backend/internal/webpush"
@@ -164,12 +163,6 @@ func New(db *sql.DB, sender mail.Sender, cfg mail.Config) *Service {
 	return &Service{db: db, mail: sender, mailCfg: cfg}
 }
 
-func newID(prefix string) string {
-	raw := make([]byte, 5)
-	rand.Read(raw)
-	return prefix + "_" + hex.EncodeToString(raw)
-}
-
 // Send fans a message out to recipients (user_account_ids). The inbox rows are
 // written and committed first; email and push are attempted afterwards. It
 // returns an error only if the inbox write itself failed — a failed email is
@@ -216,7 +209,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 		title := msg.Title.pick(lang)
 		body := msg.Body.pick(lang)
 
-		notifID := newID("ntf")
+		notifID := db.NewID("ntf")
 		if _, err := tx.Exec(
 			`INSERT INTO notification (notification_id, user_account_id, type, title, body, data)
 			 VALUES (?,?,?,?,?,?)`,
@@ -228,7 +221,7 @@ func (s *Service) Send(recipients []string, msg Message) error {
 			if (msg.InAppOnly || !leavesTheApp[msg.Type]) && ch != ChannelInApp {
 				continue
 			}
-			deliveryID := newID("ndl")
+			deliveryID := db.NewID("ndl")
 			status := "pending"
 			switch {
 			case ch == ChannelInApp:
