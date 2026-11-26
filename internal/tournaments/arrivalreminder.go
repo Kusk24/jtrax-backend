@@ -34,28 +34,20 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/payments"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 )
 
 // StartArrivalReminders sends due reminders now and then on the entry
 // sweeper's schedule, until ctx ends. Started by the server, not by
 // NewHandler, so tests decide when it runs.
 func StartArrivalReminders(ctx context.Context, d *sql.DB, cfg mail.Config, sender mail.Sender) {
-	go func() {
-		ticker := time.NewTicker(sweepEvery)
-		defer ticker.Stop()
-		for {
-			if n, err := runArrivalReminders(d, cfg, sender, academytime.Now()); err != nil {
-				log.Printf("arrival reminders: %v", err)
-			} else if n > 0 {
-				log.Printf("arrival reminders: asked %d entrants", n)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	schedule.Start(ctx, sweepEvery, func() {
+		if n, err := runArrivalReminders(d, cfg, sender, academytime.Now()); err != nil {
+			log.Printf("arrival reminders: %v", err)
+		} else if n > 0 {
+			log.Printf("arrival reminders: asked %d entrants", n)
 		}
-	}()
+	})
 }
 
 // runArrivalReminders is one timer pass: the reminders due today, from 09:00

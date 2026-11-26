@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/db"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 )
 
 // retentionEvery is how often the sweep runs. Every period is in days, so
@@ -71,26 +72,17 @@ type RetentionReport map[string]int64
 // StartRetention runs SweepRetention now and then hourly until ctx ends.
 // Started by the server, not by NewHandler, so tests decide when it runs.
 func StartRetention(ctx context.Context, d *sql.DB, cfg RetentionConfig) {
-	go func() {
-		ticker := time.NewTicker(retentionEvery)
-		defer ticker.Stop()
-		for {
-			report, err := SweepRetention(d, time.Now().UTC(), cfg)
-			if err != nil {
-				log.Printf("retention: %v", err)
-			}
-			for rule, n := range report {
-				if n > 0 {
-					log.Printf("retention: %s: %d", rule, n)
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
+	schedule.Start(ctx, retentionEvery, func() {
+		report, err := SweepRetention(d, time.Now().UTC(), cfg)
+		if err != nil {
+			log.Printf("retention: %v", err)
+		}
+		for rule, n := range report {
+			if n > 0 {
+				log.Printf("retention: %s: %d", rule, n)
 			}
 		}
-	}()
+	})
 }
 
 // SweepRetention applies every rule as of `now`. Each rule is one statement,

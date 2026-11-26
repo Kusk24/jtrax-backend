@@ -22,6 +22,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -345,20 +346,11 @@ func StartStripeReconciler(ctx context.Context, d *sql.DB, client stripepay.Chec
 	if client == nil {
 		return
 	}
-	go func() {
-		ticker := time.NewTicker(reconcileEvery)
-		defer ticker.Stop()
-		for {
-			if err := ReconcileStripePayments(ctx, d, client, svc); err != nil {
-				log.Printf("stripe reconcile: %v", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	schedule.Start(ctx, reconcileEvery, func() {
+		if err := ReconcileStripePayments(ctx, d, client, svc); err != nil {
+			log.Printf("stripe reconcile: %v", err)
 		}
-	}()
+	})
 }
 
 // ReconcileStripePayments runs one pass of StartStripeReconciler. One session
