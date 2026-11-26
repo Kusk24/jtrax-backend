@@ -1,18 +1,8 @@
-# Deploying jtrax-backend
+# Legacy deployment on Render and Turso
 
-Free hosting: the API runs as a Docker service on **Render**, data lives in
-**Turso** (SQLite over HTTP). The portals stay on Vercel and reach the API
-through their own `/api` proxy route, so the browser never calls this service
-directly and no CORS configuration is needed.
+Production moved to AWS Lightsail. Follow the [current deployment runbook](https://github.com/Kusk24/jtrax-docs/blob/main/ops/jtrax-on-lightsail.md) for the live school system.
 
-Cross-repo context lives in the vault: `../jtrax-docs/decisions/` and
-`../jtrax-docs/ops/`.
-
-## Why this pairing
-
-Turso speaks SQLite, so every query and both migration files run unchanged —
-no Postgres port, no placeholder rewriting. It is reached over HTTP, which
-suits a host that sleeps: there is no connection pool to re-establish on wake.
+The previous deployment ran the API in Docker on Render, stored data in Turso, and served the portals on Vercel. The instructions below describe that setup. Turso uses the same SQLite queries and migrations as the local database.
 
 ## One-time setup
 
@@ -122,18 +112,9 @@ JTRAX_API_URL=https://jtrax-backend.onrender.com
 
 Redeploy. Nothing else changes: `app/api/[...path]/route.ts` already reads it.
 
-### 7. Turn on the keep-alive
+## Free-tier constraints on the former deployment
 
-In this repo: Settings > Secrets and variables > Actions > **Variables** >
-`BACKEND_URL` = your Render URL. `.github/workflows/keep-alive.yml` then pings
-`/health` every 10 minutes.
-
-## The free-tier constraints that actually bite
-
-**Spin-down.** A free service sleeps after 15 minutes idle and takes 30-60s to
-wake. Vercel gives up before that, so a sleeping backend shows as a 504 in the
-portals, not as a slow page. The keep-alive workflow is what prevents this, not
-a nicety.
+**Spin-down.** An idle service can take long enough to wake that the portal proxy returns a 504.
 
 **Instance hours.** The free plan allows 750 per workspace per calendar month.
 Keeping one service awake all month costs ~730, which fits with ~20 hours to
@@ -162,15 +143,9 @@ turso db dump jtrax > jtrax-$(date +%F).sql
 Turso keeps 24h of point-in-time restore on the free plan; `turso db dump`
 before anything schema-shaped is still worth it.
 
-## Local development is unchanged
+## Local development
 
-```sh
-go run ./cmd/server     # jtrax.db, auto-seeded, dev password
-```
-
-`DATABASE_URL` unset means a local file, which seeds itself with
-`db.DevPassword`. To rehearse against Turso, put the real values in `.env`
-(gitignored) and export them.
+Use the [backend quickstart](../README.md#run-locally) for a local SQLite database. To exercise a Turso database, export its `DATABASE_URL` and `TURSO_AUTH_TOKEN` before starting the server.
 
 ## Adding a migration
 
@@ -234,8 +209,8 @@ Two behaviours worth knowing when reading the code:
 
 A parent can switch notifications on for a browser in the portal's Settings;
 each one the inbox gets is then also sent through that browser's push service
-(Web Push, `internal/webpush`). It needs one key pair per deployment, as plain
-`NAME=value` lines in the server's `.env` like every other variable:
+(Web Push, `internal/webpush`). It needs one key pair per deployment, in the
+server process environment:
 
 | Variable | Notes |
 |---|---|
