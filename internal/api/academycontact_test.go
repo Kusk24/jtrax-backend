@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/academy"
 )
 
 // The public pages' footer: what an admin set, readable with no sign-in, and
@@ -44,7 +44,7 @@ func TestEmailsCarryTheSavedContact(t *testing.T) {
 	admin.login("admin@jca.ac.th")
 	admin.do("PATCH", "/api/v1/system-configuration/academy_phone", map[string]any{"config_value": "02-000-0000"})
 	admin.do("PATCH", "/api/v1/system-configuration/academy_address", map[string]any{"config_value": "Branch One\nBranch Two"})
-	c := api.AcademyContact(d)
+	c := academy.AcademyContact(d)
 	if c.Phone != "02-000-0000" || len(c.Addresses()) != 2 || c.LINE != "https://lin.ee/7fhq3N1" {
 		t.Fatalf("contact: %+v", c)
 	}

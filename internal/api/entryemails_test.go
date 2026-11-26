@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
+	"github.com/Kusk24/jtrax-backend/internal/tournaments"
 )
 
 var ict = time.FixedZone("ICT", 7*60*60)
@@ -64,7 +64,7 @@ func (f *payFixture) count(prefix string) int {
 func (f *payFixture) notices(t *testing.T, now time.Time) {
 	t.Helper()
 	svc := notify.New(f.d, f.mail, mail.Config{AppURL: "https://portal.example"})
-	api.RunEntryNotices(context.Background(), f.d, stripepay.New(stripepay.FromEnv()), svc, now)
+	tournaments.RunEntryNotices(context.Background(), f.d, stripepay.New(stripepay.FromEnv()), svc, now)
 	time.Sleep(50 * time.Millisecond) // the cancel-page notice is sent off the request
 }
 

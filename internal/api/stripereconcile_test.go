@@ -13,6 +13,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/payments"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -92,7 +93,7 @@ func paymentStatus(t *testing.T, d *sql.DB, id string) string {
 func reconcile(t *testing.T, d *sql.DB) {
 	t.Helper()
 	svc := notify.New(d, nil, mail.Config{})
-	if err := api.ReconcileStripePayments(context.Background(), d,
+	if err := payments.ReconcileStripePayments(context.Background(), d,
 		stripepay.New(stripepay.FromEnv()), svc); err != nil {
 		t.Fatal(err)
 	}

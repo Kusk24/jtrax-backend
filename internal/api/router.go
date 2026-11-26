@@ -10,11 +10,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// routeRegistrar is the registration surface used by every feature and registry resource.
-type routeRegistrar interface {
-	HandleFunc(string, func(http.ResponseWriter, *http.Request))
-}
-
 type router struct {
 	engine   *gin.Engine
 	standard *http.ServeMux

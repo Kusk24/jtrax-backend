@@ -50,7 +50,7 @@ Two ways to send, and the difference is the whole economics of the feature:
 | Cost | **free, unmetered** | **counts against the monthly allowance** |
 
 A school answering a parent an hour later is paying for something that would
-have been free at the time. So `deliver` in `internal/api/line.go` tries the
+have been free at the time. So `deliver` in `internal/lineinbox/lineinbox.go` tries the
 reply token first and falls back to push when LINE rejects it — a rejected token
 costs one wasted call, while not trying costs a billed message every time. The
 token is single-use and cleared as soon as it is spent.

@@ -17,15 +17,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Kusk24/jtrax-backend/internal/academy"
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
+	"github.com/Kusk24/jtrax-backend/internal/classroom"
+	"github.com/Kusk24/jtrax-backend/internal/communications"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/payments"
 	"github.com/Kusk24/jtrax-backend/internal/push"
+	"github.com/Kusk24/jtrax-backend/internal/retention"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
+	"github.com/Kusk24/jtrax-backend/internal/tournaments"
 	"github.com/Kusk24/jtrax-backend/internal/webpush"
 )
 
@@ -60,36 +66,36 @@ func main() {
 	}
 	handler := httpx.CORS(origins, api.NewHandler(d))
 	// An unpaid entry's early-bird price and place lapse on their dates
-	// (internal/api/entryrules.go); this applies them through the day.
-	api.StartEntrySweeper(context.Background(), d)
+	// (internal/tournaments/entryrules.go); this applies them through the day.
+	tournaments.StartEntrySweeper(context.Background(), d)
 	// Personal data nothing needs any more is deleted on a timer; the
-	// academy's own periods come from JTRAX_RETAIN_* (internal/api/retention.go).
-	api.StartRetention(context.Background(), d, api.RetentionFromEnv())
+	// academy's own periods come from JTRAX_RETAIN_* (internal/retention/retention.go).
+	retention.StartRetention(context.Background(), d, retention.RetentionFromEnv())
 	mailCfg := mail.FromEnv()
 	// Every email's footer gives the contact details the office saved in
 	// Settings → Academy Contact.
-	mail.SetContactSource(func() mail.Contact { return api.AcademyContact(d) })
-	api.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
+	mail.SetContactSource(func() mail.Contact { return academy.AcademyContact(d) })
+	tournaments.StartArrivalReminders(context.Background(), d, mailCfg, mail.New(mailCfg))
 	// A class made for later checks its booked students in when it starts,
-	// and only then are their credits spent (internal/api/classstart.go).
-	api.StartClassStarts(context.Background(), d)
+	// and only then are their credits spent (internal/classroom/classstart.go).
+	classroom.StartClassStarts(context.Background(), d)
 	// Card payments the Stripe webhook never reported are settled by asking
-	// Stripe (internal/api/stripe.go). Off until the Stripe key is set.
+	// Stripe (internal/payments/stripe.go). Off until the Stripe key is set.
 	notifier := notify.New(d, mail.New(mailCfg), mailCfg)
 	notifier.SetPush(push.New(push.FromEnv()))
 	notifier.SetWebPush(webpush.New(webpush.FromEnv()))
 	stripeClient := stripepay.New(stripepay.FromEnv())
-	api.StartStripeReconciler(context.Background(), d, stripeClient, notifier)
+	payments.StartStripeReconciler(context.Background(), d, stripeClient, notifier)
 	// The emails about an unpaid tournament entry: payment not completed,
 	// the day-before reminder, and the cancellation when its place is
-	// released (internal/api/entryemails.go).
-	api.StartEntryNotices(context.Background(), d, stripeClient, notifier)
+	// released (internal/tournaments/entryemails.go).
+	tournaments.StartEntryNotices(context.Background(), d, stripeClient, notifier)
 	// Low-credit and expiring-credit reminders, in-app, once each
-	// (internal/api/creditreminders.go).
-	api.StartCreditReminders(context.Background(), d, notifier)
+	// (internal/payments/creditreminders.go).
+	payments.StartCreditReminders(context.Background(), d, notifier)
 	// Announcements scheduled for later tell parents when they start showing
-	// (internal/api/announcementwindow.go).
-	api.StartAnnouncementSchedule(context.Background(), d, notifier)
+	// (internal/communications/announcementwindow.go).
+	communications.StartAnnouncementSchedule(context.Background(), d, notifier)
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/classroom"
 )
 
 var bangkok = time.FixedZone("ICT", 7*60*60)
@@ -79,7 +79,7 @@ func TestBookingAFutureClassSpendsNothingUntilItStarts(t *testing.T) {
 	}
 
 	// A minute before the start: still booked, still free.
-	if err := api.RunClassStarts(d, at10(date, -1)); err != nil {
+	if err := classroom.RunClassStarts(d, at10(date, -1)); err != nil {
 		t.Fatal(err)
 	}
 	if attendanceCount(d, sessionID) != 0 || !near(balanceOf(c, enrolmentID), 10) {
@@ -88,7 +88,7 @@ func TestBookingAFutureClassSpendsNothingUntilItStarts(t *testing.T) {
 
 	// The start: the class runs, the student is still only expected — not
 	// checked in, not charged — until the desk checks them in.
-	api.RunClassStarts(d, at10(date, 0))
+	classroom.RunClassStarts(d, at10(date, 0))
 	if attendanceCount(d, sessionID) != 0 || bookingCount(d, sessionID) != 1 || !near(balanceOf(c, enrolmentID), 10) {
 		t.Fatalf("at the start: %d attendance, %d bookings, balance %v; want 0, 1 and 10",
 			attendanceCount(d, sessionID), bookingCount(d, sessionID), balanceOf(c, enrolmentID))
@@ -115,7 +115,7 @@ func TestBookingAFutureClassSpendsNothingUntilItStarts(t *testing.T) {
 	}
 
 	// Later passes charge nothing more.
-	api.RunClassStarts(d, at10(date, 30))
+	classroom.RunClassStarts(d, at10(date, 30))
 	if got := balanceOf(c, enrolmentID); !near(got, 9) {
 		t.Fatalf("charged twice: balance %v", got)
 	}
@@ -132,7 +132,7 @@ func TestCancellingAScheduledClassRefundsNothingBecauseNothingWasSpent(t *testin
 	if bookingCount(d, sessionID) != 0 {
 		t.Fatal("the cancelled class kept its bookings")
 	}
-	api.RunClassStarts(d, at10(date, 5))
+	classroom.RunClassStarts(d, at10(date, 5))
 	if attendanceCount(d, sessionID) != 0 || !near(balanceOf(c, enrolmentID), 10) {
 		t.Fatal("a cancelled class checked its students in at the start")
 	}
@@ -152,7 +152,7 @@ func TestCheckingInEarlyByHandChargesOnce(t *testing.T) {
 	if bookingCount(d, sessionID) != 0 {
 		t.Fatal("a student checked in by hand is still booked")
 	}
-	api.RunClassStarts(d, at10(date, 1))
+	classroom.RunClassStarts(d, at10(date, 1))
 	if attendanceCount(d, sessionID) != 1 || !near(balanceOf(c, enrolmentID), 9) {
 		t.Fatalf("want one attendance and one hour spent, got %d and balance %v",
 			attendanceCount(d, sessionID), balanceOf(c, enrolmentID))
@@ -170,11 +170,11 @@ func TestRescheduledLaterTheBookingWaitsForTheNewTime(t *testing.T) {
 		d.QueryRow(`SELECT session_status FROM class_session WHERE session_id = ?`, sessionID).Scan(&st)
 		return st
 	}
-	api.RunClassStarts(d, at10(date, 5)) // the old start
+	classroom.RunClassStarts(d, at10(date, 5)) // the old start
 	if statusOf() != "Scheduled" {
 		t.Fatalf("started at the old time: %s", statusOf())
 	}
-	api.RunClassStarts(d, at10(date, 4*60))
+	classroom.RunClassStarts(d, at10(date, 4*60))
 	if statusOf() != "Ongoing" || bookingCount(d, sessionID) != 1 || attendanceCount(d, sessionID) != 0 {
 		t.Fatalf("at the new time: %s, %d bookings, %d attendance; want Ongoing, 1, 0",
 			statusOf(), bookingCount(d, sessionID), attendanceCount(d, sessionID))
@@ -194,8 +194,8 @@ func TestABookedStudentWhoNeverComesIsNotCharged(t *testing.T) {
 	date := day(6)
 	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 10)
 	book(t, c, studentID, sessionID)
-	api.RunClassStarts(d, at10(date, 0))
-	api.RunClassStarts(d, at10(date, 120)) // long after the end
+	classroom.RunClassStarts(d, at10(date, 0))
+	classroom.RunClassStarts(d, at10(date, 120)) // long after the end
 	if attendanceCount(d, sessionID) != 0 || bookingCount(d, sessionID) != 1 {
 		t.Fatalf("want no attendance and the booking kept; got %d and %d",
 			attendanceCount(d, sessionID), bookingCount(d, sessionID))
@@ -225,7 +225,7 @@ func TestAClassChargeNamesItsStudent(t *testing.T) {
 	date := day(6)
 	c, d, studentID, sessionID, enrolmentID := scheduled(t, date, 10)
 	book(t, c, studentID, sessionID)
-	api.RunClassStarts(d, at10(date, 0))
+	classroom.RunClassStarts(d, at10(date, 0))
 	// Checked in on arrival, as the desk does for a booked student.
 	if st, row, _ := c.do("POST", "/api/v1/attendance", map[string]any{
 		"student_id": studentID, "session_id": sessionID,

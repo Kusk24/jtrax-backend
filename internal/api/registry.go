@@ -6,23 +6,30 @@ import (
 	"database/sql"
 
 	"github.com/Kusk24/jtrax-backend/internal/auth"
+	"github.com/Kusk24/jtrax-backend/internal/chessplay"
+	"github.com/Kusk24/jtrax-backend/internal/classroom"
+	"github.com/Kusk24/jtrax-backend/internal/communications"
+	"github.com/Kusk24/jtrax-backend/internal/families"
+	"github.com/Kusk24/jtrax-backend/internal/payments"
+	"github.com/Kusk24/jtrax-backend/internal/records"
+	"github.com/Kusk24/jtrax-backend/internal/tournaments"
 )
 
 // Scope fragments reused across resources. Each binds one arg: the caller's
 // parent_id or student_id.
-func byParentStudents(col string) ScopeFn {
+func byParentStudents(col string) records.ScopeFn {
 	return func(id *auth.Identity) (string, []any) {
 		return col + " IN (SELECT student_id FROM student_parent WHERE parent_id = ?)", []any{id.ParentID}
 	}
 }
 
-func byOwnStudent(col string) ScopeFn {
+func byOwnStudent(col string) records.ScopeFn {
 	return func(id *auth.Identity) (string, []any) { return col + " = ?", []any{id.StudentID} }
 }
 
 // notDeleted narrows an enrolment scope to the rows the office has not
 // deleted — those are kept only for the console's history.
-func notDeleted(scope ScopeFn) ScopeFn {
+func notDeleted(scope records.ScopeFn) records.ScopeFn {
 	return func(id *auth.Identity) (string, []any) {
 		where, args := scope(id)
 		return "(" + where + ") AND deleted_date IS NULL", args
@@ -32,7 +39,7 @@ func notDeleted(scope ScopeFn) ScopeFn {
 // notCancelled hides sessions the office has called off.
 func notCancelled(*auth.Identity) (string, []any) { return "cancelled_at IS NULL", nil }
 
-func byOwnParent(col string) ScopeFn {
+func byOwnParent(col string) records.ScopeFn {
 	return func(id *auth.Identity) (string, []any) { return col + " = ?", []any{id.ParentID} }
 }
 
@@ -80,12 +87,12 @@ var (
 )
 
 // Registry lists every CRUD resource served under /api/v1.
-func Registry() []*Resource {
-	return []*Resource{
+func Registry() []*records.Resource {
+	return []*records.Resource{
 		{
 			Name: "students", Table: "student", IDCol: "student_id", IDPrefix: "stu",
-			Check: checkStudentDOB,
-			Cols: []Col{
+			Check: families.CheckStudentDOB,
+			Cols: []records.Col{
 				{Name: "user_account_id", Kind: "text"},
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "date_of_birth", Kind: "text"},
@@ -110,36 +117,36 @@ func Registry() []*Resource {
 				{Name: "archived_at", Kind: "text"},
 				{Name: "archived_reason", Kind: "text"},
 			},
-			AfterWrite: studentAfterWrite,
+			AfterWrite: families.StudentAfterWrite,
 			// The login email, which the student table deliberately does not
 			// duplicate. Staff only: teachers can already list every student,
 			// and a name is not an email address.
-			Derived: []Derived{
+			Derived: []records.Derived{
 				{Name: "email", Expr: "(SELECT ua.email FROM user_account ua WHERE ua.user_account_id = student.user_account_id)"},
 			},
 			ReadRoles: everyone,
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
 		},
 		{
 			Name: "parents", Table: "parent", IDCol: "parent_id", IDPrefix: "par",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "user_account_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
 				// Set when their last child here was archived (0079).
 				{Name: "archived_at", Kind: "text"},
 			},
-			Derived: []Derived{
+			Derived: []records.Derived{
 				{Name: "email", Expr: "(SELECT ua.email FROM user_account ua WHERE ua.user_account_id = parent.user_account_id)"},
 			},
 			ReadRoles: []string{"Parent"},
-			Scope:     map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
+			Scope:     map[string]records.ScopeFn{"Parent": byOwnParent("parent_id")},
 		},
 		{
 			Name: "teachers", Table: "teacher", IDCol: "teacher_id", IDPrefix: "tch",
-			Cols: []Col{
+			Cols: []records.Col{
 				// Optional since 0023. The academy has no teacher workflow and
 				// issues no teacher logins, so a teacher is a record of who
 				// teaches — the Academy list, and the name on a parent's class
@@ -154,7 +161,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "admins", Table: "admin", IDCol: "admin_id", IDPrefix: "adm",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "user_account_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "phone", Kind: "text"},
@@ -164,7 +171,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "parent-contacts", Table: "parent_contact", IDCol: "parent_contact_id", IDPrefix: "pct",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "parent_id", Kind: "text", Required: true},
 				{Name: "contact_type", Kind: "text", Enum: contactTypes, Required: true},
 				{Name: "value", Kind: "text", Required: true},
@@ -172,32 +179,32 @@ func Registry() []*Resource {
 			// A parent reads their own; only the office changes them — the
 			// profile in the portal is read-only.
 			ReadRoles: []string{"Parent"},
-			Scope:     map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
+			Scope:     map[string]records.ScopeFn{"Parent": byOwnParent("parent_id")},
 			Own:       ownParentRow,
 		},
 		{
 			Name: "student-parents", Table: "student_parent", IDCol: "student_id", IDPrefix: "",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "parent_id", Kind: "text", Required: true},
 				{Name: "relationship_type", Kind: "text"},
 			},
 			ReadRoles: []string{"Parent"},
-			Scope:     map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
+			Scope:     map[string]records.ScopeFn{"Parent": byOwnParent("parent_id")},
 		},
 		{
 			Name: "notification-preferences", Table: "notification_preference", IDCol: "parent_id", IDPrefix: "",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "check_in_alerts_enabled", Kind: "bool"},
 				{Name: "credit_expiry_alerts_enabled", Kind: "bool"},
 				{Name: "announcement_alerts_enabled", Kind: "bool"},
 			},
 			ReadRoles: []string{"Parent"}, WriteRoles: []string{"Parent"},
-			Scope: map[string]ScopeFn{"Parent": byOwnParent("parent_id")},
+			Scope: map[string]records.ScopeFn{"Parent": byOwnParent("parent_id")},
 			Own:   ownParentRow,
 		},
 		{
 			Name: "classes", Table: "class", IDCol: "class_id", IDPrefix: "cls",
-			Cols: []Col{
+			Cols: []records.Col{
 				// Only the name is asked for. The rest describe a class rather
 				// than identify it, and the office should not have to answer
 				// three questions to write down that it teaches Beginners.
@@ -218,7 +225,7 @@ func Registry() []*Resource {
 				// Which certificate its hours count toward — JCA Starters,
 				// Juniors or NXT — whatever the class type; blank for one
 				// outside the three (certificates.go).
-				{Name: "certificate_course", Kind: "text", Enum: certificateCourses},
+				{Name: "certificate_course", Kind: "text", Enum: classroom.CertificateCourses},
 				// The usual price of one credit — what a new package or a custom
 				// credit sale starts from; never binding (0067).
 				{Name: "price_per_credit", Kind: "real"},
@@ -234,7 +241,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "class-sessions", Table: "class_session", IDCol: "session_id", IDPrefix: "ses",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "session_date", Kind: "text", Required: true},
 				{Name: "start_time", Kind: "text", Required: true},
@@ -245,11 +252,11 @@ func Registry() []*Resource {
 			// When the office called it off (migration 0053). Read-only: only
 			// the cancel endpoint sets it, since cancelling also refunds and
 			// tells the families.
-			Derived:   []Derived{{Name: "cancelled_at", Expr: "cancelled_at"}},
+			Derived:   []records.Derived{{Name: "cancelled_at", Expr: "cancelled_at"}},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
 			// A cancelled class is the office's record, not a class anyone
 			// goes to: teachers and families never see it.
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Teacher": notCancelled,
 				"Parent":  notCancelled,
 				"Student": notCancelled,
@@ -257,13 +264,13 @@ func Registry() []*Resource {
 			// The form collects a start and an end and never worked out the
 			// difference, so every session staff created carried a NULL
 			// length — and a length is what an hour of class costs.
-			AfterWrite: storeSessionHours,
+			AfterWrite: payments.StoreSessionHours,
 			// Bookings go with the class; attendance has its own refunds.
-			BeforeDelete: dropSessionBookings,
+			BeforeDelete: classroom.DropSessionBookings,
 		},
 		{
 			Name: "enrollments", Table: "student_enrollment", IDCol: "enrollment_id", IDPrefix: "enr",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "student_id", Kind: "text", Required: true},
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "enrolled_date", Kind: "text", Required: true},
@@ -282,14 +289,14 @@ func Registry() []*Resource {
 				{Name: "deleted_date", Kind: "text"},
 			},
 			ReadRoles: everyone,
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  notDeleted(byParentStudents("student_id")),
 				"Student": notDeleted(byOwnStudent("student_id")),
 			},
 		},
 		{
 			Name: "attendance", Table: "attendance", IDCol: "attendance_id", IDPrefix: "att",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "student_id", Kind: "text", Required: true},
 				{Name: "session_id", Kind: "text", Required: true},
 				{Name: "check_in_time", Kind: "text"},
@@ -298,7 +305,7 @@ func Registry() []*Resource {
 				{Name: "updated_at", Kind: "text"},
 			},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
@@ -306,29 +313,29 @@ func Registry() []*Resource {
 			// session lasts. Here rather than in the console because the front
 			// desk, the teacher's roster and Class History all write these
 			// rows, and three clients would keep three versions of the rule.
-			AfterInsert:  attendanceAfterInsert,
-			AfterWrite:   chargeAttendance,
-			BeforeDelete: refundAttendance,
+			AfterInsert:  classroom.AttendanceAfterInsert,
+			AfterWrite:   payments.ChargeAttendance,
+			BeforeDelete: payments.RefundAttendance,
 		},
 		{
 			// Who will be in a class that has not started (migration 0060).
 			// Free until the start, when classstart.go checks each one in.
 			Name: "session-bookings", Table: "session_booking", IDCol: "booking_id", IDPrefix: "bkg",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "session_id", Kind: "text", Required: true},
 				{Name: "student_id", Kind: "text", Required: true},
 			},
-			Derived:   []Derived{{Name: "booked_at", Expr: "booked_at"}, {Name: "failed_reason", Expr: "failed_reason"}},
+			Derived:   []records.Derived{{Name: "booked_at", Expr: "booked_at"}, {Name: "failed_reason", Expr: "failed_reason"}},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
-			AfterInsert: refuseBooking,
+			AfterInsert: classroom.RefuseBooking,
 		},
 		{
 			Name: "credit-packages", Table: "credit_package", IDCol: "credit_package_id", IDPrefix: "pkg",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "class_id", Kind: "text", Required: true},
 				{Name: "credit_amount", Kind: "real", Required: true},
 				{Name: "standard_price", Kind: "real", Required: true},
@@ -345,16 +352,16 @@ func Registry() []*Resource {
 			ReadRoles: everyone,
 			// Blank is "never expires"; 0 is refused rather than read as the
 			// same, because "0 days" says the opposite to whoever reads it.
-			Check: checkPackageValidity,
+			Check: payments.CheckPackageValidity,
 		},
 		{
 			Name: "payments", Table: "payment", IDCol: "payment_id", IDPrefix: "pay",
 			// A payment is the record of money taken; it is corrected, never
 			// removed, so the history a family and the books see stays whole.
 			NoDelete:     "payments can't be deleted — edit or void the payment instead",
-			AfterWrite:   releaseCancelledEntry,
-			BeforeUpdate: auditPaymentEdit,
-			Cols: []Col{
+			AfterWrite:   tournaments.ReleaseCancelledEntry,
+			BeforeUpdate: payments.AuditPaymentEdit,
+			Cols: []records.Col{
 				// Not required: a payment outlives the student it was taken
 				// for, and a detached one carries the names below instead.
 				{Name: "student_id", Kind: "text"},
@@ -381,19 +388,19 @@ func Registry() []*Resource {
 				{Name: "tournament_registration_id", Kind: "text"},
 			},
 			// Shown, never written here: voiding is its own act (paymentvoid.go).
-			Derived: []Derived{
+			Derived: []records.Derived{
 				{Name: "voided_at", Expr: "payment.voided_at", Roles: []string{"Parent", "Student"}},
 				{Name: "void_reason", Expr: "payment.void_reason"},
 			},
 			ReadRoles: []string{"Parent", "Student"},
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
 		},
 		{
 			Name: "credit-transactions", Table: "credit_transaction", IDCol: "credit_transaction_id", IDPrefix: "ctx",
-			Cols: []Col{
+			Cols: []records.Col{
 				// Not required since 0026: a credit with no enrolment is one
 				// the child holds and has not spent anywhere yet, which is
 				// what is left when their last enrolment is deleted.
@@ -419,7 +426,7 @@ func Registry() []*Resource {
 			// office tidied away the course it was bought for. `student_id` is
 			// null on nothing the backfill could resolve, so the first arm
 			// still carries the rows written before that migration.
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent": func(id *auth.Identity) (string, []any) {
 					return `(enrollment_id IN (SELECT enrollment_id FROM student_enrollment
 						WHERE student_id IN (SELECT student_id FROM student_parent WHERE parent_id = ?))
@@ -434,7 +441,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "announcements", Table: "announcement", IDCol: "announcement_id", IDPrefix: "ann",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "title", Kind: "text", Required: true},
 				{Name: "body", Kind: "text", Required: true},
 				{Name: "author_user_account_id", Kind: "text", Required: true},
@@ -452,22 +459,22 @@ func Registry() []*Resource {
 			},
 			ReadRoles: everyone, WriteRoles: []string{"Teacher"},
 			Check: func(row map[string]any) error {
-				if err := checkAnnouncementAudience(row); err != nil {
+				if err := communications.CheckAnnouncementAudience(row); err != nil {
 					return err
 				}
-				return checkAnnouncementWindow(row)
+				return communications.CheckAnnouncementWindow(row)
 			},
 			// Resolved once, when it is posted: see resolveAnnouncementAudience.
-			AfterWrite: resolveAnnouncementAudience,
-			Scope: map[string]ScopeFn{
+			AfterWrite: communications.ResolveAnnouncementAudience,
+			Scope: map[string]records.ScopeFn{
 				// Everything addressed to every parent, and whatever was
 				// addressed to this one.
 				// Only inside its window.
 				"Parent": func(id *auth.Identity) (string, []any) {
-					now := academyMinute()
+					now := communications.AcademyMinute()
 					return `(audience = 'all' OR announcement_id IN
 						(SELECT announcement_id FROM announcement_recipient WHERE parent_id = ?))
-						AND ` + visibleNow,
+						AND ` + communications.VisibleNow,
 						[]any{id.ParentID, now, now}
 				},
 				// Announcements are for families; students are not an audience.
@@ -478,7 +485,7 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "tournaments", Table: "tournament", IDCol: "tournament_id", IDPrefix: "trn",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "name", Kind: "text", Required: true},
 				{Name: "tournament_status", Kind: "text", Enum: tournamentStat},
 				// Set when the office picks a status by hand (migration
@@ -526,7 +533,7 @@ func Registry() []*Resource {
 				// it, and taken live only by /publish (see tournamentdraft.go).
 				{Name: "draft", Kind: "bool"},
 			},
-			Derived: []Derived{
+			Derived: []records.Derived{
 				// Whether the organiser uploaded a banner; without one the
 				// pages draw their own (see banner.go).
 				{Name: "has_banner", Roles: everyone,
@@ -536,32 +543,32 @@ func Registry() []*Resource {
 				{Name: "has_regulation", Roles: everyone,
 					Expr: "EXISTS(SELECT 1 FROM tournament_regulation g WHERE g.tournament_id = tournament.tournament_id)"},
 			},
-			AfterWrite: tournamentStatusAfterWrite,
+			AfterWrite: tournaments.TournamentStatusAfterWrite,
 			ReadRoles:  everyone,
 			// A draft is the organiser's until it is published.
-			Scope: map[string]ScopeFn{
-				"Teacher": notDraft,
-				"Parent":  notDraft,
-				"Student": notDraft,
+			Scope: map[string]records.ScopeFn{
+				"Teacher": tournaments.NotDraft,
+				"Parent":  tournaments.NotDraft,
+				"Student": tournaments.NotDraft,
 			},
 			// What a JCA student is charged today, from the same rule the
 			// server charges by — so the portals show a price rather than
 			// work one out (see pricing.go).
-			Decorate: withStudentFee,
+			Decorate: payments.WithStudentFee,
 		},
 		{
 			Name: "tournament-categories", Table: "tournament_category", IDCol: "tournament_category_id", IDPrefix: "tcat",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "tournament_id", Kind: "text", Required: true},
 				{Name: "name", Kind: "text", Required: true},
 			},
 			ReadRoles:    everyone,
-			BeforeDelete: releaseCategoryEntrants,
+			BeforeDelete: tournaments.ReleaseCategoryEntrants,
 		},
 		{
 			Name: "tournament-registrations", Table: "tournament_registration", IDCol: "tournament_registration_id", IDPrefix: "treg",
-			Duplicate: duplicateEntryMessage,
-			Cols: []Col{
+			Duplicate: tournaments.DuplicateEntryMessage,
+			Cols: []records.Col{
 				{Name: "tournament_id", Kind: "text", Required: true},
 				// No longer required: a member of the public registering for an
 				// open event has no student record, and NULL is what says so.
@@ -603,7 +610,7 @@ func Registry() []*Resource {
 			// terms_accepted_at is readable and not writable. It is a record of
 			// consent, and a consent record staff can set by hand is one that
 			// cannot be relied on for the question it exists to answer.
-			Derived: []Derived{
+			Derived: []records.Derived{
 				{Name: "terms_accepted_at", Expr: "terms_accepted_at"},
 				{Name: "arrival_reminded_at", Expr: "arrival_reminded_at"},
 				{Name: "arrival_answered_at", Expr: "arrival_answered_at"},
@@ -623,16 +630,16 @@ func Registry() []*Resource {
 			// door used to take the fee and status from the parent's own
 			// request, so a family could register at a price they chose.
 			ReadRoles: []string{"Parent", "Student"},
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
-			Check:      checkRegistrationNotes,
-			AfterWrite: syncRegistrationPayment,
+			Check:      tournaments.CheckRegistrationNotes,
+			AfterWrite: tournaments.SyncRegistrationPayment,
 		},
 		{
 			Name: "practice-activities", Table: "practice_activity", IDCol: "activity_id", IDPrefix: "act",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "student_id", Kind: "text", Required: true},
 				{Name: "activity_date", Kind: "text", Required: true},
 				{Name: "minutes_practiced", Kind: "int"},
@@ -646,7 +653,7 @@ func Registry() []*Resource {
 			// server records a solve when it grades one. The portal used to
 			// post its own row, including the streak it thought it had.
 			ReadRoles: []string{"Parent", "Student"}, WriteRoles: nil,
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
@@ -654,11 +661,11 @@ func Registry() []*Resource {
 		},
 		{
 			Name: "practice-settings", Table: "practice_settings", IDCol: "student_id", IDPrefix: "",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "daily_screen_time_limit_minutes", Kind: "int", Required: true},
 			},
 			ReadRoles: []string{"Parent", "Student"}, WriteRoles: []string{"Parent"},
-			Scope: map[string]ScopeFn{
+			Scope: map[string]records.ScopeFn{
 				"Parent":  byParentStudents("student_id"),
 				"Student": byOwnStudent("student_id"),
 			},
@@ -670,20 +677,20 @@ func Registry() []*Resource {
 			// read and write so they can set the position they taught on
 			// Tuesday rather than a random fork.
 			Name: "puzzles", Table: "puzzle", IDCol: "puzzle_id", IDPrefix: "pzl",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "fen", Kind: "text", Required: true},
 				{Name: "moves", Kind: "text", Required: true},
 				{Name: "rating", Kind: "int"},
 				{Name: "themes", Kind: "text"},
-				{Name: "source", Kind: "text", Enum: puzzleSources},
+				{Name: "source", Kind: "text", Enum: chessplay.PuzzleSources},
 				{Name: "created_by", Kind: "text"},
 			},
 			ReadRoles: []string{"Teacher"}, WriteRoles: []string{"Teacher"},
-			Check: checkPuzzle,
+			Check: chessplay.CheckPuzzle,
 		},
 		{
 			Name: "system-configuration", Table: "system_configuration", IDCol: "config_key", IDPrefix: "",
-			Cols: []Col{
+			Cols: []records.Col{
 				{Name: "config_value", Kind: "text", Required: true},
 			},
 			// Readable by every signed-in role: the parent portal shows the

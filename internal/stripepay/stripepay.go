@@ -55,6 +55,13 @@ func FromEnv() Config {
 	}
 }
 
+// CheckoutGateway is the Stripe Checkout boundary used by payment and tournament workflows.
+type CheckoutGateway interface {
+	CreateCheckoutSession(ctx context.Context, paymentID, productName string, amountSatang int64, successURL, cancelURL, customerEmail string, expiresAt time.Time) (Session, error)
+	GetCheckoutSession(ctx context.Context, id string) (SessionState, error)
+	ExpireCheckoutSession(ctx context.Context, id string) error
+}
+
 // Client talks to Stripe. Nil is the switched-off state: endpoints answer 503
 // rather than 500, and the rest of JTrax is unaffected.
 type Client struct {
@@ -63,7 +70,7 @@ type Client struct {
 	http *http.Client
 }
 
-func New(c Config) *Client {
+func New(c Config) CheckoutGateway {
 	if strings.TrimSpace(c.SecretKey) == "" {
 		return nil
 	}

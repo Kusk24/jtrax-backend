@@ -1,0 +1,456 @@
+// Credit reminders and notifications.
+package payments
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Kusk24/jtrax-backend/internal/academytime"
+	"github.com/Kusk24/jtrax-backend/internal/accounts"
+	"github.com/Kusk24/jtrax-backend/internal/db"
+	"github.com/Kusk24/jtrax-backend/internal/httpx"
+	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/stripepay"
+)
+
+// Stripe's minimum charge for THB, in satang (฿10). Below it the API refuses,
+// so refuse here first with a message a person can act on.
+const minSatang = 1000
+
+func payPage(text string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
+			"<title>JCA Chess Academy</title>" +
+			"<body style=\"font-family:sans-serif;display:flex;min-height:90vh;align-items:center;justify-content:center;text-align:center;padding:24px\">" +
+			"<p style=\"font-size:19px;max-width:26em\">" + text + "</p>"))
+	}
+}
+
+// returnBase is where the thank-you pages live: the public API origin in
+// production, this server itself in development.
+func returnBase(cfg stripepay.Config) string {
+	if cfg.ReturnURL != "" {
+		return strings.TrimSuffix(cfg.ReturnURL, "/")
+	}
+	if base := strings.TrimSuffix(strings.TrimSpace(os.Getenv("PUBLIC_API_URL")), "/"); base != "" {
+		return base
+	}
+	return "http://localhost:8790"
+}
+
+// HandleStripeLink answers with a card-payment URL for one pending payment,
+// at the desk's request. Who may ask is decided here; what the link is, and
+// whether one already exists, is `checkoutLink` — a parent paying their own
+// child's tournament fee reaches the same code by a different door.
+func HandleStripeLink(d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := accounts.RequireIdentity(d, w, r)
+		if id == nil {
+			return
+		}
+		if !accounts.IsStaff(id.Role) {
+			httpx.Error(w, http.StatusForbidden, "only admin or reception may create payment links", nil)
+			return
+		}
+		if client == nil {
+			httpx.Error(w, http.StatusServiceUnavailable, "card payments are not configured", nil)
+			return
+		}
+		CheckoutLink(w, r, d, client, cfg, r.PathValue("id"))
+	}
+}
+
+// CheckoutLink writes the card-payment URL for one pending payment, creating
+// the Checkout session on first ask and returning the stored one after —
+// closing the tab must not mean a second link and a double charge.
+//
+// It assumes the caller has already been allowed to pay this payment. It
+// decides nothing about authorization and must never be reached without that
+// check.
+func CheckoutLink(w http.ResponseWriter, r *http.Request, d *sql.DB, client stripepay.CheckoutGateway, cfg stripepay.Config, paymentID string) {
+	var status, studentName, className, existingURL, existingSession string
+	var finalAmount float64
+	err := d.QueryRow(
+		`SELECT status, COALESCE(student_name,''), COALESCE(class_name,''),
+		        final_amount, COALESCE(stripe_checkout_url,''), COALESCE(stripe_session_id,'')
+		   FROM payment WHERE payment_id = ?`, paymentID).
+		Scan(&status, &studentName, &className, &finalAmount, &existingURL, &existingSession)
+	if err == sql.ErrNoRows {
+		httpx.Error(w, http.StatusNotFound, "no such payment", nil)
+		return
+	}
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read payment", err)
+		return
+	}
+	// Only money still owed gets a link. A Paid payment has nothing to
+	// collect and a Refunded one must never become chargeable again.
+	if status != "Pending" {
+		httpx.Error(w, http.StatusConflict, "only a pending payment can take a card link", nil)
+		return
+	}
+	if existingURL != "" {
+		// A tournament page closes after half an hour; handing it back then
+		// would send the family to Stripe's "this page has expired".
+		s, err := client.GetCheckoutSession(r.Context(), existingSession)
+		if err != nil || s.Status != "expired" {
+			httpx.JSON(w, http.StatusOK, map[string]string{"url": existingURL})
+			return
+		}
+	}
+	satang := int64(math.Round(finalAmount * 100))
+	if satang < minSatang {
+		httpx.Error(w, http.StatusUnprocessableEntity, "amount is below the ฿10 card minimum", nil)
+		return
+	}
+
+	name := "JCA Chess Academy"
+	if className != "" {
+		name += " — " + className
+	}
+	if studentName != "" {
+		name += " (" + studentName + ")"
+	}
+	// A public entrant gave an email on the form, so it is filled in for them
+	// on Stripe's page. Nothing else is known about them to pass.
+	var email, entry string
+	d.QueryRow(`SELECT COALESCE(r.contact_email,''), r.tournament_registration_id FROM payment p
+	              JOIN tournament_registration r
+	                ON r.tournament_registration_id = p.tournament_registration_id
+	             WHERE p.payment_id = ?`, paymentID).Scan(&email, &entry)
+	base := returnBase(cfg)
+	cancelled := base + "/pay/cancelled"
+	if entry != "" {
+		cancelled += "?entry=" + url.QueryEscape(entry)
+	}
+	// A tournament entry's page closes after half an hour, so a family who
+	// walks away is told within the hour that the place is held but unpaid
+	// (entryemails.go). A course payment keeps Stripe's day.
+	var expires time.Time
+	if entry != "" {
+		expires = time.Now().Add(CheckoutWindow)
+	}
+	// Stripe replaces {CHECKOUT_SESSION_ID} itself, so the return page can
+	// settle the payment without waiting for the webhook.
+	session, err := client.CreateCheckoutSession(r.Context(), paymentID, name, satang,
+		base+"/pay/done?session_id={CHECKOUT_SESSION_ID}", cancelled, email, expires)
+	if err != nil {
+		// The Stripe error names the account; the log gets it, the client
+		// does not.
+		httpx.Error(w, http.StatusBadGateway, "could not create the payment link", err)
+		return
+	}
+	if _, err := d.Exec(
+		`UPDATE payment SET stripe_session_id = ?, stripe_checkout_url = ? WHERE payment_id = ?`,
+		session.ID, session.URL, paymentID); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not store the payment link", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"url": session.URL})
+}
+
+// stripeEvent is the slice of a webhook event this server reads.
+type stripeEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		Object struct {
+			ID            string            `json:"id"`
+			PaymentStatus string            `json:"payment_status"`
+			AmountTotal   int64             `json:"amount_total"`
+			Currency      string            `json:"currency"`
+			Metadata      map[string]string `json:"metadata"`
+		} `json:"object"`
+	} `json:"data"`
+}
+
+// HandleStripeWebhook marks a payment Paid — and releases its credits — when
+// Stripe reports the money for its Checkout session collected.
+//
+// Everything here assumes the caller is hostile until the signature says
+// otherwise, and assumes Stripe will deliver the same event more than once,
+// because it will. The idempotency guard is the UPDATE's `status = 'Pending'`:
+// whichever delivery flips the row grants the credits, every other one changes
+// nothing and answers 200.
+func HandleStripeWebhook(d *sql.DB, secret string, svc *notify.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 512*1024))
+		if err != nil {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large", nil)
+			return
+		}
+		if err := stripepay.VerifyWebhook(payload, r.Header.Get("Stripe-Signature"), secret, time.Now()); err != nil {
+			// One message for every failure mode, so a forger learns nothing.
+			httpx.Error(w, http.StatusBadRequest, "invalid signature", nil)
+			return
+		}
+
+		var ev stripeEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "malformed event", nil)
+			return
+		}
+		// Two events can settle a payment. A card pays at once, so its
+		// `checkout.session.completed` already says "paid". PromptPay does not:
+		// the session completes "unpaid" when the QR is shown, and the money is
+		// confirmed later by `checkout.session.async_payment_succeeded`. Only
+		// the first was read, so every PromptPay payment stayed Pending.
+		// Everything else — expiries, failures, an "unpaid" completion — is
+		// acknowledged and dropped; answering non-200 would make Stripe resend.
+		settles := ev.Type == "checkout.session.completed" ||
+			ev.Type == "checkout.session.async_payment_succeeded"
+		if !settles || ev.Data.Object.PaymentStatus != "paid" {
+			httpx.JSON(w, http.StatusOK, map[string]string{"received": "ignored"})
+			return
+		}
+		paymentID := ev.Data.Object.Metadata["payment_id"]
+		if paymentID == "" {
+			httpx.JSON(w, http.StatusOK, map[string]string{"received": "no payment id"})
+			return
+		}
+
+		outcome, err := settleCheckout(d, svc, paymentID, ev.Data.Object.ID,
+			ev.Data.Object.AmountTotal, ev.Data.Object.Currency)
+		if errors.Is(err, errAmountMismatch) {
+			httpx.Error(w, http.StatusBadRequest, "amount mismatch", nil)
+			return
+		}
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not settle payment", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"received": outcome})
+	}
+}
+
+var errAmountMismatch = errors.New("amount mismatch")
+
+// checkoutWindow is how long a tournament entry's Stripe page stays open.
+// Stripe's floor is 30 minutes; the extra minute keeps a slow clock on either
+// side from putting the request under it.
+const CheckoutWindow = 31 * time.Minute
+
+// settleCheckout marks a payment Paid for a Checkout session Stripe says is
+// paid, grants what it bought and sends the receipt. The webhook, the
+// thank-you page and the reconciler all settle through here, so it must be
+// safe to run more than once for the same session: the UPDATE's
+// `status = 'Pending'` decides which call does the work, and every other one
+// answers "already settled".
+//
+// The caller vouches that Stripe said "paid" — from a signed webhook, or from
+// asking Stripe directly. Nothing a browser sends may reach here.
+func settleCheckout(d *sql.DB, svc *notify.Service, paymentID, sessionID string, amountTotal int64, currency string) (string, error) {
+	tx, err := d.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var finalAmount float64
+	err = tx.QueryRow(`SELECT final_amount FROM payment WHERE payment_id = ?`, paymentID).Scan(&finalAmount)
+	if err == sql.ErrNoRows {
+		// Not ours — perhaps a test-mode event against a live database.
+		// Acknowledged so Stripe stops retrying; logged so a person looks.
+		log.Printf("stripe: settling unknown payment %q", paymentID)
+		return "unknown payment", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// The amount Stripe collected must be the amount this payment asked
+	// for. A mismatch means the session was not one this server created —
+	// refuse loudly rather than mark a ฿9,000 debt settled by ฿10.
+	if amountTotal != int64(math.Round(finalAmount*100)) || !strings.EqualFold(currency, "thb") {
+		log.Printf("stripe: amount mismatch on %s: session %d %s, payment %.2f THB",
+			paymentID, amountTotal, currency, finalAmount)
+		return "", errAmountMismatch
+	}
+
+	var was string
+	tx.QueryRow(`SELECT status FROM payment WHERE payment_id = ?`, paymentID).Scan(&was)
+	// Cancelled too: the money is real even when it arrived after the place was
+	// released, and the books must show it. Staff restore the place or refund.
+	res, err := tx.Exec(
+		`UPDATE payment SET status = 'Paid', payment_method = 'CreditCard',
+		        stripe_session_id = ?
+		  WHERE payment_id = ? AND status IN ('Pending','Cancelled')`,
+		sessionID, paymentID)
+	if err != nil {
+		return "", err
+	}
+	if was == "Cancelled" {
+		log.Printf("stripe: %s was paid after its place was released — restore the entry or refund it", paymentID)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Already Paid (a retry, or the desk beat Stripe) — done.
+		return "already settled", nil
+	}
+	if err := grantPurchasedCredits(tx, paymentID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	// This writes SQL directly rather than through the payments resource, so
+	// the resource's hook never sees it — the receipt is sent here, after the
+	// commit, same as every notification.
+	NotifyPaymentPaid(d, svc, paymentID)
+	return "ok", nil
+}
+
+// SettleFromStripe asks Stripe about one session and settles its payment if
+// the money is in. An expired session is forgotten, so the next "Pay now"
+// opens a fresh page instead of handing back one Stripe no longer accepts.
+func SettleFromStripe(ctx context.Context, d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service, sessionID string) (string, error) {
+	s, err := client.GetCheckoutSession(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if s.PaymentStatus == "paid" && s.PaymentID != "" {
+		return settleCheckout(d, svc, s.PaymentID, s.ID, s.AmountTotal, s.Currency)
+	}
+	if s.Status == "expired" {
+		_, err := d.Exec(`UPDATE payment SET stripe_session_id = NULL, stripe_checkout_url = NULL
+		                   WHERE stripe_session_id = ? AND status = 'Pending'`, sessionID)
+		return "expired", err
+	}
+	return "not paid yet", nil
+}
+
+// reconcileEvery is how often open card payments are checked with Stripe.
+const reconcileEvery = 5 * time.Minute
+
+// StartStripeReconciler settles card payments the webhook never reported.
+//
+// The webhook is the fast path, but a payment must not stay "Unpaid" because
+// one HTTP call from Stripe went missing — an endpoint registered on an old
+// host, a signing secret rolled on one side only, or a PromptPay confirmation
+// whose event the endpoint was never subscribed to. So every few minutes each
+// Pending payment with a Checkout session is looked up on Stripe directly.
+// Off, like the rest of card payments, until the Stripe key is set. Started by
+// the server, not by NewHandler, so tests control when it runs.
+func StartStripeReconciler(ctx context.Context, d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service) {
+	if client == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(reconcileEvery)
+		defer ticker.Stop()
+		for {
+			if err := ReconcileStripePayments(ctx, d, client, svc); err != nil {
+				log.Printf("stripe reconcile: %v", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+// ReconcileStripePayments runs one pass of StartStripeReconciler. One session
+// Stripe cannot answer for is logged and skipped, not allowed to stop the rest.
+func ReconcileStripePayments(ctx context.Context, d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service) error {
+	rows, err := d.Query(`SELECT stripe_session_id FROM payment
+	                       WHERE status = 'Pending' AND COALESCE(stripe_session_id, '') <> ''`)
+	if err != nil {
+		return err
+	}
+	var sessions []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		sessions = append(sessions, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range sessions {
+		if outcome, err := SettleFromStripe(ctx, d, client, svc, id); err != nil {
+			log.Printf("stripe reconcile: session %s: %v", id, err)
+		} else if outcome == "ok" {
+			log.Printf("stripe reconcile: settled session %s", id)
+		}
+	}
+	return nil
+}
+
+// HandlePayDone is the page Checkout returns the payer to. Stripe fills the
+// session id into the return URL, so the payment is settled here, at once,
+// by asking Stripe — the page's own word that it was reached proves nothing.
+// A session that is not paid yet (PromptPay still confirming) is left to the
+// webhook and the reconciler; the thank-you text is the same either way.
+func HandlePayDone(d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service, text string) http.HandlerFunc {
+	page := payPage(text)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if id := r.URL.Query().Get("session_id"); client != nil && strings.HasPrefix(id, "cs_") {
+			if _, err := SettleFromStripe(r.Context(), d, client, svc, id); err != nil {
+				log.Printf("stripe: settling on return, session %s: %v", id, err)
+			}
+		}
+		page(w, r)
+	}
+}
+
+// grantPurchasedCredits writes the credit purchase behind a payment, exactly
+// as the console does when the desk marks one Paid by hand: same amount, same
+// validity window, same link back to the payment. A payment without a package
+// or an enrolment legitimately buys nothing (a tournament fee, say).
+func grantPurchasedCredits(tx *sql.Tx, paymentID string) error {
+	var enrollmentID, packageID, studentID sql.NullString
+	err := tx.QueryRow(
+		`SELECT enrollment_id, credit_package_id, student_id FROM payment WHERE payment_id = ?`,
+		paymentID).Scan(&enrollmentID, &packageID, &studentID)
+	if err != nil {
+		return err
+	}
+	if !enrollmentID.Valid || enrollmentID.String == "" || !packageID.Valid || packageID.String == "" {
+		return nil
+	}
+	var classID sql.NullString
+	var creditAmount float64
+	var validityDays int
+	err = tx.QueryRow(
+		`SELECT class_id, credit_amount, COALESCE(validity_days, 0)
+		   FROM credit_package WHERE credit_package_id = ?`, packageID.String).
+		Scan(&classID, &creditAmount, &validityDays)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	day := academytime.Today()
+	var expiry any
+	if validityDays > 0 {
+		t, err := time.Parse("2006-01-02", day)
+		if err != nil {
+			return err
+		}
+		expiry = t.AddDate(0, 0, validityDays).Format("2006-01-02")
+	}
+	_, err = tx.Exec(
+		`INSERT INTO credit_transaction
+		        (credit_transaction_id, enrollment_id, student_id, class_id,
+		         transaction_type, amount, transaction_date, expiry_date, payment_id, notes)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		db.NewID("ctx"), enrollmentID.String, db.Nullable(studentID.String), db.Nullable(classID.String),
+		"purchase", creditAmount, day, expiry, paymentID, "card payment")
+	return err
+}
