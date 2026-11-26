@@ -5,7 +5,7 @@ CRUD over every entity in the ER model, served under `/api/v1`.
 
 Storage is SQLite — a local file in development, a [Turso](https://turso.tech)
 database in deployment. Both speak the same dialect, so queries and migrations
-are identical either way. Standard library `net/http` only; no web framework.
+are identical either way. Gin routes requests to the feature handlers.
 
 ## Run
 
@@ -24,7 +24,7 @@ without `PORT` and the two halves come up healthy, log nothing unusual, and
 never reach each other — `curl localhost:8080/health` returns `{"status":"ok"}`
 while every console page reports the backend unreachable.
 
-Requires Go 1.25+. Configuration is entirely environment-driven — copy
+Requires Go 1.26+. Configuration is entirely environment-driven — copy
 `.env.example` to `.env` to override anything.
 
 ## Test
@@ -35,6 +35,22 @@ go test ./...
 
 Integration tests build the full schema and drive the API over HTTP, covering
 auth, per-role tenancy scoping, and enum validation.
+
+## Backend design
+
+The school API is a modular monolith with one server process and one database.
+Use vertical slices for school workflows. The handler owns authentication, request
+validation and the response contract. A feature operation owns its SQL transaction
+and the timing of notifications. The resource registry owns shared CRUD policy.
+
+Start at `internal/api/routes.go` to follow a request. For a read-only example,
+`internal/api/history.go` checks who may see the student and calls
+`internal/studenthistory.Load` to assemble the timeline. Reuse the existing
+domain and integration packages when the workflow already has an owner.
+
+Declare each route once. The router registers that declaration with Gin and the
+compatibility mux used for HEAD, escaped or noncanonical paths, and method errors.
+Run `go test ./...` after changing a route or workflow.
 
 ## Layout
 

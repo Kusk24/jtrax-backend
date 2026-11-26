@@ -62,7 +62,7 @@ func accountRow(d *sql.DB, id string) (map[string]any, error) {
 	return m, nil
 }
 
-func mountUserAccounts(mux *http.ServeMux, d *sql.DB) {
+func mountUserAccounts(mux routeRegistrar, d *sql.DB) {
 	base := "/api/v1/user-accounts"
 
 	mux.HandleFunc("GET "+base, func(w http.ResponseWriter, r *http.Request) {

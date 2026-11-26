@@ -24,7 +24,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
-func mountTournamentDraft(mux *http.ServeMux, d *sql.DB, cardPayments bool) {
+func mountTournamentDraft(mux routeRegistrar, d *sql.DB, cardPayments bool) {
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/preview", handleDraftPreviewLink(d))
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/publish", handlePublishDraft(d))
 	mux.HandleFunc("DELETE /api/v1/tournaments/{id}/draft", handleDiscardDraft(d))

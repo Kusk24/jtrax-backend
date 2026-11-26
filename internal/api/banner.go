@@ -26,7 +26,7 @@ var bannerTypes = map[string]bool{
 	"image/webp": true,
 }
 
-func mountTournamentBanner(mux *http.ServeMux, d *sql.DB) {
+func mountTournamentBanner(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/banner", handleUploadBanner(d))
 	mux.HandleFunc("DELETE /api/v1/tournaments/{id}/banner", handleDeleteBanner(d))
 	mux.HandleFunc("GET /api/v1/tournaments/{id}/banner", httpx.RateLimit(120, handleGetBanner(d)))

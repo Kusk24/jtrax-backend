@@ -30,7 +30,7 @@ const minSatang = 1000
 // switched off: the link endpoint says so, and the webhook route is not
 // registered at all — an unverifiable webhook is better refused by 404 than
 // accepted by accident.
-func mountStripe(mux *http.ServeMux, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, svc *notify.Service) {
+func mountStripe(mux routeRegistrar, d *sql.DB, client *stripepay.Client, cfg stripepay.Config, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/payments/{id}/stripe-link", handleStripeLink(d, client, cfg))
 	// The parent portal's door to the same thing, for a tournament entry fee.
 	// Authenticated, so it sits outside the unauthenticated budget, but it

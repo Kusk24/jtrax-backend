@@ -112,6 +112,6 @@ func handleDashboardActivity(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountDashboardActivity(mux *http.ServeMux, d *sql.DB) {
+func mountDashboardActivity(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/dashboard/activity", handleDashboardActivity(d))
 }

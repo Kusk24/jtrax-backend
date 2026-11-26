@@ -14,7 +14,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
-func mountMyData(mux *http.ServeMux, d *sql.DB) {
+func mountMyData(mux routeRegistrar, d *sql.DB) {
 	// Each export reads every table a family touches, so it is budgeted.
 	mux.HandleFunc("GET /api/v1/me/export", httpx.RateLimit(10, handleExport(d)))
 	mux.HandleFunc("POST /api/v1/me/erasure-request", httpx.RateLimit(10, handleErasureRequest(d)))

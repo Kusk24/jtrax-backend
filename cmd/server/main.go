@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/auth"
@@ -28,6 +30,9 @@ import (
 )
 
 func main() {
+	if os.Getenv(gin.EnvGinMode) == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	dsn := firstSet(os.Getenv("DATABASE_URL"), os.Getenv("JTRAX_DB"), "jtrax.db")
 	dsn = withAuthToken(dsn, os.Getenv("TURSO_AUTH_TOKEN"))
 	d, err := db.Open(dsn)

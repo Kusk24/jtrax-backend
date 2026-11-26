@@ -335,7 +335,7 @@ func handleDisconnectResults(c *chessResultsDeps) http.HandlerFunc {
 	}
 }
 
-func mountResultSections(mux *http.ServeMux, c *chessResultsDeps) {
+func mountResultSections(mux routeRegistrar, c *chessResultsDeps) {
 	const p = "/api/v1/tournaments/{id}/results-sections"
 	mux.HandleFunc("GET "+p, handleListResultSections(c))
 	// Connecting reads every section, so it carries the same outbound budget

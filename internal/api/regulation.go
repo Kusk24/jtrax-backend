@@ -19,7 +19,7 @@ import (
 // or two, and the whole file sits in a database row.
 const maxRegulationBytes = 5 << 20
 
-func mountTournamentRegulation(mux *http.ServeMux, d *sql.DB) {
+func mountTournamentRegulation(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/regulation", handleUploadRegulation(d))
 	mux.HandleFunc("DELETE /api/v1/tournaments/{id}/regulation", handleDeleteRegulation(d))
 	// Public — the registration page links it — so it is rate-limited like

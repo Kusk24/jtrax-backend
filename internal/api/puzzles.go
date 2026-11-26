@@ -416,7 +416,7 @@ func minutesOnPuzzle(d *sql.DB, studentID, puzzleID string) int {
 	return mins
 }
 
-func mountPuzzles(mux *http.ServeMux, d *sql.DB) {
+func mountPuzzles(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/puzzles/daily", handleDailyPuzzles(d, newPuzzleClient()))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/open", handlePuzzleOpen(d))
 	mux.HandleFunc("POST /api/v1/puzzles/{id}/attempt", handlePuzzleAttempt(d))

@@ -681,7 +681,7 @@ func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT FAILED")
 }
 
-func mountPublicRegistration(mux *http.ServeMux, deps *publicEntryDeps) {
+func mountPublicRegistration(mux routeRegistrar, deps *publicEntryDeps) {
 	d := deps.db
 	const p = "/api/v1/public/tournaments"
 	// Reads are cheap and cacheable; the write is the one that costs something,

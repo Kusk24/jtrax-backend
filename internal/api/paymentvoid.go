@@ -135,7 +135,7 @@ func handlePaymentHistory(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountPaymentVoid(mux *http.ServeMux, d *sql.DB) {
+func mountPaymentVoid(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("POST /api/v1/payments/{id}/void", handleVoidPayment(d))
 	mux.HandleFunc("GET /api/v1/payments/{id}/history", handlePaymentHistory(d))
 }

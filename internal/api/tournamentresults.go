@@ -602,7 +602,7 @@ func handleListLiveTournaments(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountTournamentResults(mux *http.ServeMux, d *sql.DB, cr *chessResultsDeps) {
+func mountTournamentResults(mux routeRegistrar, d *sql.DB, cr *chessResultsDeps) {
 	const p = "/api/v1/tournaments"
 	mux.HandleFunc("GET "+p+"/{id}/results", handleTournamentResults(d))
 	mux.HandleFunc("POST "+p+"/{id}/rounds", handleCreateRound(d))

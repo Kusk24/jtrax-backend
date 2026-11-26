@@ -46,7 +46,7 @@ func handleAcademyContact(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountAcademyContact(mux *http.ServeMux, d *sql.DB) {
+func mountAcademyContact(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/public/academy", httpx.RateLimit(120, handleAcademyContact(d)))
 }
 

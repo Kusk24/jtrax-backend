@@ -22,12 +22,11 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
+	"github.com/Kusk24/jtrax-backend/internal/game"
 	"github.com/Kusk24/jtrax-backend/internal/httpx"
 )
 
 const (
-	pointsPuzzle    = 5
-	pointsGame      = 10
 	pointsChallenge = 10
 	pointsPerLevel  = 90
 	// How much of the daily-challenge record the History tab shows.
@@ -191,7 +190,7 @@ func handleStudentProgress(d *sql.DB) http.HandlerFunc {
 				c.Total = dailyCount
 			}
 			c.Complete = c.Solved >= dailyCount
-			c.Points = c.Solved * pointsPuzzle
+			c.Points = c.Solved * game.SolvedPuzzlePoints
 			if c.Complete {
 				p.ChallengesCompleted++
 				c.Points += pointsChallenge
@@ -202,8 +201,8 @@ func handleStudentProgress(d *sql.DB) http.HandlerFunc {
 		}
 		rows.Close()
 
-		p.Points.Puzzles = p.PuzzlesSolved * pointsPuzzle
-		p.Points.Games = p.GamesPlayed * pointsGame
+		p.Points.Puzzles = p.PuzzlesSolved * game.SolvedPuzzlePoints
+		p.Points.Games = p.GamesPlayed * game.FinishedGamePoints
 		p.Points.Challenges = p.ChallengesCompleted * pointsChallenge
 		p.Points.Total = p.Points.Puzzles + p.Points.Games + p.Points.Challenges
 		p.Level.Level, p.Level.Into, p.Level.ToNext = levelOf(p.Points.Total)
@@ -244,6 +243,6 @@ func handleStudentProgress(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountProgress(mux *http.ServeMux, d *sql.DB) {
+func mountProgress(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/student/progress", handleStudentProgress(d))
 }

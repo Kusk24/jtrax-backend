@@ -171,6 +171,6 @@ func handlePracticeSummary(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountPractice(mux *http.ServeMux, d *sql.DB) {
+func mountPractice(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/practice/summary", handlePracticeSummary(d))
 }
