@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/retention"
 )
 
 func count(t *testing.T, d *sql.DB, query string, args ...any) int {
@@ -45,7 +45,7 @@ func TestHousekeepingRemovesOnlyWhatIsPast(t *testing.T) {
 		('new', 'trn_wellington', '2016-01-01', ?), ('stale', 'trn_wellington', '2016-01-01', ?)`,
 		sqlt(time.Hour), sqlt(2*24*time.Hour))
 
-	report, err := api.SweepRetention(d, now, api.RetentionConfig{})
+	report, err := retention.SweepRetention(d, now, retention.RetentionConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestPolicyRulesWaitForAPeriod(t *testing.T) {
 		VALUES ('pub', 'trn_wellington', 'Public Kid', 'kid@example.com', '0800000000', 'asthma', '2016-01-01')`)
 
 	// Off: nothing touched, however old.
-	if _, err := api.SweepRetention(d, now, api.RetentionConfig{}); err != nil {
+	if _, err := retention.SweepRetention(d, now, retention.RetentionConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	if count(t, d, `SELECT COUNT(*) FROM tournament_registration WHERE tournament_registration_id = 'pub' AND medical_notes = 'asthma' AND contact_email <> ''`) != 1 {
@@ -83,8 +83,8 @@ func TestPolicyRulesWaitForAPeriod(t *testing.T) {
 	}
 
 	// A period longer than the event's age: still kept.
-	long := api.RetentionConfig{MedicalNotesDays: 3650, PublicEntrantDays: 3650}
-	if _, err := api.SweepRetention(d, now, long); err != nil {
+	long := retention.RetentionConfig{MedicalNotesDays: 3650, PublicEntrantDays: 3650}
+	if _, err := retention.SweepRetention(d, now, long); err != nil {
 		t.Fatal(err)
 	}
 	if count(t, d, `SELECT COUNT(*) FROM tournament_registration WHERE tournament_registration_id = 'pub' AND medical_notes = 'asthma'`) != 1 {
@@ -92,8 +92,8 @@ func TestPolicyRulesWaitForAPeriod(t *testing.T) {
 	}
 
 	// Past it: health data and contact details go, the published name stays.
-	short := api.RetentionConfig{MedicalNotesDays: 30, PublicEntrantDays: 30}
-	if _, err := api.SweepRetention(d, now, short); err != nil {
+	short := retention.RetentionConfig{MedicalNotesDays: 30, PublicEntrantDays: 30}
+	if _, err := retention.SweepRetention(d, now, short); err != nil {
 		t.Fatal(err)
 	}
 	var name, email, notes string
@@ -109,7 +109,7 @@ func TestRetentionFromEnvNeverDeletesOnATypo(t *testing.T) {
 	t.Setenv("JTRAX_RETAIN_MEDICAL_NOTES_DAYS", "30")
 	t.Setenv("JTRAX_RETAIN_PUBLIC_ENTRANT_DAYS", "thirty")
 	t.Setenv("JTRAX_RETAIN_NOTIFICATION_DAYS", "-5")
-	cfg := api.RetentionFromEnv()
+	cfg := retention.RetentionFromEnv()
 	if cfg.MedicalNotesDays != 30 || cfg.PublicEntrantDays != 0 || cfg.NotificationDays != 0 || cfg.LineMessageDays != 0 {
 		t.Errorf("config: %+v", cfg)
 	}

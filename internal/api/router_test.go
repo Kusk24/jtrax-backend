@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -70,4 +71,35 @@ func TestGinRouteContracts(t *testing.T) {
 		check("GET", path)
 	}
 	t.Logf("compared %d registered routes", len(routes))
+}
+
+// The route comparison above exercises each registered handler. This independent
+// inventory also detects a whole feature being omitted from registerRoutes.
+func TestPublishedRoutesRemainAvailable(t *testing.T) {
+	raw, err := os.ReadFile("testdata/published_routes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stripeEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stripe=%t", stripeEnabled), func(t *testing.T) {
+			t.Setenv("STRIPE_SECRET_KEY", "")
+			t.Setenv("STRIPE_WEBHOOK_SECRET", "")
+			if stripeEnabled {
+				t.Setenv("STRIPE_SECRET_KEY", "test-key")
+				t.Setenv("STRIPE_WEBHOOK_SECRET", "test-secret")
+			}
+			var routes patterns
+			registerRoutes(&routes, nil, mail.Config{}, nil, nil)
+			available := make(map[string]bool, len(routes))
+			for _, route := range routes {
+				available[route] = true
+			}
+			for _, route := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				want := stripeEnabled || route != "POST /api/v1/stripe/webhook"
+				if available[route] != want {
+					t.Errorf("%s: availability = %t, want %t", route, available[route], want)
+				}
+			}
+		})
+	}
 }

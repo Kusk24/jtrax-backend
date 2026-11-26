@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
-	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/payments"
 )
 
 // The seed links parent Sandy (usr_sandy) as mother of Penny (stu_penny) and
@@ -266,7 +266,7 @@ func TestCheckOutSendsLowCreditOnceInAppOnly(t *testing.T) {
 
 	/* The hourly sweep finds Penny's same low balance and says nothing more
 	   about her (Uri, also under a line of 100, gets his own). */
-	api.RunCreditReminders(d, notify.New(d, nil, mail.Config{}), daytime())
+	payments.RunCreditReminders(d, notify.New(d, nil, mail.Config{}), daytime())
 	penny := 0
 	for _, row := range inbox(t, srv, "sandy01234@gmail.com") {
 		if b, _ := row["body"].(string); row["type"] == "low_credit" && strings.HasPrefix(b, "Penny ") {
@@ -313,13 +313,13 @@ func TestExpiringCreditsAreAnnouncedOnce(t *testing.T) {
 	svc := notify.New(d, nil, mail.Config{})
 
 	night := time.Date(2026, 10, 6, 23, 0, 0, 0, academytime.Location())
-	api.RunCreditReminders(d, svc, night)
+	payments.RunCreditReminders(d, svc, night)
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 0 {
 		t.Fatalf("credit_expiry sent at night: %d", got)
 	}
 
-	api.RunCreditReminders(d, svc, daytime())
-	api.RunCreditReminders(d, svc, daytime())
+	payments.RunCreditReminders(d, svc, daytime())
+	payments.RunCreditReminders(d, svc, daytime())
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "credit_expiry"); got != 1 {
 		t.Fatalf("credit_expiry after two sweeps: %d, want 1", got)
 	}
@@ -619,7 +619,6 @@ func TestAnEarlyCheckOutSaysWhenTheChildLeft(t *testing.T) {
 		}
 	}
 }
-
 
 // Arriving late is charged for the part of the class attended, and the
 // receipt says so: half an hour of a one-hour class is half a credit.

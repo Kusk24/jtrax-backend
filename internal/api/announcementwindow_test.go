@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/communications"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 )
@@ -57,8 +57,8 @@ func TestAnnouncementShowsInsideItsWindow(t *testing.T) {
 
 	// When its start comes, the later one is told — once.
 	svc := notify.New(d, &captureSender{}, mail.Config{})
-	api.RunAnnouncementSchedule(d, svc, start)
-	api.RunAnnouncementSchedule(d, svc, start)
+	communications.RunAnnouncementSchedule(d, svc, start)
+	communications.RunAnnouncementSchedule(d, svc, start)
 	if got := countType(inbox(t, srv, "sandy01234@gmail.com"), "announcement"); got != 2 {
 		t.Fatalf("want 2 announcement notifications after the start, got %d", got)
 	}

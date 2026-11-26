@@ -11,6 +11,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/api"
 	"github.com/Kusk24/jtrax-backend/internal/mail"
+	"github.com/Kusk24/jtrax-backend/internal/tournaments"
 )
 
 var arrivalCode = regexp.MustCompile(`/arrival/([^#\s]+)#code=([0-9a-f]{64})`)
@@ -37,18 +38,18 @@ func TestArrivalReminderIsSentOnceOnTheConfiguredDay(t *testing.T) {
 	cfg := mail.Config{AppURL: "https://portal.example"}
 
 	// Six days early: not yet.
-	if n, err := api.SendArrivalReminders(d, cfg, cap, academyDay(4)); err != nil || n != 0 {
+	if n, err := tournaments.SendArrivalReminders(d, cfg, cap, academyDay(4)); err != nil || n != 0 {
 		t.Fatalf("too early: asked %d, %v", n, err)
 	}
 	// Five days before: Sandy, Penny's mother, is asked.
-	if n, err := api.SendArrivalReminders(d, cfg, cap, academyDay(5)); err != nil || n != 1 {
+	if n, err := tournaments.SendArrivalReminders(d, cfg, cap, academyDay(5)); err != nil || n != 1 {
 		t.Fatalf("on the day: asked %d, %v", n, err)
 	}
 	if len(cap.sent) != 1 || cap.sent[0].To != "sandy01234@gmail.com" {
 		t.Fatalf("want one email to Sandy, got %+v", cap.sent)
 	}
 	// And only once.
-	if n, _ := api.SendArrivalReminders(d, cfg, cap, academyDay(6)); n != 0 {
+	if n, _ := tournaments.SendArrivalReminders(d, cfg, cap, academyDay(6)); n != 0 {
 		t.Fatalf("asked again: %d", n)
 	}
 
@@ -94,11 +95,11 @@ func TestArrivalReminderFollowsTheNewSchedule(t *testing.T) {
 	cap := &captureSender{}
 	cfg := mail.Config{AppURL: "https://portal.example"}
 
-	if n, _ := api.SendArrivalReminders(d, cfg, cap, academyDay(3)); n != 0 {
+	if n, _ := tournaments.SendArrivalReminders(d, cfg, cap, academyDay(3)); n != 0 {
 		t.Fatalf("two days before, not seven: asked %d", n)
 	}
 	admin.do("PATCH", "/api/v1/tournaments/"+trn["tournament_id"].(string), map[string]any{"arrival_reminder_days": 7})
-	if n, _ := api.SendArrivalReminders(d, cfg, cap, academyDay(3)); n != 1 {
+	if n, _ := tournaments.SendArrivalReminders(d, cfg, cap, academyDay(3)); n != 1 {
 		t.Fatalf("now seven days before: asked %d", n)
 	}
 }
@@ -113,7 +114,7 @@ func TestNoReminderWhenNoneIsSet(t *testing.T) {
 		"tournament_id": trn["tournament_id"], "student_id": "stu_penny",
 		"participant_name": "Penny", "status": "Approved",
 	})
-	if n, _ := api.SendArrivalReminders(d, mail.Config{}, &captureSender{}, academyDay(1)); n != 0 {
+	if n, _ := tournaments.SendArrivalReminders(d, mail.Config{}, &captureSender{}, academyDay(1)); n != 0 {
 		t.Fatalf("no schedule, no reminder: asked %d", n)
 	}
 }
@@ -187,7 +188,7 @@ func TestArrivalReminderAsksAFamilyOnce(t *testing.T) {
 	}
 
 	cap := &captureSender{}
-	if n, err := api.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 2 {
+	if n, err := tournaments.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 2 {
 		t.Fatalf("asked %d entries, %v; want 2", n, err)
 	}
 	if len(cap.sent) != 1 || cap.sent[0].To != "sandy01234@gmail.com" {
@@ -290,14 +291,14 @@ func TestArrivalReminderWaitsForNineInTheMorning(t *testing.T) {
 	cfg := mail.Config{AppURL: "https://portal.example"}
 
 	for _, early := range []time.Time{at(5, 0).Add(5 * time.Minute), at(5, 8).Add(59 * time.Minute)} {
-		if n, err := api.RunArrivalReminders(d, cfg, cap, early); err != nil || n != 0 {
+		if n, err := tournaments.RunArrivalReminders(d, cfg, cap, early); err != nil || n != 0 {
 			t.Fatalf("asked at %s: %d, %v", early.Format("15:04"), n, err)
 		}
 	}
-	if n, err := api.RunArrivalReminders(d, cfg, cap, at(5, 9)); err != nil || n != 1 {
+	if n, err := tournaments.RunArrivalReminders(d, cfg, cap, at(5, 9)); err != nil || n != 1 {
 		t.Fatalf("at 09:00: asked %d, %v", n, err)
 	}
-	if n, _ := api.RunArrivalReminders(d, cfg, cap, at(5, 14)); n != 0 {
+	if n, _ := tournaments.RunArrivalReminders(d, cfg, cap, at(5, 14)); n != 0 {
 		t.Fatalf("asked again: %d", n)
 	}
 }
@@ -325,7 +326,7 @@ func TestTheArrivalLinkShowsTheVenueAndBanner(t *testing.T) {
 		t.Fatal(err)
 	}
 	cap := &captureSender{}
-	if n, err := api.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 1 {
+	if n, err := tournaments.SendArrivalReminders(d, mail.Config{AppURL: "https://portal.example"}, cap, academyDay(5)); err != nil || n != 1 {
 		t.Fatalf("reminder: %d %v", n, err)
 	}
 	code := arrivalCode.FindStringSubmatch(cap.sent[0].Body)[2]

@@ -38,33 +38,38 @@ auth, per-role tenancy scoping, and enum validation.
 
 ## Backend design
 
-The school API is a modular monolith with one server process and one database.
-Use vertical slices for school workflows. The handler owns authentication, request
-validation and the response contract. A feature operation owns its SQL transaction
-and the timing of notifications. The resource registry owns shared CRUD policy.
+JTrax deploys one Go server and uses one database. Follow a request from
+`internal/api/routes.go` into the package for its school workflow. Scheduled
+jobs enter the same packages from `cmd/server/main.go`.
 
-Start at `internal/api/routes.go` to follow a request. For a read-only example,
-`internal/api/history.go` checks who may see the student and calls
-`internal/studenthistory.Load` to assemble the timeline. Reuse the existing
-domain and integration packages when the workflow already has an owner.
+| Where to look | Responsibility |
+| --- | --- |
+| `internal/api`, `internal/records` | Gin routing, the central resource registry, and shared CRUD handlers |
+| `internal/accounts`, `internal/families`, `internal/classroom` | Account access, pupil and family records, attendance and class operations |
+| `internal/payments`, `internal/fees` | Payment corrections, credit accounting, checkout and tournament fee calculations |
+| `internal/tournaments`, `internal/entrymail`, `internal/entrylinks` | Event registration, results, entry correspondence and payment links |
+| `internal/chessplay`, `internal/studenthistory` | Rooms, challenges, puzzle practice, progress and the student timeline |
+| `internal/communications`, `internal/lineinbox` | Notifications, delivery preferences and LINE inbox operations |
+| `internal/academy`, `internal/forms`, `internal/retention` | Dashboard and contact information, document scanning and retention jobs |
 
-Declare each route once. The router registers that declaration with Gin and the
-compatibility mux used for HEAD, escaped or noncanonical paths, and method errors.
-Run `go test ./...` after changing a route or workflow.
+For a worked example, read `internal/payments/paymentvoid.go` and
+`internal/payments/void.go`. The handler authenticates the administrator,
+validates the reason, and maps the result to the public response. The workflow
+owns the transaction that updates the payment, reverses credits, checks the
+enrolment and writes the audit record. Its rollback test lives beside it.
+Class cancellation in `internal/classroom/classcancel.go` also shows where to
+send notifications after a successful commit.
 
-## Layout
+Keep simple reads alongside their handlers. Put multi-step school rules and
+their transaction in the owning feature. The registry in
+`internal/api/registry.go` defines shared CRUD permissions and row scopes.
+External capabilities such as Stripe checkout, mail delivery, OCR, Lichess
+puzzles and tournament results have interfaces at their integration boundaries.
 
-| Path                  | What lives here                                          |
-| --------------------- | -------------------------------------------------------- |
-| `cmd/server`          | entry point and environment configuration                 |
-| `internal/api`        | route table, the generic CRUD engine, resource registry   |
-| `internal/auth`       | password hashing and session tokens                       |
-| `internal/db`         | connection, embedded migrations, development seed         |
-| `internal/httpx`      | JSON helpers, CORS, rate limiting                         |
-
-Endpoints are generated from `internal/api/registry.go`, which declares each
-resource's per-role permissions and the SQL scope that limits which rows that
-role can see. Authorization is enforced in the query, not by the caller.
+Each route is declared once. Gin dispatches ordinary requests. A compatibility
+mux preserves the existing behavior for HEAD, escaped or noncanonical paths,
+and method errors. The HTTP integration suite in `internal/api` exercises the
+features through the full server handler with a temporary database.
 
 ## Deploy
 

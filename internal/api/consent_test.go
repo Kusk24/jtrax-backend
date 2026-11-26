@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/families"
 )
 
 func consents(t *testing.T, d *sql.DB, regID string) map[string]string {
@@ -39,7 +39,7 @@ func TestAPublicEntryNeedsThePrivacyNoticeAndRecordsIt(t *testing.T) {
 	}
 	d, _ := serverDBs.Load(pub.srv.URL)
 	got := consents(t, d.(*sql.DB), out["registrationId"].(string))
-	if got["privacy_notice"] != api.PrivacyNoticeVersion {
+	if got["privacy_notice"] != families.PrivacyNoticeVersion {
 		t.Errorf("consent records: %v", got)
 	}
 }

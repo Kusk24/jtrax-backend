@@ -3,7 +3,7 @@ package api_test
 import (
 	"testing"
 
-	"github.com/Kusk24/jtrax-backend/internal/api"
+	"github.com/Kusk24/jtrax-backend/internal/tournaments"
 )
 
 func tournamentStatusOf(t *testing.T, c *client, id string) string {
@@ -49,7 +49,7 @@ func TestTournamentStatusMovesOnWithTheDays(t *testing.T) {
 	for _, step := range []struct{ day, want string }{
 		{academyDay(1), "Upcoming"}, {academyDay(2), "Ongoing"}, {academyDay(3), "Ongoing"}, {academyDay(4), "Completed"},
 	} {
-		if err := api.SyncTournamentStatus(d, step.day); err != nil {
+		if err := tournaments.SyncTournamentStatus(d, step.day); err != nil {
 			t.Fatal(err)
 		}
 		if got := tournamentStatusOf(t, c, id); got != step.want {
@@ -67,7 +67,7 @@ func TestAPinnedTournamentStatusIsLeftAlone(t *testing.T) {
 		"name": "Called off", "start_date": academyDay(5), "tournament_status": "Completed", "status_locked": true,
 	})
 	id := trn["tournament_id"].(string)
-	if err := api.SyncTournamentStatus(d, academyDay(0)); err != nil {
+	if err := tournaments.SyncTournamentStatus(d, academyDay(0)); err != nil {
 		t.Fatal(err)
 	}
 	if got := tournamentStatusOf(t, c, id); got != "Completed" {
