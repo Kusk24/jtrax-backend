@@ -62,7 +62,8 @@ send notifications after a successful commit.
 
 Keep simple reads alongside their handlers. Put multi-step school rules and
 their transaction in the owning feature. The registry in
-`internal/api/registry.go` defines shared CRUD permissions and row scopes.
+`internal/api/registry.go` lists the resource groups. The corresponding
+`registry_*.go` files define their CRUD permissions, row scopes and hooks.
 External capabilities such as Stripe checkout, mail delivery, OCR, Lichess
 puzzles and tournament results have interfaces at their integration boundaries.
 
