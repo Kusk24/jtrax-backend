@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -348,55 +349,15 @@ func (rs *Resource) handleCreate(d *sql.DB) gin.HandlerFunc {
 			// Ownership checks need the id column too (it IS the owner key for
 			// keyed resources like practice_settings / notification_preference).
 			ownRow := map[string]any{rs.IDCol: rowID}
-			for k, v := range row {
-				ownRow[k] = v
-			}
+			maps.Copy(ownRow, row)
 			if !rs.Own(d, id, ownRow) {
 				httpx.Error(ctx, http.StatusForbidden, "not allowed for this record", nil)
 				return
 			}
 		}
-		names := []string{rs.IDCol}
-		marks := []string{"?"}
-		args := []any{rowID}
-		for name, v := range row {
-			names = append(names, name)
-			marks = append(marks, "?")
-			args = append(args, v)
-		}
-		insert := "INSERT INTO " + rs.Table + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(marks, ", ") + ")"
-		var err error
-		if rs.AfterWrite == nil && rs.AfterInsert == nil {
-			_, err = d.Exec(insert, args...)
-		} else {
-			err = db.InTransaction(d, func(tx *sql.Tx) error {
-				if _, e := tx.Exec(insert, args...); e != nil {
-					return e
-				}
-				if rs.AfterInsert != nil {
-					if e := rs.AfterInsert(tx, rowID); e != nil {
-						return e
-					}
-				}
-				if rs.AfterWrite == nil {
-					return nil
-				}
-				return rs.AfterWrite(tx, rowID)
-			})
-		}
+		err := rs.insert(d, rowID, row)
 		if err != nil {
-			var ce *ClientError
-			if errors.As(err, &ce) {
-				httpx.Error(ctx, ce.Status, ce.Message, err)
-				return
-			}
-			if rs.Duplicate != nil {
-				if msg := rs.Duplicate(err); msg != "" {
-					httpx.Error(ctx, http.StatusConflict, msg, err)
-					return
-				}
-			}
-			httpx.Error(ctx, http.StatusBadRequest, "could not create record (check references and uniqueness)", err)
+			rs.writeError(ctx, err, "could not create record (check references and uniqueness)")
 			return
 		}
 		created, _, err := rs.fetch(d, id, rowID)
@@ -445,60 +406,16 @@ func (rs *Resource) handleUpdate(d *sql.DB) gin.HandlerFunc {
 			return
 		}
 		if rs.Check != nil {
-			merged := map[string]any{}
-			for k, v := range existing {
-				merged[k] = v
-			}
-			for k, v := range patch {
-				merged[k] = v
-			}
+			merged := maps.Clone(existing)
+			maps.Copy(merged, patch)
 			if err := rs.Check(merged); err != nil {
 				httpx.Error(ctx, http.StatusBadRequest, err.Error(), nil)
 				return
 			}
 		}
-		sets := []string{}
-		args := []any{}
-		for name, v := range patch {
-			sets = append(sets, name+" = ?")
-			args = append(args, v)
-		}
-		args = append(args, ctx.Param("id"))
-		query := "UPDATE " + rs.Table + " SET " + strings.Join(sets, ", ") + " WHERE " + rs.IDCol + " = ?"
-		if rs.AfterWrite == nil && rs.BeforeUpdate == nil {
-			_, err = d.Exec(query, args...)
-		} else {
-			/* Re-run rather than adjust: moving a student to a longer class has
-			   to change what the afternoon cost, and the hook works that out
-			   from the row as it now stands. */
-			err = db.InTransaction(d, func(tx *sql.Tx) error {
-				if rs.BeforeUpdate != nil {
-					if e := rs.BeforeUpdate(tx, id, ctx.Param("id"), existing, patch); e != nil {
-						return e
-					}
-				}
-				if _, e := tx.Exec(query, args...); e != nil {
-					return e
-				}
-				if rs.AfterWrite == nil {
-					return nil
-				}
-				return rs.AfterWrite(tx, ctx.Param("id"))
-			})
-		}
+		err = rs.update(d, id, ctx.Param("id"), existing, patch)
 		if err != nil {
-			var ce *ClientError
-			if errors.As(err, &ce) {
-				httpx.Error(ctx, ce.Status, ce.Message, err)
-				return
-			}
-			if rs.Duplicate != nil {
-				if msg := rs.Duplicate(err); msg != "" {
-					httpx.Error(ctx, http.StatusConflict, msg, err)
-					return
-				}
-			}
-			httpx.Error(ctx, http.StatusBadRequest, "could not update record", err)
+			rs.writeError(ctx, err, "could not update record")
 			return
 		}
 		updated, _, err := rs.fetch(d, id, ctx.Param("id"))
@@ -511,6 +428,22 @@ func (rs *Resource) handleUpdate(d *sql.DB) gin.HandlerFunc {
 		}
 		httpx.JSON(ctx, http.StatusOK, updated)
 	}
+}
+
+// Hooks may supply a client-safe error or a resource-specific duplicate message.
+func (rs *Resource) writeError(ctx *gin.Context, err error, fallback string) {
+	var ce *ClientError
+	if errors.As(err, &ce) {
+		httpx.Error(ctx, ce.Status, ce.Message, err)
+		return
+	}
+	if rs.Duplicate != nil {
+		if msg := rs.Duplicate(err); msg != "" {
+			httpx.Error(ctx, http.StatusConflict, msg, err)
+			return
+		}
+	}
+	httpx.Error(ctx, http.StatusBadRequest, fallback, err)
 }
 
 // Deletes are staff-only across the board.
@@ -528,30 +461,7 @@ func (rs *Resource) handleDelete(d *sql.DB) gin.HandlerFunc {
 			httpx.Error(ctx, http.StatusMethodNotAllowed, rs.NoDelete, nil)
 			return
 		}
-		del := "DELETE FROM " + rs.Table + " WHERE " + rs.IDCol + " = ?"
-		var affected int64
-		var err error
-		if rs.BeforeDelete == nil {
-			var res sql.Result
-			if res, err = d.Exec(del, ctx.Param("id")); err == nil {
-				affected, _ = res.RowsAffected()
-			}
-		} else {
-			/* What the row cost has to go with the row, and in the same breath:
-			   credits refunded but the attendance still standing would be worse
-			   than either alone. */
-			err = db.InTransaction(d, func(tx *sql.Tx) error {
-				if e := rs.BeforeDelete(tx, ctx.Param("id")); e != nil {
-					return e
-				}
-				res, e := tx.Exec(del, ctx.Param("id"))
-				if e != nil {
-					return e
-				}
-				affected, _ = res.RowsAffected()
-				return nil
-			})
-		}
+		affected, err := rs.delete(d, ctx.Param("id"))
 		if err != nil {
 			httpx.Error(ctx, http.StatusConflict, "cannot delete: record is referenced by other data", err)
 			return

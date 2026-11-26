@@ -452,7 +452,7 @@ func grantPurchasedCredits(tx *sql.Tx, paymentID string) error {
 		        (credit_transaction_id, enrollment_id, student_id, class_id,
 		         transaction_type, amount, transaction_date, expiry_date, payment_id, notes)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		db.NewID("ctx"), enrollmentID.String, db.Nullable(studentID.String), db.Nullable(classID.String),
+		db.NewID("ctx"), enrollmentID.String, db.NullIfEmpty(studentID.String), db.NullIfEmpty(classID.String),
 		"purchase", creditAmount, day, expiry, paymentID, "card payment")
 	return err
 }

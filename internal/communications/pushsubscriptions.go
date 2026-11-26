@@ -66,7 +66,7 @@ func handleRegisterPush(d *sql.DB) gin.HandlerFunc {
 			   user_account_id = excluded.user_account_id,
 			   channel = excluded.channel, p256dh = excluded.p256dh, auth = excluded.auth,
 			   user_agent = excluded.user_agent, last_seen_at = datetime('now'), failed_at = NULL`,
-			db.NewID("psb"), id.UserAccountID, in.Channel, in.Endpoint, db.Nullable(in.P256dh), db.Nullable(in.Auth), db.Nullable(in.UserAgent)); err != nil {
+			db.NewID("psb"), id.UserAccountID, in.Channel, in.Endpoint, db.NullIfEmpty(in.P256dh), db.NullIfEmpty(in.Auth), db.NullIfEmpty(in.UserAgent)); err != nil {
 			httpx.Error(ctx, http.StatusInternalServerError, "could not register", err)
 			return
 		}

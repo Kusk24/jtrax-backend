@@ -5,13 +5,7 @@ import (
 	"strings"
 )
 
-func Nullable(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
+// NullIfEmpty stores an absent string as SQL NULL.
 func NullIfEmpty(s string) any {
 	if s == "" {
 		return nil

@@ -72,7 +72,7 @@ func handleListNotifications(d *sql.DB) gin.HandlerFunc {
 			}
 			list = append(list, map[string]any{
 				"notification_id": nid, "type": typ, "title": title, "body": body,
-				"data": data, "created_at": createdAt, "read_at": db.Nullable(readAt),
+				"data": data, "created_at": createdAt, "read_at": db.NullIfEmpty(readAt),
 			})
 		}
 		httpx.JSON(ctx, http.StatusOK, map[string]any{"notifications": list, "unread": unread})

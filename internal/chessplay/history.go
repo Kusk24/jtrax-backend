@@ -93,7 +93,7 @@ func handleRecordSoloGame(d *sql.DB) gin.HandlerFunc {
 			                       moves, move_count, result, result_reason, started_at)
 			VALUES (?,?,?,'white',?,?,?,?,?)`,
 			db.NewID("slo"), studentID, in.Opponent,
-			strings.Join(in.Moves, " "), len(in.Moves), result, db.Nullable(in.Reason), started); err != nil {
+			strings.Join(in.Moves, " "), len(in.Moves), result, db.NullIfEmpty(in.Reason), started); err != nil {
 			httpx.Error(ctx, http.StatusInternalServerError, "could not record the game", err)
 			return
 		}
