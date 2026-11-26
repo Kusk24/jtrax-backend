@@ -662,7 +662,7 @@ func handleUntrackExternal(c *chessResultsDeps) http.HandlerFunc {
 
 /* ---- mount ---- */
 
-func mountChessResults(mux *http.ServeMux, d *sql.DB) *chessResultsDeps {
+func mountChessResults(mux routeRegistrar, d *sql.DB) *chessResultsDeps {
 	deps := &chessResultsDeps{db: d, client: chessresults.New(), lastFetch: map[int]time.Time{}}
 	if base := strings.TrimSpace(os.Getenv("CHESS_RESULTS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.

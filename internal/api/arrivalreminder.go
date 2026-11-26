@@ -552,7 +552,7 @@ func handleArrivalAnswer(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountArrival(mux *http.ServeMux, d *sql.DB, cfg mail.Config, sender mail.Sender) {
+func mountArrival(mux routeRegistrar, d *sql.DB, cfg mail.Config, sender mail.Sender) {
 	const a = "/api/v1/public/arrival/{id}"
 	mux.HandleFunc("POST "+a, httpx.RateLimit(30, handleArrival(d)))
 	mux.HandleFunc("POST "+a+"/answer", httpx.RateLimit(20, handleArrivalAnswer(d)))

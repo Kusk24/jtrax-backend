@@ -300,7 +300,7 @@ func handleDeskPayment(d *sql.DB, svc *notify.Service) http.HandlerFunc {
 	}
 }
 
-func mountDeskPayment(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
+func mountDeskPayment(mux routeRegistrar, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/desk-payment", handleDeskPayment(d, svc))
 	mux.HandleFunc("POST /api/v1/tournament-registrations/{id}/release", handleReleasePlace(d))
 }

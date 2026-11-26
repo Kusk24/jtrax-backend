@@ -481,7 +481,7 @@ func startedAt(white, black string) any {
 	return nil
 }
 
-func mountChallenges(mux *http.ServeMux, d *sql.DB, relay *lichessRelay) {
+func mountChallenges(mux routeRegistrar, d *sql.DB, relay *lichessRelay) {
 	// Searching names other children, so it needs a session and a budget: it is
 	// the one read here that could be used to walk the roster.
 	mux.HandleFunc("GET /api/v1/players/search", httpx.RateLimit(60, handleSearchPlayers(d)))

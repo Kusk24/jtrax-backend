@@ -64,7 +64,7 @@ func configValue(d *sql.DB, key string) string {
 	return value
 }
 
-func mountOCRSettings(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
+func mountOCRSettings(mux routeRegistrar, d *sql.DB, provider ocr.Provider) {
 	mux.HandleFunc("GET /api/v1/ocr", handleOCRGet(d, provider))
 	mux.HandleFunc("PUT /api/v1/ocr", handleOCRPut(d, provider))
 	// Each test is a real call to the provider and counts against the key's

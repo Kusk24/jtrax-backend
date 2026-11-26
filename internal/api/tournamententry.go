@@ -262,7 +262,7 @@ func handleEnterTournament(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountTournamentEntry(mux *http.ServeMux, d *sql.DB) {
+func mountTournamentEntry(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("POST /api/v1/tournaments/{id}/entries", handleEnterTournament(d))
 }
 

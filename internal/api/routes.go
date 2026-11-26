@@ -31,7 +31,12 @@ func NewHandlerWithMail(d *sql.DB, mailCfg mail.Config, sender mail.Sender) http
 // messages instead of delivering them, and an OCR provider that returns a fixed
 // reading instead of calling a paid API.
 func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) http.Handler {
-	mux := http.NewServeMux()
+	mux := newRouter()
+	registerRoutes(mux, d, mailCfg, sender, scanner)
+	return mux
+}
+
+func registerRoutes(mux routeRegistrar, d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner ocr.Provider) {
 	// Every answered call to the scan service is kept with its tokens, for
 	// the cost line in Settings (scancost.go).
 	scanner = recordScanUsage(d, scanner)
@@ -40,31 +45,7 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Every unauthenticated endpoint is rate-limited. Forgot-password gets the
-	// tightest budget of the three: each accepted call sends an email to
-	// someone else's inbox, so an unthrottled one is a way to use the academy's
-	// mail reputation to spam a third party.
-	// Sign-in is budgeted **per account**, inside the handler, not per IP.
-	//
-	// The portals call this API from their own servers, so every member of
-	// staff arrives from one address and an IP budget of ten a minute was ten
-	// tries for the whole academy — the eleventh person to sign in that minute
-	// was refused, and the console showed it as a wrong password. The remaining
-	// IP limit here is a flood guard set well above any real burst, not a
-	// per-person budget.
-	mux.HandleFunc("POST /api/v1/auth/login", httpx.RateLimit(120, handleLogin(d)))
-	// Forgot-password keeps a per-address budget for the same reason, since
-	// each accepted call sends mail to somebody else's inbox.
-	mux.HandleFunc("POST /api/v1/auth/forgot-password", httpx.RateLimit(60, handleForgotPassword(d, mailCfg, sender)))
-	mux.HandleFunc("POST /api/v1/auth/reset-password", httpx.RateLimit(10, handleResetPassword(d)))
-	mux.HandleFunc("POST /api/v1/auth/change-password", httpx.RateLimit(30, handleChangePassword(d)))
-	mux.HandleFunc("POST /api/v1/students/{id}/password", httpx.RateLimit(20, handleChildPassword(d, sender)))
-	mux.HandleFunc("GET /api/v1/students/{id}/login", handleChildLogin(d))
-	// Staff only: a new parent chooses their own password from this link.
-	mux.HandleFunc("POST /api/v1/user-accounts/{id}/invite", httpx.RateLimit(60, handleInvite(d, mailCfg, sender)))
-	mux.HandleFunc("POST /api/v1/auth/logout", handleLogout(d))
-	mux.HandleFunc("GET /api/v1/auth/me", handleMe(d))
-	mux.HandleFunc("PATCH /api/v1/auth/me", handleUpdateMe(d))
+	mountAuth(mux, d, mailCfg, sender)
 
 	// Built early: the desk's tournament fee and the notification endpoints
 	// below both send through it.
@@ -76,67 +57,60 @@ func NewHandlerWith(d *sql.DB, mailCfg mail.Config, sender mail.Sender, scanner 
 	browserPush := webpush.New(webpush.FromEnv())
 	notifier.SetWebPush(browserPush)
 
-	mountUserAccounts(mux, d)
+	mountPeople(mux, d)
+	mountChess(mux, d)
+	mountTournamentOperations(mux, d, mailCfg, sender, notifier)
+	mountRegistrationScan(mux, d, scanner)
+	mountIDCardScan(mux, d, scanner)
+	mountOCRSettings(mux, d, scanner)
+	mountLine(mux, d)
+	mountNotifications(mux, d, notifier, browserPush.PublicKey())
+	mountClassCancel(mux, d, notifier)
+	mountDashboardActivity(mux, d)
+	mountAcademyContact(mux, d)
+
+	resources := Registry()
+	attachNotificationHooks(resources, d, notifier)
+	for _, rs := range resources {
+		rs.mount(mux, d)
+	}
+}
+
+func mountChess(mux routeRegistrar, d *sql.DB) {
 	relay := mountGameRooms(mux, d)
 	mountChallenges(mux, d, relay)
 	mountPuzzles(mux, d)
-	mountCertificates(mux, d)
-	mountPaymentVoid(mux, d)
 	mountPuzzleBank(mux, d)
 	mountPractice(mux, d)
 	mountProgress(mux, d)
 	mountHistory(mux, d)
-	mountLine(mux, d)
 	mountLichess(mux, d)
-	// Chess-results first: the public results route refreshes through its deps.
-	crDeps := mountChessResults(mux, d)
-	mountTournamentResults(mux, d, crDeps)
-	// Read here rather than beside mountStripe: the public form needs to know
-	// whether card payment is on, to offer it and to email the pay link.
-	stripeCfg := stripepay.FromEnv()
-	stripeClient := stripepay.New(stripeCfg)
-	mountPublicRegistration(mux, &publicEntryDeps{
-		db: d, sender: sender, mail: mailCfg, stripe: stripeClient, stripeCfg: stripeCfg,
-		notifier: notifier,
-	})
-	mountArrival(mux, d, mailCfg, sender)
-	mountDashboardActivity(mux, d)
-	mountTournamentRegulation(mux, d)
-	mountTournamentBanner(mux, d)
-	mountAcademyContact(mux, d)
-	mountTournamentDraft(mux, d, stripeClient != nil)
-	mountRegistrationQueue(mux, d)
-	// A parent's own entry, priced by the server, and the desk recording a fee
-	// paid at the counter. Both are tournament-registration writes the generic
-	// resource must not make: one decides a price, the other asserts money.
-	mountTournamentEntry(mux, d)
-	mountDeskPayment(mux, d, notifier)
-	// Before the registry: `/students/{id}/cascade` is a more specific pattern
-	// than `/students/{id}`, so the two coexist either way, but keeping the
-	// bespoke mounts together says which is which.
+}
+
+func mountPeople(mux routeRegistrar, d *sql.DB) {
+	mountUserAccounts(mux, d)
 	mountPeopleCascade(mux, d)
 	mountMyData(mux, d)
-	// Reads a photographed paper form and hands the fields back for staff to
-	// confirm. Writes nothing, so it sits outside the registry.
-	mountRegistrationScan(mux, d, scanner)
-	mountIDCardScan(mux, d, scanner)
-	mountOCRSettings(mux, d, scanner)
+	mountCertificates(mux, d)
+}
 
-	// Notifications: the inbox and settings endpoints, plus the same service
-	// wired onto the attendance and announcement resources so a check-in or a
-	// new announcement turns into a notification through the existing writes.
-	mountNotifications(mux, d, notifier, browserPush.PublicKey())
-	// Calling a class off refunds it and tells the families, in one request.
-	mountClassCancel(mux, d, notifier)
-	// Card payments: a checkout link for a pending payment, and the webhook
-	// that settles it — and, through the notifier, sends the receipt. Off —
-	// including the webhook route — until the Stripe keys are in the
-	// environment.
-	mountStripe(mux, d, stripeClient, stripeCfg, notifier)
-	resources := Registry()
-	attachNotificationHooks(resources, d, notifier)
-	for _, rs := range resources {
-		rs.Mount(mux, d)
-	}
-	return mux
+func mountTournamentOperations(mux routeRegistrar, d *sql.DB, mailCfg mail.Config, sender mail.Sender, notifier *notify.Service) {
+	results := mountChessResults(mux, d)
+	mountTournamentResults(mux, d, results)
+	mountTournamentRegulation(mux, d)
+	mountTournamentBanner(mux, d)
+	mountRegistrationQueue(mux, d)
+	mountTournamentEntry(mux, d)
+	mountArrival(mux, d, mailCfg, sender)
+
+	// Public registration and the payment endpoints share the same checkout client.
+	cfg := stripepay.FromEnv()
+	client := stripepay.New(cfg)
+	mountTournamentDraft(mux, d, client != nil)
+	mountPublicRegistration(mux, &publicEntryDeps{
+		db: d, sender: sender, mail: mailCfg, stripe: client, stripeCfg: cfg, notifier: notifier,
+	})
+	mountDeskPayment(mux, d, notifier)
+	mountPaymentVoid(mux, d)
+	mountStripe(mux, d, client, cfg, notifier)
 }

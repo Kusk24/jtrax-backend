@@ -94,7 +94,7 @@ func handleRegistrationQueue(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountRegistrationQueue(mux *http.ServeMux, d *sql.DB) {
+func mountRegistrationQueue(mux routeRegistrar, d *sql.DB) {
 	const p = "/api/v1/tournaments"
 	mux.HandleFunc("GET "+p+"/{id}/registrations", handleRegistrationQueue(d))
 }

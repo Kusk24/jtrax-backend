@@ -223,7 +223,7 @@ func handleCertify(d *sql.DB) http.HandlerFunc {
 	}
 }
 
-func mountCertificates(mux *http.ServeMux, d *sql.DB) {
+func mountCertificates(mux routeRegistrar, d *sql.DB) {
 	mux.HandleFunc("GET /api/v1/students/{id}/certificates", handleStudentCertificates(d))
 	mux.HandleFunc("POST /api/v1/students/{id}/certificates", handleCertify(d))
 }

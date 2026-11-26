@@ -431,7 +431,7 @@ func recordListSolve(d *sql.DB, studentID, puzzleID string) {
 	}
 }
 
-func mountPuzzleList(mux *http.ServeMux, d *sql.DB, lc *lichess.Client) {
+func mountPuzzleList(mux routeRegistrar, d *sql.DB, lc *lichess.Client) {
 	mux.HandleFunc("GET /api/v1/puzzles/list", httpx.RateLimit(30, handlePuzzleList(d, lc)))
 	mux.HandleFunc("POST /api/v1/puzzles/list/{id}/open", handleListOpen(d))
 	mux.HandleFunc("POST /api/v1/puzzles/list/{id}/attempt", handleListAttempt(d))

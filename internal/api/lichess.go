@@ -644,7 +644,7 @@ func handleLichessHistory(l *lichessDeps) http.HandlerFunc {
 
 /* ---- mount ---- */
 
-func mountLichess(mux *http.ServeMux, d *sql.DB) {
+func mountLichess(mux routeRegistrar, d *sql.DB) {
 	deps := &lichessDeps{db: d, client: lichess.New(), oauth: lichessOAuthFromEnv(d)}
 	if base := strings.TrimSpace(os.Getenv("LICHESS_API_BASE")); base != "" {
 		// A seam for tests and for a deployment behind an egress proxy.

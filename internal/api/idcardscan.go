@@ -36,7 +36,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/ocr"
 )
 
-func mountIDCardScan(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
+func mountIDCardScan(mux routeRegistrar, d *sql.DB, provider ocr.Provider) {
 	mux.HandleFunc("POST /api/v1/public/tournaments/{id}/scan-id",
 		httpx.RateLimit(5, handleScanIDCard(d, provider)))
 	// The parent portal's own scan, for one of the caller's children.

@@ -23,7 +23,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 )
 
-func mountClassCancel(mux *http.ServeMux, d *sql.DB, svc *notify.Service) {
+func mountClassCancel(mux routeRegistrar, d *sql.DB, svc *notify.Service) {
 	mux.HandleFunc("POST /api/v1/class-sessions/{id}/cancel", handleCancelClass(d, svc))
 }
 

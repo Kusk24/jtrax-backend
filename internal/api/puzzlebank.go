@@ -10,7 +10,6 @@ package api
 
 import (
 	"database/sql"
-	"net/http"
 
 	"github.com/Kusk24/jtrax-backend/internal/lichess"
 	"github.com/Kusk24/jtrax-backend/internal/puzzle"
@@ -59,6 +58,6 @@ func topUpBank(d *sql.DB, lc *lichess.Client, t tier) error {
 	return err
 }
 
-func mountPuzzleBank(mux *http.ServeMux, d *sql.DB) {
+func mountPuzzleBank(mux routeRegistrar, d *sql.DB) {
 	mountPuzzleList(mux, d, newPuzzleClient())
 }

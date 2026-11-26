@@ -67,7 +67,7 @@ func sniffImage(data []byte) string {
 	return http.DetectContentType(data)
 }
 
-func mountRegistrationScan(mux *http.ServeMux, d *sql.DB, provider ocr.Provider) {
+func mountRegistrationScan(mux routeRegistrar, d *sql.DB, provider ocr.Provider) {
 	// Rate-limited even though it is authenticated: every call costs money at
 	// the provider, so a stuck client retrying is a bill as well as load.
 	mux.HandleFunc("POST /api/v1/registrations/scan",

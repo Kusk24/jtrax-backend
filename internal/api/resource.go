@@ -584,6 +584,10 @@ func (rs *Resource) handleDelete(d *sql.DB) http.HandlerFunc {
 
 // Mount registers the five routes for a resource on the mux.
 func (rs *Resource) Mount(mux *http.ServeMux, d *sql.DB) {
+	rs.mount(mux, d)
+}
+
+func (rs *Resource) mount(mux routeRegistrar, d *sql.DB) {
 	base := "/api/v1/" + rs.Name
 	mux.HandleFunc("GET "+base, rs.handleList(d))
 	mux.HandleFunc("POST "+base, rs.handleCreate(d))

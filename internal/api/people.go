@@ -230,7 +230,7 @@ func childrenOf(q interface {
 	return ids, rows.Err()
 }
 
-func mountPeopleCascade(mux *http.ServeMux, d *sql.DB) {
+func mountPeopleCascade(mux routeRegistrar, d *sql.DB) {
 	// DELETE /api/v1/students/{id}/cascade[?parent=orphan]
 	//
 	// `parent=orphan` also removes the guardian when this was their only child —
