@@ -15,6 +15,7 @@ import (
 
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 )
 
 // windowLayout is how show_from and show_until are written.
@@ -114,16 +115,7 @@ func RunAnnouncementScheduleFor(d *sql.DB, svc *notify.Service, annID, now strin
 
 // StartAnnouncementSchedule runs RunAnnouncementSchedule every minute.
 func StartAnnouncementSchedule(ctx context.Context, d *sql.DB, svc *notify.Service) {
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			RunAnnouncementSchedule(d, svc, AcademyMinute())
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
+	schedule.Start(ctx, time.Minute, func() {
+		RunAnnouncementSchedule(d, svc, AcademyMinute())
+	})
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/families"
 	"github.com/Kusk24/jtrax-backend/internal/records"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 )
 
 // RefuseBooking keeps a booking to a class that has not started, has not
@@ -100,20 +101,11 @@ const startEvery = time.Minute
 // StartClassStarts runs RunClassStarts every minute until ctx ends. Started
 // by the server, not by NewHandler, so tests control when it runs.
 func StartClassStarts(ctx context.Context, d *sql.DB) {
-	go func() {
-		ticker := time.NewTicker(startEvery)
-		defer ticker.Stop()
-		for {
-			if err := RunClassStarts(d, academytime.Now()); err != nil {
-				log.Printf("class starts: %v", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	schedule.Start(ctx, startEvery, func() {
+		if err := RunClassStarts(d, academytime.Now()); err != nil {
+			log.Printf("class starts: %v", err)
 		}
-	}()
+	})
 }
 
 // RunClassStarts marks a Scheduled class that has started by `now` as

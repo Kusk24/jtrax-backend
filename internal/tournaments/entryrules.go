@@ -26,6 +26,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/academytime"
 	"github.com/Kusk24/jtrax-backend/internal/db"
 	"github.com/Kusk24/jtrax-backend/internal/fees"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 )
 
 // sweepEvery is how often the timer runs the rules. The dates are whole days,
@@ -36,21 +37,12 @@ const sweepEvery = 15 * time.Minute
 // ctx ends. Started by the server, not by NewHandler, so tests control when
 // the rules run.
 func StartEntrySweeper(ctx context.Context, d *sql.DB) {
-	go func() {
-		ticker := time.NewTicker(sweepEvery)
-		defer ticker.Stop()
-		for {
-			if err := sweepUnpaidEntries(d, academytime.Today()); err != nil {
-				log.Printf("entry rules: %v", err)
-			}
-			logTournamentStatus(d)
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	schedule.Start(ctx, sweepEvery, func() {
+		if err := sweepUnpaidEntries(d, academytime.Today()); err != nil {
+			log.Printf("entry rules: %v", err)
 		}
-	}()
+		logTournamentStatus(d)
+	})
 }
 
 // unpaid is the SQL for "no payment against this entry has been made":

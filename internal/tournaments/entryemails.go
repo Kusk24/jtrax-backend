@@ -30,6 +30,7 @@ import (
 	"github.com/Kusk24/jtrax-backend/internal/entrymail"
 	"github.com/Kusk24/jtrax-backend/internal/notify"
 	"github.com/Kusk24/jtrax-backend/internal/payments"
+	"github.com/Kusk24/jtrax-backend/internal/schedule"
 	"github.com/Kusk24/jtrax-backend/internal/stripepay"
 )
 
@@ -67,18 +68,9 @@ func emailHours(now time.Time) bool {
 // StartEntryNotices runs RunEntryNotices on a timer until ctx ends. Started
 // by the server, not by NewHandler, so tests control when it runs.
 func StartEntryNotices(ctx context.Context, d *sql.DB, client stripepay.CheckoutGateway, svc *notify.Service) {
-	go func() {
-		ticker := time.NewTicker(noticeEvery)
-		defer ticker.Stop()
-		for {
-			RunEntryNotices(ctx, d, client, svc, academytime.Now())
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
+	schedule.Start(ctx, noticeEvery, func() {
+		RunEntryNotices(ctx, d, client, svc, academytime.Now())
+	})
 }
 
 // RunEntryNotices sends whatever is due at `now`: the failed-payment notice,
