@@ -1,87 +1,72 @@
-# jtrax-backend
+# JTrax backend
 
-Go REST API for JTrax (chess-school management): session auth and role-scoped
-CRUD over every entity in the ER model, served under `/api/v1`.
+JTrax is the Go API for the chess school's admin, family, and student applications. It runs as one service with one SQLite database. Gin serves the HTTP API under `/api/v1`. Background jobs run in the same process.
 
-Storage is SQLite — a local file in development, a [Turso](https://turso.tech)
-database in deployment. Both speak the same dialect, so queries and migrations
-are identical either way. Gin routes requests to the feature handlers.
+## Run locally
 
-## Run
+Install Go 1.26 or later. From the repository root, start the API on the port the local portals expect.
 
 ```sh
-PORT=8790 go run ./cmd/server        # http://localhost:8790/health
+PORT=8790 go run ./cmd/server
 ```
 
-That creates `jtrax.db` in the working directory, applies the migrations, and
-seeds the development dataset (Sandy and her children Penny and Uri, Ms.
-Serene, the Beginner/Intermediate classes, the Wellington tournament). Every
-seeded account signs in with `jtrax-dev-1234`.
-
-**Set `PORT`.** The server's own default is `8080`, but `jtrax-admin` and
-`jtrax-web-app` both call `8790` unless `JTRAX_API_URL` says otherwise. Start it
-without `PORT` and the two halves come up healthy, log nothing unusual, and
-never reach each other — `curl localhost:8080/health` returns `{"status":"ok"}`
-while every console page reports the backend unreachable.
-
-Requires Go 1.26+. Configuration is entirely environment-driven — copy
-`.env.example` to `.env` to override anything.
-
-## Test
+In another terminal, check that the server answers.
 
 ```sh
-go test ./...
+curl -fsS http://localhost:8790/health
+# {"status":"ok"}
 ```
 
-Integration tests build the full schema and drive the API over HTTP, covering
-auth, per-role tenancy scoping, and enum validation.
+The first run creates `jtrax.db`, applies the migrations, and seeds a fresh local database with demo accounts and school records. For a local admin sign-in, use `admin@jca.ac.th` and `jtrax-dev-1234`.
 
-## Backend design
-
-JTrax deploys one Go server and uses one database. Follow a request from
-`internal/api/routes.go` into the package for its school workflow. Scheduled
-jobs enter the same packages from `cmd/server/main.go`.
-
-| Where to look | Responsibility |
+| Setting | How the server uses it |
 | --- | --- |
-| `internal/api`, `internal/records` | Gin routing, the central resource registry, and shared CRUD handlers |
-| `internal/accounts`, `internal/families`, `internal/classroom` | Account access, pupil and family records, attendance and class operations |
-| `internal/payments`, `internal/fees` | Payment corrections, credit accounting, checkout and tournament fee calculations |
-| `internal/tournaments`, `internal/entrymail`, `internal/entrylinks` | Event registration, results, entry correspondence and payment links |
-| `internal/chessplay`, `internal/studenthistory` | Rooms, challenges, puzzle practice, progress and the student timeline |
-| `internal/communications`, `internal/lineinbox` | Notifications, delivery preferences and LINE inbox operations |
-| `internal/academy`, `internal/forms`, `internal/retention` | Dashboard and contact information, document scanning and retention jobs |
+| `PORT` | Defaults to `8080`. The local web and admin apps expect `8790` unless their `JTRAX_API_URL` points elsewhere. |
+| `DATABASE_URL`, `JTRAX_DB` | The first nonempty value selects the database, in that order. The fallback is `jtrax.db` in the working directory. |
+| `JTRAX_SEED`, `JTRAX_SEED_PASSWORD` | Seeding demo accounts on a remote libSQL database requires `JTRAX_SEED=1` and an explicit password. Existing accounts cause the demo seed to skip. |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins. Defaults to `http://localhost:3000` and `http://localhost:3001`. |
 
-For a worked example, read `internal/payments/paymentvoid.go` and
-`internal/payments/void.go`. The handler authenticates the administrator,
-validates the reason, and maps the result to the public response. The workflow
-owns the transaction that updates the payment, reverses credits, checks the
-enrolment and writes the audit record. Its rollback test lives beside it.
-Class cancellation in `internal/classroom/classcancel.go` also shows where to
-send notifications after a successful commit.
+The server reads its process environment. For optional integrations, choose the settings you need from [.env.example](.env.example) and export them in the shell or set them in the process manager before startup.
 
-Keep simple reads alongside their handlers. Put multi-step school rules and
-their transaction in the owning feature. The registry in
-`internal/api/registry.go` lists the resource groups. The corresponding
-`registry_*.go` files define their CRUD permissions, row scopes and hooks.
-External capabilities such as Stripe checkout, mail delivery, OCR, Lichess
-puzzles and tournament results have interfaces at their integration boundaries.
+## How the backend is organized
 
-Features register routes with Gin and receive a `*gin.Context`. CORS and
-per-route rate limits run as Gin middleware. Use `internal/httpx` for the
-school API’s JSON format and strict request decoding. Gin dispatches HEAD
-requests and escaped paths to the same handlers as GET and ordinary paths.
-The router uses Go’s standard HTTP errors and canonical redirects to preserve
-existing client behavior. The integration suite in `internal/api` exercises
-the full handler with a temporary database.
+The monolith is organized by school feature. Start at [route registration](internal/api/routes.go) to find the package that owns an endpoint, or at [job registration](cmd/server/jobs.go) to find the feature that owns a scheduled task.
 
-## Deploy
+| Responsibility | Packages under `internal/` |
+| --- | --- |
+| HTTP routing, request decoding, session authentication, shared CRUD | [api](internal/api), [httpx](internal/httpx), [auth](internal/auth), [records](internal/records) |
+| Account access, families, classes, academy settings and forms | [accounts](internal/accounts), [families](internal/families), [classroom](internal/classroom), [academy](internal/academy), [forms](internal/forms) |
+| Payments, credits, fees, Stripe and entry payment links | [payments](internal/payments), [fees](internal/fees), [stripepay](internal/stripepay), [entrylinks](internal/entrylinks) |
+| Tournament entry, correspondence, published results and standings | [tournaments](internal/tournaments), [entrymail](internal/entrymail), [chessresults](internal/chessresults), [standings](internal/standings) |
+| Games, puzzles, Lichess, live updates and student history | [chessplay](internal/chessplay), [game](internal/game), [puzzle](internal/puzzle), [lichess](internal/lichess), [liveevents](internal/liveevents), [studenthistory](internal/studenthistory) |
+| School communications, LINE inbox and message delivery | [communications](internal/communications), [lineinbox](internal/lineinbox), [line](internal/line), [notify](internal/notify), [mail](internal/mail), [push](internal/push), [webpush](internal/webpush) |
+| Storage and migrations, school time, scheduled work, retention, OCR and encryption | [db](internal/db), [academytime](internal/academytime), [schedule](internal/schedule), [retention](internal/retention), [ocr](internal/ocr), [secretbox](internal/secretbox) |
 
-Render (Docker) plus Turso, both on free plans — see
-[docs/deployment.md](docs/deployment.md) for the full runbook and the
-free-tier constraints worth knowing about.
+### Where to make a change
 
-## Docs
+- **Add or change a standard resource.** Find its group in the [resource registry](internal/api/registry.go). The group's definition declares fields, role permissions, row scopes, and hooks. The [shared write code](internal/records/write.go) applies the database change and its transactional hooks together.
+- **Change a school workflow.** Keep a simple read in its feature handler. For a multi-step change, use a transaction script in the same package. For example, the [payment void handler](internal/payments/paymentvoid.go) validates the request and writes the response. The [void workflow](internal/payments/void.go) coordinates the payment, credits, enrolment, and audit record in one transaction.
+- **Change a public view.** The [tournament results handler](internal/tournaments/publicresults.go) checks publication, selects the results source, and maps it to the response the portals consume. Exercise published and unpublished events when changing this path.
+- **Change a background job.** Look up its startup in [jobs.go](cmd/server/jobs.go), then edit the work in its feature package. Jobs that run immediately and then at a fixed interval share the [scheduler](internal/schedule).
 
-Cross-repo knowledge lives in the vault at `../jtrax-docs`; house rules are in
-`../CLAUDE.md`.
+## Commands and verification
+
+| Command | Purpose |
+| --- | --- |
+| [server](cmd/server) | Starts the API and school background jobs. |
+| [importpuzzles](cmd/importpuzzles) | Imports Lichess puzzle CSV from standard input. Run `go run ./cmd/importpuzzles -h` for rating, move, limit, and database options. |
+| [vapidkeys](cmd/vapidkeys) | Generates a VAPID key pair when provisioning browser push. Keep the private key with the deployment secrets. |
+
+```sh
+go test -count=1 ./...
+go vet ./...
+go build ./cmd/...
+```
+
+The [API integration suite](internal/api) drives Gin against temporary databases. Run it when changing routes, status codes, JSON fields, role permissions, or database hooks. Package tests cover feature rules and integrations.
+
+## Deployment and backups
+
+Production runs on AWS Lightsail behind nginx. The API uses a local SQLite file, and Litestream replicates it to S3. Use the [production runbook](https://github.com/Kusk24/jtrax-docs/blob/main/ops/jtrax-on-lightsail.md) for deployment and the [backup and restore runbook](https://github.com/Kusk24/jtrax-docs/blob/main/ops/backups-with-litestream.md) for recovery. The [Litestream configuration and restore check](deploy) live in this repository.
+
+The [Render and Turso guide](docs/deployment.md) documents the previous hosting arrangement.

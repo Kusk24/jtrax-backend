@@ -1,10 +1,4 @@
-# Render blueprint. Create the service from this file with Blueprints > New,
-# then set the two secret values (marked sync: false) in the dashboard.
-#
-# The free plan spins the service down after 15 minutes idle and a cold start
-# takes 30-60s, which is longer than Vercel will wait. .github/workflows/
-# keep-alive.yml pings /health every 10 minutes to prevent that; see
-# docs/deployment.md for why that still fits inside the free instance hours.
+# Legacy Render blueprint. Production deployment is documented in README.md.
 
 services:
   - type: web
